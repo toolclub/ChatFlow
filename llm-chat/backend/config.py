@@ -2,8 +2,9 @@
 集中管理所有配置，方便后续调整。
 """
 
-# ── Ollama 服务 ──
-OLLAMA_BASE_URL = "http://localhost:11434"
+# ── LLM 服务（OpenAI 兼容格式） ──
+API_BASE_URL = "http://localhost:11434/v1"
+API_KEY = "ollama"  # Ollama 不验证 key，随便填
 
 # ── 模型配置 ──
 CHAT_MODEL = "qwen2.5:14b"           # 对话主模型

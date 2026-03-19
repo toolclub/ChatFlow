@@ -1,0 +1,42 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+*.so
+venv/
+.venv/
+env/
+.env
+*.env.local
+
+# ===== Node / Frontend =====
+node_modules/
+dist/
+.cache/
+*.tsbuildinfo
+
+# ===== IDE =====
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== Project specific =====
+# 对话历史不上库
+llm-chat/backend/conversations/*.json
+
+# 可执行文件
+*.exe
+
+# Claude Code 本地配置
+.claude/settings.local.json
