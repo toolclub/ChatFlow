@@ -1,17 +1,19 @@
 """
-Layer 1 – Prompt
-System prompts, personas, and prompt-template builders.
+第 1 层 – Prompt（提示）
+系统提示、人格设定及提示模板构建工具。
+author: leizihao
+email: lzh19162600626@gmail.com
 """
 from config import DEFAULT_SYSTEM_PROMPT, SUMMARY_SYSTEM_PROMPT, MAX_SUMMARY_LENGTH
 
 
 def ensure_system_prompt(raw: str) -> str:
-    """Return raw prompt or fall back to the default."""
+    """返回原始提示，若为空则回退到默认提示。"""
     return raw.strip() if raw and raw.strip() else DEFAULT_SYSTEM_PROMPT
 
 
 def build_summary_messages(history_text: str, existing_summary: str) -> list[dict]:
-    """Build the message list sent to the summary model."""
+    """构建发送给摘要模型的消息列表。"""
     return [
         {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
         {

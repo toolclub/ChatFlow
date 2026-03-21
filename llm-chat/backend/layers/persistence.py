@@ -1,7 +1,9 @@
 """
-Layer 7 – Persistence
-Checkpoint: save, load, and delete Conversation state to/from disk.
-Acts as the durable store that survives process restarts.
+第 7 层 – Persistence（持久化）
+检查点：将 Conversation 状态保存到磁盘、从磁盘加载或删除。
+作为可在进程重启后存活的持久化存储。
+author: leizihao
+email: lzh19162600626@gmail.com
 """
 import json
 import os
@@ -43,7 +45,7 @@ def load_all() -> dict[str, Conversation]:
         try:
             with open(filepath, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            # backward compat: old files used "short_term" key
+            # 向后兼容：旧版文件使用 "short_term" 键
             raw_msgs = data.get("messages") or data.get("short_term", [])
             conv = Conversation(
                 id=data["id"],

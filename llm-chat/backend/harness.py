@@ -1,17 +1,17 @@
 """
-Agent Harness
-Wires all 9 layers together and exposes a single façade used by main.py.
+Agent Harness（代理总线）
+将全部 9 层连接起来，向 main.py 暴露一个统一的外观接口。
 
-Layer map (OS analogy):
-  1. Prompt      → layers.prompt        (personality / templates)
-  2. Capability  → layers.capability    (tools: models, embeddings)
-  3. Memory      → layers.memory        (data structures: Message, Conversation)
-  4. Runtime     → layers.runtime       (agent loop: stream / sync)
-  5. State       → layers.state         (working memory: in-process store)
-  6. Context     → layers.context       (message assembly + compression trigger)
-  7. Persistence → layers.persistence   (disk checkpoint: save/load/delete)
-  8. Verification→ layers.verification  (logging / observability)
-  9. Extension   → layers.extension     (applied in main.py: CORS, plugins)
+层级映射（类比操作系统）：
+  1. Prompt      → layers.prompt        （人格 / 提示模板）
+  2. Capability  → layers.capability    （工具：模型列表、嵌入向量）
+  3. Memory      → layers.memory        （数据结构：Message、Conversation）
+  4. Runtime     → layers.runtime       （代理循环：流式 / 同步调用）
+  5. State       → layers.state         （工作记忆：进程内存储）
+  6. Context     → layers.context       （消息组装 + 压缩触发）
+  7. Persistence → layers.persistence   （磁盘检查点：保存/加载/删除）
+  8. Verification→ layers.verification  （日志 / 可观测性）
+  9. Extension   → layers.extension     （在 main.py 中应用：CORS、插件）
 """
 from typing import Optional, AsyncGenerator
 
@@ -20,16 +20,17 @@ from layers.memory import Conversation, Message
 from layers.state import StateManager
 from layers import context, persistence, prompt, verification
 from layers.runtime import stream as _runtime_stream, call_sync
+from layers import longterm
 
 
 class AgentHarness:
     def __init__(self):
-        # Layer 5 – State: working memory
+        # 第 5 层 – State：工作记忆
         self.state = StateManager()
-        # Layer 7 – Persistence: restore checkpoints from disk on startup
+        # 第 7 层 – Persistence：启动时从磁盘恢复检查点
         self.state.load_from(persistence.load_all())
 
-    # ── Conversation CRUD ──────────────────────────────────────────────────
+    # ── 对话 CRUD ──────────────────────────────────────────────────────────
 
     def create_conversation(
         self,
@@ -40,14 +41,14 @@ class AgentHarness:
         conv = Conversation(
             id=conv_id,
             title=title,
-            system_prompt=prompt.ensure_system_prompt(system_prompt),  # Layer 1
+            system_prompt=prompt.ensure_system_prompt(system_prompt),  # 第 1 层
         )
-        self.state.set(conv)           # Layer 5
-        persistence.save(conv)         # Layer 7
+        self.state.set(conv)           # 第 5 层
+        persistence.save(conv)         # 第 7 层
         return conv
 
     def get_conversation(self, conv_id: str) -> Optional[Conversation]:
-        return self.state.get(conv_id)  # Layer 5
+        return self.state.get(conv_id)  # 第 5 层
 
     def list_conversations(self) -> list[dict]:
         return sorted(
@@ -60,73 +61,95 @@ class AgentHarness:
         )
 
     def delete_conversation(self, conv_id: str) -> None:
-        self.state.remove(conv_id)      # Layer 5
-        persistence.delete(conv_id)     # Layer 7
+        self.state.remove(conv_id)      # 第 5 层
+        persistence.delete(conv_id)     # 第 7 层
 
     def add_message(self, conv_id: str, role: str, content: str) -> None:
         conv = self.state.get(conv_id)
         if not conv:
             return
-        conv.messages.append(Message(role=role, content=content))  # Layer 3
+        conv.messages.append(Message(role=role, content=content))  # 第 3 层
         if conv.title == "新对话" and role == "user":
             conv.title = content[:30] + ("..." if len(content) > 30 else "")
-        persistence.save(conv)          # Layer 7
+        persistence.save(conv)          # 第 7 层
 
-    def _save(self, conv: Conversation) -> None:
-        """Compatibility shim – direct persistence save (used by PATCH endpoint)."""
-        persistence.save(conv)          # Layer 7
+    @staticmethod
+    def _save(conv: Conversation) -> None:
+        """兼容性封装——直接调用持久化保存（供 PATCH 接口使用）。"""
+        persistence.save(conv)          # 第 7 层
 
-    # ── Context assembly (Layer 6) ─────────────────────────────────────────
+    # ── 上下文组装（第 6 层）──────────────────────────────────────────────
 
-    def build_messages(self, conv: Conversation) -> list[dict]:
-        return context.build_messages(conv)
+    @staticmethod
+    def gen_chat_msg(
+            conv: Conversation,
+        long_term_memories: list[str] | None = None,
+    ) -> list[dict]:
+        return context.build_messages(conv, long_term_memories)
 
-    # ── Runtime: streaming chat (Layer 4) ─────────────────────────────────
+    # ── 长期记忆（第 3b 层）──────────────────────────────────────────────
 
+    async def search_long_term(self, conv_id: str, query: str) -> list[str]:
+        """检索与 query 最相关的历史 Q&A 对。"""
+        return await longterm.search_memories(conv_id, query)
+
+    async def store_long_term(
+        self, conv_id: str, user_msg: str, assistant_msg: str
+    ) -> None:
+        """将刚完成的一轮对话存入长期记忆。user 消息是 conv.messages[-2]。"""
+        conv = self.state.get(conv_id)
+        if not conv:
+            return
+        # user 消息在 assistant 之前，assistant 刚被 add_message 加入，所以 user 在 -2
+        user_idx = len(conv.messages) - 2
+        await longterm.store_pair(conv_id, user_msg, assistant_msg, user_idx)
+
+    # ── 运行时：流式对话（第 4 层）────────────────────────────────────────
+
+    @staticmethod
     async def chat_stream(
-        self,
-        model: str,
+            model: str,
         messages: list[dict],
         temperature: float = 0.7,
     ) -> AsyncGenerator[str, None]:
-        verification.log_chat("stream", model)  # Layer 8
+        verification.log_chat("stream", model)  # 第 8 层
         async for chunk in _runtime_stream(model=model, messages=messages, temperature=temperature):
             yield chunk
 
-    # ── Context compression (Layer 6 + 4 + 3 + 1) ─────────────────────────
+    # ── 上下文压缩（第 6 + 4 + 3 + 1 层）─────────────────────────────────
 
     async def maybe_compress(self, conv_id: str) -> bool:
         conv = self.state.get(conv_id)
-        if not conv or not context.should_compress(conv):   # Layer 6
+        if not conv or not context.should_compress(conv):   # 第 6 层
             return False
 
-        # Layer 6 – Context: identify new messages to summarise (cursor → window start)
+        # 第 6 层 – Context：确定需要摘要的新消息（游标 → 滑动窗口起点）
         to_summarise, new_cursor = context.slice_for_compression(conv)
         if not to_summarise:
             return False
 
-        # Layer 1 – Prompt: build summary template
+        # 第 1 层 – Prompt：构建摘要提示模板
         history_text = "\n".join(
             f"{'用户' if m.role == 'user' else 'AI'}: {m.content}"
             for m in to_summarise
         )
         compress_messages = prompt.build_summary_messages(history_text, conv.mid_term_summary)
 
-        # Layer 4 – Runtime: call summary model synchronously
+        # 第 4 层 – Runtime：同步调用摘要模型
         new_summary = await call_sync(
             model=SUMMARY_MODEL,
             messages=compress_messages,
             temperature=0.2,
         )
 
-        # Layer 3 – Memory: update summary and advance cursor; messages untouched
+        # 第 3 层 – Memory：更新摘要并推进游标；消息列表保持不变
         conv.mid_term_summary = new_summary.strip()
         conv.mid_term_cursor = new_cursor
 
-        # Layer 7 – Persistence: checkpoint
+        # 第 7 层 – Persistence：写入检查点
         persistence.save(conv)
 
-        # Layer 8 – Verification: log
+        # 第 8 层 – Verification：记录日志
         window_count = len(conv.messages) - new_cursor
         verification.log_compression(
             conv_id, len(to_summarise), window_count, len(conv.mid_term_summary)
@@ -134,5 +157,5 @@ class AgentHarness:
         return True
 
 
-# Global singleton
+# 全局单例
 harness = AgentHarness()

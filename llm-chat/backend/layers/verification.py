@@ -1,6 +1,8 @@
 """
-Layer 8 – Verification
-Logging and observability helpers.
+第 8 层 – Verification（验证）
+日志记录与可观测性辅助工具。
+author: leizihao
+email: lzh19162600626@gmail.com
 """
 import logging
 

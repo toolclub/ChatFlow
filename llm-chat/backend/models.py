@@ -1,3 +1,7 @@
+"""
+author: leizihao
+email: lzh19162600626@gmail.com
+"""
 from pydantic import BaseModel
 from typing import Optional
 

@@ -1,14 +1,16 @@
 """
-Layer 5 – State
-Working memory: holds all active Conversation objects in-process.
-Analogous to RAM / OS process state – lives only while the server is running.
+第 5 层 – State（状态）
+工作记忆：在进程内保存所有活跃的 Conversation 对象。
+类比操作系统的内存 / 进程状态——仅在服务运行期间存在。
+author: leizihao
+email: lzh19162600626@gmail.com
 """
 from typing import Optional
 from layers.memory import Conversation
 
 
 class StateManager:
-    """In-memory store for runtime conversation state."""
+    """运行时对话状态的内存存储。"""
 
     def __init__(self):
         self._store: dict[str, Conversation] = {}
@@ -26,5 +28,5 @@ class StateManager:
         return list(self._store.values())
 
     def load_from(self, conversations: dict[str, Conversation]) -> None:
-        """Bulk-load conversations recovered from persistent storage."""
+        """批量加载从持久化存储中恢复的对话。"""
         self._store.update(conversations)

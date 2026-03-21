@@ -1,6 +1,8 @@
 """
-Layer 2 – Capability
-Tools available to the agent: model listing, embeddings (RAG-ready).
+第 2 层 – Capability（能力）
+代理可调用的工具：模型列表查询、嵌入向量生成（支持 RAG）。
+author: leizihao
+email: lzh19162600626@gmail.com
 """
 from ollama_client import list_models as _list_models, get_embedding as _get_embedding
 

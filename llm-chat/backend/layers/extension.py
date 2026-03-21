@@ -1,6 +1,8 @@
 """
-Layer 9 – Extension
-CORS middleware, plugin hooks, future gateway / multi-channel support.
+第 9 层 – Extension（扩展）
+CORS 中间件、插件钩子，以及未来的网关 / 多渠道支持。.
+author: leizihao
+email: lzh19162600626@gmail.com
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

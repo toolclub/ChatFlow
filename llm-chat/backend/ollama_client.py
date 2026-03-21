@@ -1,3 +1,7 @@
+"""
+author: leizihao
+email: lzh19162600626@gmail.com
+"""
 import httpx
 import json
 from typing import AsyncGenerator
