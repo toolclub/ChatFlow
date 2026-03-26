@@ -22,3 +22,4 @@ class Conversation:
     mid_term_cursor: int = 0                                # messages[:cursor] 已完成摘要
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    client_id: str = ""                                     # 浏览器唯一标识（localStorage 生成）

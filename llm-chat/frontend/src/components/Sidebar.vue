@@ -8,6 +8,7 @@ import {
 const props = defineProps<{
   conversations: ConversationInfo[]
   currentConvId: string | null
+  activeConvIds?: Set<string>
 }>()
 
 const emit = defineEmits<{
@@ -42,9 +43,10 @@ function doDelete(id: string) {
     <!-- Logo -->
     <div class="sidebar-logo">
       <div class="logo-icon">
-        <svg width="15" height="15" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M36 8L22 34H31L28 56L46 28H36Z" fill="white"/>
-          <circle cx="46" cy="18" r="4" fill="#c7d2fe" opacity="0.8"/>
+        <!-- 星光 sparkle — ChatGPT 同款极简风 -->
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+          <path d="M12 3C12 3 13 8.5 17 10C13 11.5 12 17 12 17C12 17 11 11.5 7 10C11 8.5 12 3 12 3Z" fill="#111827"/>
+          <path d="M19 3C19 3 19.5 5.5 21.5 6.5C19.5 7.5 19 10 19 10C19 10 18.5 7.5 16.5 6.5C18.5 5.5 19 3 19 3Z" fill="#111827" opacity="0.35"/>
         </svg>
       </div>
       <span class="logo-text">ChatFlow</span>
@@ -99,6 +101,7 @@ function doDelete(id: string) {
       >
         <el-icon class="conv-icon"><ChatDotRound /></el-icon>
         <span class="conv-title">{{ conv.title }}</span>
+        <span v-if="props.activeConvIds?.has(conv.id) && conv.id !== currentConvId" class="conv-active-dot" title="后台生成中"></span>
 
         <!-- 删除操作 -->
         <div class="conv-actions" @click.stop>
@@ -149,12 +152,13 @@ function doDelete(id: string) {
   width: 30px;
   height: 30px;
   border-radius: 8px;
-  background: linear-gradient(135deg, #312e81 0%, #6366f1 100%);
+  background: #ffffff;
+  border: 1.5px solid #e5e7eb;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.08), 0 0 0 0 transparent;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  box-shadow: 0 2px 8px rgba(99,102,241,0.35);
 }
 .logo-text {
   font-size: 15px;
@@ -166,12 +170,12 @@ function doDelete(id: string) {
   margin-left: auto;
   font-size: 9px;
   font-weight: 700;
-  letter-spacing: 0.5px;
-  background: var(--cf-active);
-  color: var(--cf-indigo);
+  letter-spacing: 0.8px;
+  background: #f4f4f5;
+  color: #52525b;
   padding: 2px 6px;
   border-radius: 4px;
-  border: 1px solid #c7d2fe;
+  border: 1px solid #e4e4e7;
 }
 
 /* 新对话 */
@@ -182,14 +186,17 @@ function doDelete(id: string) {
   width: 100%;
   font-weight: 500;
   border-radius: var(--cf-radius-sm) !important;
-  background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%) !important;
-  border: none !important;
-  box-shadow: 0 2px 8px rgba(99,102,241,0.3) !important;
-  transition: all 0.2s !important;
+  background: #ffffff !important;
+  border: 1.5px solid #e5e7eb !important;
+  color: #111827 !important;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06) !important;
+  transition: all 0.18s !important;
 }
 .new-chat-btn:hover {
+  background: #f9fafb !important;
+  border-color: #d1d5db !important;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08) !important;
   transform: translateY(-1px);
-  box-shadow: 0 4px 16px rgba(99,102,241,0.4) !important;
 }
 
 /* 搜索 */
@@ -296,6 +303,22 @@ function doDelete(id: string) {
 .del-icon:hover {
   color: var(--cf-red);
   background: #fee2e2;
+}
+
+/* 后台流活跃指示器 */
+.conv-active-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #6366f1;
+  flex-shrink: 0;
+  animation: conv-pulse 1.2s ease-in-out infinite;
+  box-shadow: 0 0 0 0 rgba(99,102,241,0.4);
+}
+@keyframes conv-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(99,102,241,0.4); opacity: 1; }
+  70% { box-shadow: 0 0 0 5px rgba(99,102,241,0); opacity: 0.8; }
+  100% { box-shadow: 0 0 0 0 rgba(99,102,241,0); opacity: 1; }
 }
 
 /* Footer */

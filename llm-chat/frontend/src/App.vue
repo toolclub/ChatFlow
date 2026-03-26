@@ -17,6 +17,7 @@ onMounted(async () => {
     <Sidebar
       :conversations="chat.conversations.value"
       :currentConvId="chat.currentConvId.value"
+      :activeConvIds="chat.activeConvIds.value"
       @new-chat="chat.newConversation()"
       @select="chat.selectConversation($event)"
       @delete="chat.removeConversation($event)"
@@ -26,6 +27,7 @@ onMounted(async () => {
       :loading="chat.loading.value"
       :agentStatus="chat.agentStatus.value"
       @send="chat.send($event)"
+      @stop="chat.stopConversation()"
     />
   </div>
 </template>

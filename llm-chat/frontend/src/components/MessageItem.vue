@@ -3,7 +3,10 @@ import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import { Marked } from 'marked'
 import hljs from 'highlight.js/lib/common'
 import type { Message } from '../types'
-import { CopyDocument, Check, User, Search, Clock, Cpu, Document } from '@element-plus/icons-vue'
+import { CopyDocument, Check, Search, Clock, Cpu, Document } from '@element-plus/icons-vue'
+import CodePreview from './CodePreview.vue'
+
+const PREVIEWABLE = new Set(['html','svg','css','javascript','js','typescript','ts','vue','jsx','tsx','react'])
 
 // ─── 工具元信息 ───
 const TOOL_META: Record<string, { label: string; icon: any; color: string }> = {
@@ -43,11 +46,11 @@ markedInstance.use({
           .replace(/>/g, '&gt;')
       }
 
-      const isHtml = ['html', 'svg'].includes(language)
+      const isPreviewable = PREVIEWABLE.has(language)
       const encoded = encodeURIComponent(text)
 
-      const previewBtn = isHtml
-        ? `<button class="cb-btn cb-preview" data-code="${encoded}" title="在沙盒中预览渲染效果">
+      const previewBtn = isPreviewable
+        ? `<button class="cb-btn cb-preview" data-code="${encoded}" data-lang="${language}" title="在沙盒中预览渲染效果">
             <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
               <path d="M1 8s3-5 7-5 7 5 7 5-3 5-7 5-7-5-7-5z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
               <circle cx="8" cy="8" r="2.5" stroke="currentColor" stroke-width="1.5"/>
@@ -89,7 +92,8 @@ const renderedContent = computed(() =>
 // ─── 代码块事件委托 ───
 const contentEl = ref<HTMLElement>()
 const previewVisible = ref(false)
-const previewSrcdoc = ref('')
+const previewCode = ref('')
+const previewLang = ref('html')
 
 function handleContentClick(e: MouseEvent) {
   const copyBtn = (e.target as Element).closest<HTMLElement>('.cb-copy')
@@ -113,7 +117,8 @@ function handleContentClick(e: MouseEvent) {
 
   if (previewBtn) {
     e.stopPropagation()
-    previewSrcdoc.value = decodeURIComponent(previewBtn.dataset.code || '')
+    previewCode.value = decodeURIComponent(previewBtn.dataset.code || '')
+    previewLang.value = previewBtn.dataset.lang || 'html'
     previewVisible.value = true
   }
 }
@@ -168,16 +173,22 @@ watch(
         </div>
         <div v-if="message.content" class="user-bubble">{{ message.content }}</div>
       </div>
+      <!-- 用户头像：极简人形剪影 -->
       <div class="user-avatar">
-        <el-icon><User /></el-icon>
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none">
+          <circle cx="12" cy="7.5" r="3.8" fill="#374151"/>
+          <path d="M4.5 20.5C4.5 16.9 7.9 14 12 14C16.1 14 19.5 16.9 19.5 20.5" stroke="#374151" stroke-width="2" stroke-linecap="round" fill="none"/>
+        </svg>
       </div>
     </template>
 
     <!-- AI 消息 -->
     <template v-else>
+      <!-- AI 头像：星光 sparkle（ChatGPT 极简风） -->
       <div class="ai-avatar">
-        <svg width="13" height="13" viewBox="0 0 64 64" fill="none">
-          <path d="M36 8L22 34H31L28 56L46 28H36Z" fill="white"/>
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none">
+          <path d="M12 3C12 3 13.2 8.8 18 11C13.2 13.2 12 19 12 19C12 19 10.8 13.2 6 11C10.8 8.8 12 3 12 3Z" fill="#111827"/>
+          <path d="M19.5 4C19.5 4 20.1 6.6 22 7.5C20.1 8.4 19.5 11 19.5 11C19.5 11 18.9 8.4 17 7.5C18.9 6.6 19.5 4 19.5 4Z" fill="#111827" opacity="0.4"/>
         </svg>
       </div>
       <div class="ai-content-wrap">
@@ -317,21 +328,12 @@ watch(
 
   </div>
 
-  <!-- HTML 预览对话框 -->
-  <el-dialog
+  <!-- 代码预览弹窗 -->
+  <CodePreview
     v-model="previewVisible"
-    title="HTML 预览"
-    width="90%"
-    top="3vh"
-    destroy-on-close
-    :close-on-click-modal="true"
-  >
-    <iframe
-      :srcdoc="previewSrcdoc"
-      class="preview-iframe"
-      sandbox="allow-scripts allow-forms allow-modals"
-    />
-  </el-dialog>
+    :code="previewCode"
+    :lang="previewLang"
+  />
 </template>
 
 <style scoped>
@@ -346,16 +348,16 @@ watch(
 /* 用户 */
 .msg.user { flex-direction: row-reverse; }
 .user-avatar {
-  width: 28px; height: 28px;
-  border-radius: 8px;
-  background: linear-gradient(135deg, #374151 0%, #1f2937 100%);
-  color: #fff;
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  background: #f4f4f5;
+  border: 1.5px solid #e4e4e7;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 13px;
   flex-shrink: 0;
   margin-top: 2px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.07);
 }
 .user-wrap {
   display: flex;
@@ -372,31 +374,31 @@ watch(
   cursor: zoom-in;
 }
 .user-bubble {
-  background: var(--cf-card);
-  color: var(--cf-text-1);
-  padding: 10px 16px;
-  border-radius: 18px 6px 18px 18px;
+  background: #f4f4f4;
+  color: #0d0d0d;
+  padding: 11px 18px;
+  border-radius: 18px;
   font-size: 14.5px;
   line-height: 1.65;
   white-space: pre-wrap;
   word-break: break-word;
-  border: 1.5px solid var(--cf-border);
-  box-shadow: var(--cf-shadow-xs);
+  box-shadow: none;
   letter-spacing: -0.1px;
 }
 
 /* AI */
 .msg.assistant { flex-direction: row; }
 .ai-avatar {
-  width: 28px; height: 28px;
-  border-radius: 8px;
-  background: linear-gradient(135deg, #312e81 0%, #6366f1 100%);
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  background: #f9fafb;
+  border: 1.5px solid #e5e7eb;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
   margin-top: 2px;
-  box-shadow: 0 2px 8px rgba(99,102,241,0.3);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.07);
 }
 .ai-content-wrap {
   flex: 1;
@@ -503,15 +505,6 @@ watch(
 .action-btn:hover { border-color: #a5b4fc; color: var(--cf-indigo); background: var(--cf-active); }
 .action-btn.copied { border-color: #bbf7d0; color: #16a34a; background: #f0fdf4; }
 
-/* HTML 预览 iframe */
-.preview-iframe {
-  width: 100%;
-  height: 75vh;
-  border: none;
-  border-radius: 8px;
-  display: block;
-  background: #fff;
-}
 </style>
 
 <style>

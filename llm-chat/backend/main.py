@@ -14,6 +14,7 @@ REST API 与原版完全兼容，前端无需修改。
   GET  /api/tools          —— 查看当前可用工具列表
   GET  /api/conversations/{id}/memory  —— 记忆状态调试（新增 active_tools 字段）
 """
+import asyncio
 import logging
 import uuid
 
@@ -86,6 +87,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="ChatFlow", version="2.0.0", lifespan=lifespan)
 apply_cors(app)
 
+# ── 流式停止信号（conv_id → asyncio.Event） ──────────────────────────────────
+_stop_events: dict[str, asyncio.Event] = {}
+
 
 # ── 模型接口 ──────────────────────────────────────────────────────────────────
 
@@ -105,11 +109,12 @@ async def get_models():
 # ── 对话管理 ──────────────────────────────────────────────────────────────────
 
 @app.get("/api/conversations")
-async def get_conversations():
+async def get_conversations(request: Request):
+    client_id = request.headers.get("X-Client-ID", "")
     convs = sorted(
         [
             {"id": c.id, "title": c.title, "updated_at": c.updated_at}
-            for c in memory_store.all_conversations()
+            for c in memory_store.all_conversations(client_id)
         ],
         key=lambda x: x["updated_at"],
         reverse=True,
@@ -118,12 +123,14 @@ async def get_conversations():
 
 
 @app.post("/api/conversations")
-async def create_conversation(req: CreateConversationRequest):
+async def create_conversation(req: CreateConversationRequest, request: Request):
+    client_id = request.headers.get("X-Client-ID", "")
     conv_id = str(uuid.uuid4())[:8]
     conv = memory_store.create(
         conv_id=conv_id,
         title=req.title or "新对话",
         system_prompt=req.system_prompt or "",
+        client_id=client_id,
     )
     return {"id": conv.id, "title": conv.title}
 
@@ -179,27 +186,50 @@ async def chat(req: ChatRequest, request: Request):
       data: {"search_item": {...}}      ← 单条搜索结果（实时追加）
       data: {"tool_result": {...}}      ← 工具完成信号
       data: {"done": true, "compressed": bool}  ← 完成信号
+      data: {"stopped": true}           ← 用户主动停止
     """
+    client_id = request.headers.get("X-Client-ID", "")
     conv = memory_store.get(req.conversation_id)
     if not conv:
-        conv = memory_store.create(req.conversation_id)
+        conv = memory_store.create(req.conversation_id, client_id=client_id)
+
+    # 如果该会话已有正在进行的流，先取消
+    old_event = _stop_events.get(req.conversation_id)
+    if old_event:
+        old_event.set()
+
+    stop_event = asyncio.Event()
+    _stop_events[req.conversation_id] = stop_event
 
     async def safe_stream():
-        async for chunk in graph_runner.stream_response(
-            conv_id=req.conversation_id,
-            user_message=req.message,
-            model=req.model or CHAT_MODEL,
-            temperature=req.temperature,
-        ):
-            if await request.is_disconnected():
-                break
-            yield chunk
+        try:
+            async for chunk in graph_runner.stream_response(
+                conv_id=req.conversation_id,
+                user_message=req.message,
+                model=req.model or CHAT_MODEL,
+                temperature=req.temperature,
+            ):
+                if await request.is_disconnected() or stop_event.is_set():
+                    yield "data: {\"stopped\": true}\n\n"
+                    break
+                yield chunk
+        finally:
+            _stop_events.pop(req.conversation_id, None)
 
     return StreamingResponse(
         safe_stream(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/api/chat/{conv_id}/stop")
+async def stop_chat(conv_id: str):
+    """主动停止某个会话的流式输出。"""
+    event = _stop_events.get(conv_id)
+    if event:
+        event.set()
+    return {"ok": True}
 
 
 # ── 工具接口 ──────────────────────────────────────────────────────────────────

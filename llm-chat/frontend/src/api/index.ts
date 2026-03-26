@@ -1,13 +1,34 @@
 const API_BASE = ''
 
+// ── 浏览器唯一标识（localStorage 持久化，同浏览器同 origin 共享） ─────────────
+function getClientId(): string {
+  let id = localStorage.getItem('cf_client_id')
+  if (!id) {
+    id = crypto.randomUUID()
+    localStorage.setItem('cf_client_id', id)
+  }
+  return id
+}
+
+function commonHeaders(): Record<string, string> {
+  return {
+    'Content-Type': 'application/json',
+    'X-Client-ID': getClientId(),
+  }
+}
+
 export async function fetchModels(): Promise<string[]> {
-  const res = await fetch(`${API_BASE}/api/models`)
+  const res = await fetch(`${API_BASE}/api/models`, {
+    headers: { 'X-Client-ID': getClientId() },
+  })
   const data = await res.json()
   return data.models || []
 }
 
 export async function fetchConversations() {
-  const res = await fetch(`${API_BASE}/api/conversations`)
+  const res = await fetch(`${API_BASE}/api/conversations`, {
+    headers: { 'X-Client-ID': getClientId() },
+  })
   const data = await res.json()
   return data.conversations || []
 }
@@ -15,19 +36,31 @@ export async function fetchConversations() {
 export async function createConversation(title: string = '新对话') {
   const res = await fetch(`${API_BASE}/api/conversations`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: commonHeaders(),
     body: JSON.stringify({ title }),
   })
   return res.json()
 }
 
 export async function fetchConversation(id: string) {
-  const res = await fetch(`${API_BASE}/api/conversations/${id}`)
+  const res = await fetch(`${API_BASE}/api/conversations/${id}`, {
+    headers: { 'X-Client-ID': getClientId() },
+  })
   return res.json()
 }
 
 export async function deleteConversation(id: string) {
-  await fetch(`${API_BASE}/api/conversations/${id}`, { method: 'DELETE' })
+  await fetch(`${API_BASE}/api/conversations/${id}`, {
+    method: 'DELETE',
+    headers: { 'X-Client-ID': getClientId() },
+  })
+}
+
+export async function stopStream(convId: string): Promise<void> {
+  await fetch(`${API_BASE}/api/chat/${convId}/stop`, {
+    method: 'POST',
+    headers: { 'X-Client-ID': getClientId() },
+  }).catch(() => {})
 }
 
 export async function sendMessage(
@@ -42,6 +75,7 @@ export async function sendMessage(
   onStatus: (status: string, model?: string) => void,
   onRoute: (model: string, intent: string) => void,
   onDone: () => void,
+  onStopped: () => void,
   signal?: AbortSignal,
 ) {
   const body: Record<string, unknown> = {
@@ -55,7 +89,7 @@ export async function sendMessage(
 
   const res = await fetch(`${API_BASE}/api/chat`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: commonHeaders(),
     body: JSON.stringify(body),
     signal,
   })
@@ -85,6 +119,7 @@ export async function sendMessage(
         if (data.status)       onStatus(data.status, data.model)
         if (data.route)        onRoute(data.route.model, data.route.intent)
         if (data.done)         onDone()
+        if (data.stopped)      onStopped()
       } catch {}
     }
   }

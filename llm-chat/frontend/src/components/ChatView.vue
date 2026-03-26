@@ -3,7 +3,7 @@ import { nextTick, watch, ref, computed, onMounted, onUnmounted } from 'vue'
 import type { Message, SendPayload, AgentStatus } from '../types'
 import MessageItem from './MessageItem.vue'
 import InputBox from './InputBox.vue'
-import { ChatDotRound, Lightning, EditPen, DataAnalysis, Grid, TrendCharts } from '@element-plus/icons-vue'
+import { Lightning, EditPen, DataAnalysis, Grid, TrendCharts, Check, Loading } from '@element-plus/icons-vue'
 
 const props = defineProps<{
   messages: Message[]
@@ -11,7 +11,10 @@ const props = defineProps<{
   agentStatus: AgentStatus
 }>()
 
-const emit = defineEmits<{ send: [payload: SendPayload] }>()
+const emit = defineEmits<{
+  send: [payload: SendPayload]
+  stop: []
+}>()
 
 const messagesContainer = ref<HTMLDivElement>()
 
@@ -105,44 +108,56 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
     <!-- 顶部 header -->
     <div class="chat-header">
       <div class="header-left">
-        <el-icon class="header-icon"><ChatDotRound /></el-icon>
-        <span class="header-title">对话</span>
+        <!-- Sparkle AI 图标（与 Logo / Avatar 统一） -->
+        <svg class="header-logo-icon" width="16" height="16" viewBox="0 0 24 24" fill="none">
+          <path d="M12 3C12 3 13.2 8.8 18 11C13.2 13.2 12 19 12 19C12 19 10.8 13.2 6 11C10.8 8.8 12 3 12 3Z" fill="#374151"/>
+          <path d="M19.5 4C19.5 4 20.1 6.6 22 7.5C20.1 8.4 19.5 11 19.5 11C19.5 11 18.9 8.4 17 7.5C18.9 6.6 19.5 4 19.5 4Z" fill="#374151" opacity="0.4"/>
+        </svg>
+        <span class="header-title">AI 对话</span>
       </div>
       <div class="header-right">
-        <!-- 空闲：未使用过显示"就绪"，用过后显示上次模型 -->
-        <div v-if="agentStatus.state === 'idle'" class="status-chip idle">
-          <span class="chip-dot"></span>
-          <span>{{ agentStatus.model ? agentStatus.model : '就绪' }}</span>
-        </div>
+        <!-- 就绪 -->
+        <el-tag v-if="agentStatus.state === 'idle'" type="success" effect="plain" round :closable="false" class="s-tag">
+          {{ agentStatus.model || '就绪' }}
+        </el-tag>
+
         <!-- 完成 -->
-        <div v-else-if="agentStatus.state === 'done'" class="status-chip done">
-          <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
-            <circle cx="8" cy="8" r="6" stroke="#22c55e" stroke-width="1.5"/>
-            <path d="M5 8l2 2 4-4" stroke="#22c55e" stroke-width="1.5" stroke-linecap="round"/>
-          </svg>
-          <span>{{ agentStatus.model }} · 回答完成</span>
-        </div>
+        <el-tag v-else-if="agentStatus.state === 'done'" type="success" effect="plain" round :closable="false" class="s-tag">
+          <el-icon style="margin-right:3px"><Check /></el-icon>完成
+        </el-tag>
+
         <!-- 路由中 -->
-        <div v-else-if="agentStatus.state === 'routing'" class="status-chip routing">
-          <svg class="chip-spin" width="12" height="12" viewBox="0 0 16 16" fill="none">
-            <circle cx="8" cy="8" r="6" stroke="#a5b4fc" stroke-width="2" stroke-dasharray="20 18"/>
-          </svg>
-          <span>分析问题中...</span>
-        </div>
-        <!-- 思考中 -->
-        <div v-else-if="agentStatus.state === 'thinking'" class="status-chip thinking">
-          <svg class="chip-spin" width="12" height="12" viewBox="0 0 16 16" fill="none">
-            <circle cx="8" cy="8" r="6" stroke="#6366f1" stroke-width="2" stroke-dasharray="20 18"/>
-          </svg>
-          <span>{{ agentStatus.model || '模型' }} · 生成中</span>
-        </div>
+        <el-tag v-else-if="agentStatus.state === 'routing'" type="info" effect="plain" round :closable="false" class="s-tag">
+          <el-icon class="s-spin" style="margin-right:4px"><Loading /></el-icon>分析中
+        </el-tag>
+
+        <!-- 生成中 -->
+        <el-tag v-else-if="agentStatus.state === 'thinking'" type="info" effect="plain" round :closable="false" class="s-tag">
+          <el-icon class="s-spin" style="margin-right:4px"><Loading /></el-icon>
+          {{ agentStatus.model || '模型' }}
+        </el-tag>
+
         <!-- 工具调用 -->
-        <div v-else-if="agentStatus.state === 'tool'" class="status-chip tool">
-          <svg class="chip-spin" width="12" height="12" viewBox="0 0 16 16" fill="none">
-            <circle cx="8" cy="8" r="6" stroke="#f59e0b" stroke-width="2" stroke-dasharray="20 18"/>
+        <el-tag v-else-if="agentStatus.state === 'tool'" type="warning" effect="plain" round :closable="false" class="s-tag">
+          <el-icon class="s-spin" style="margin-right:4px"><Loading /></el-icon>
+          {{ agentStatus.tool || '工具调用' }}
+        </el-tag>
+
+        <!-- 停止按钮 -->
+        <el-button
+          v-if="loading"
+          size="small"
+          type="danger"
+          plain
+          round
+          class="stop-btn"
+          @click="emit('stop')"
+        >
+          <svg width="8" height="8" viewBox="0 0 10 10" fill="currentColor" style="margin-right:5px;flex-shrink:0">
+            <rect x="1" y="1" width="8" height="8" rx="1.5"/>
           </svg>
-          <span>调用 {{ agentStatus.tool || '工具' }}...</span>
-        </div>
+          停止
+        </el-button>
       </div>
     </div>
 
@@ -150,9 +165,11 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
     <div v-if="messages.length === 0" class="empty-view">
       <div class="hero">
         <div class="hero-icon-wrap">
-          <svg width="28" height="28" viewBox="0 0 64 64" fill="none">
-            <path d="M36 8L22 34H31L28 56L46 28H36Z" fill="#6366f1"/>
-            <circle cx="46" cy="18" r="4" fill="#a5b4fc" opacity="0.7"/>
+          <!-- 大号 Sparkle — 干净科技感 -->
+          <svg width="34" height="34" viewBox="0 0 48 48" fill="none">
+            <path d="M24 4C24 4 26.5 17 36 22C26.5 27 24 40 24 40C24 40 21.5 27 12 22C21.5 17 24 4 24 4Z" fill="#111827"/>
+            <path d="M39 6C39 6 40.2 12 44 14C40.2 16 39 22 39 22C39 22 37.8 16 34 14C37.8 12 39 6 39 6Z" fill="#111827" opacity="0.3"/>
+            <path d="M10 34C10 34 10.8 37.5 13 39C10.8 40.5 10 44 10 44C10 44 9.2 40.5 7 39C9.2 37.5 10 34 10 34Z" fill="#111827" opacity="0.25"/>
           </svg>
         </div>
         <h1 class="hero-title">我能为你做什么？</h1>
@@ -261,7 +278,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   gap: 7px;
   color: var(--cf-text-2);
 }
-.header-icon { font-size: 16px; color: var(--cf-indigo); }
+.header-logo-icon { flex-shrink: 0; }
 .header-title {
   font-size: 14px;
   font-weight: 600;
@@ -272,43 +289,40 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   align-items: center;
   gap: 6px;
 }
-.status-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  border-radius: 20px;
+/* ── 状态标签 el-tag 全局 override ── */
+:deep(.s-tag) {
   font-size: 12px;
   font-weight: 500;
-  border: 1px solid var(--cf-border);
-  background: var(--cf-card);
-  color: var(--cf-text-2);
-  transition: all 0.3s;
   font-family: inherit;
+  padding: 0 12px;
+  height: 28px;
+  box-shadow: 0 1px 5px rgba(0,0,0,0.07);
+  display: inline-flex;
+  align-items: center;
+  transition: all 0.2s;
 }
-.status-chip.idle   { border-color: #bbf7d0; color: #16a34a; background: #f0fdf4; }
-.status-chip.done   { border-color: #bbf7d0; color: #16a34a; background: #f0fdf4; }
-.status-chip.routing  { border-color: #e0e7ff; color: #6366f1; background: #eef2ff; }
-.status-chip.thinking { border-color: #e0e7ff; color: #6366f1; background: #eef2ff; }
-.status-chip.tool   { border-color: #fde68a; color: #b45309; background: #fffbeb; }
-.chip-dot {
-  width: 6px; height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-  flex-shrink: 0;
-}
-.chip-sub {
-  color: currentColor;
-  opacity: 0.6;
-  font-size: 11px;
-}
-.chip-spin {
-  flex-shrink: 0;
-  animation: spin-ccw 1s linear infinite;
+/* 旋转加载图标 */
+.s-spin {
+  font-size: 12px !important;
+  animation: s-rotate 1s linear infinite;
   transform-origin: center;
 }
-@keyframes spin-ccw {
-  to { transform: rotate(360deg); }
+@keyframes s-rotate { to { transform: rotate(360deg); } }
+
+/* 停止按钮 */
+:deep(.stop-btn) {
+  font-family: inherit;
+  height: 28px;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  box-shadow: 0 1px 4px rgba(220,38,38,0.15);
+}
+:deep(.stop-btn:hover) {
+  box-shadow: 0 2px 8px rgba(220,38,38,0.25);
+  transform: translateY(-1px);
 }
 
 /* 空状态 */
@@ -329,15 +343,15 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   gap: 10px;
 }
 .hero-icon-wrap {
-  width: 64px; height: 64px;
-  border-radius: 18px;
-  background: linear-gradient(135deg, #eef2ff 0%, #e0e7ff 100%);
-  border: 1px solid #c7d2fe;
+  width: 68px; height: 68px;
+  border-radius: 20px;
+  background: #ffffff;
+  border: 1.5px solid #e5e7eb;
   display: flex;
   align-items: center;
   justify-content: center;
   margin-bottom: 4px;
-  box-shadow: 0 4px 16px rgba(99,102,241,0.15);
+  box-shadow: 0 2px 12px rgba(0,0,0,0.07), 0 1px 3px rgba(0,0,0,0.05);
 }
 .hero-title {
   font-size: 28px;

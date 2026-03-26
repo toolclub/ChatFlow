@@ -51,6 +51,7 @@ def save(conv: Conversation) -> None:
         "mid_term_cursor": conv.mid_term_cursor,
         "created_at": conv.created_at,
         "updated_at": conv.updated_at,
+        "client_id": conv.client_id,
     }
     with open(_path(conv.id), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -83,6 +84,7 @@ def _load_all_from_disk() -> list[Conversation]:
                 mid_term_cursor=data.get("mid_term_cursor", 0),
                 created_at=data.get("created_at", 0.0),
                 updated_at=data.get("updated_at", 0.0),
+                client_id=data.get("client_id", ""),
             )
             result.append(conv)
         except Exception as exc:
@@ -110,17 +112,21 @@ def get(conv_id: str) -> Optional[Conversation]:
     return _store.get(conv_id)
 
 
-def all_conversations() -> list[Conversation]:
-    return list(_store.values())
+def all_conversations(client_id: str = "") -> list[Conversation]:
+    """返回指定 client 的对话。旧数据（client_id 为空）对所有人可见（向后兼容）。"""
+    if not client_id:
+        return list(_store.values())
+    return [c for c in _store.values() if not c.client_id or c.client_id == client_id]
 
 
 def create(
     conv_id: str,
     title: str = "新对话",
     system_prompt: str = "",
+    client_id: str = "",
 ) -> Conversation:
     prompt = system_prompt.strip() or DEFAULT_SYSTEM_PROMPT
-    conv = Conversation(id=conv_id, title=title, system_prompt=prompt)
+    conv = Conversation(id=conv_id, title=title, system_prompt=prompt, client_id=client_id)
     _store[conv_id] = conv
     save(conv)
     return conv
