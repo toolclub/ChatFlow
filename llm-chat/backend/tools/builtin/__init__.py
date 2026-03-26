@@ -20,10 +20,12 @@
 """
 from tools.builtin.calculator import calculator
 from tools.builtin.datetime_tool import get_current_datetime
+from tools.builtin.fetch_webpage import fetch_webpage
 from tools.builtin.web_search import web_search
 
 BUILTIN_TOOLS = [
     calculator,
     get_current_datetime,
     web_search,
+    fetch_webpage,
 ]

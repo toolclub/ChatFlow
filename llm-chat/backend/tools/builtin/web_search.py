@@ -1,50 +1,63 @@
 """
-内置工具：网络搜索（DuckDuckGo，无需 API Key）
-依赖：pip install duckduckgo-search
+内置工具：网络搜索（DuckDuckGo，无需 API Key，支持中文区域）
+依赖：pip install ddgs
 """
+import json
 from langchain_core.tools import tool
 
 
 @tool
-def web_search(query: str, max_results: int = 5) -> str:
+def web_search(query: str, max_results: int = 6) -> str:
     """
-    使用 DuckDuckGo 搜索互联网获取最新信息。
-    适用于：查询时事新闻、最新数据、不在训练集中的信息。
+    搜索互联网获取最新信息。搜索词请使用中文，以获得更好的中文结果。
+    适用于：查询时事新闻、最新价格、实时数据、不在训练集中的信息。
 
     Args:
-        query:       搜索关键词或问题
-        max_results: 返回结果数量（默认5，最多10）
+        query:       搜索关键词（请用中文）
+        max_results: 返回结果数量（默认6，最多10）
 
     Returns:
-        格式化的搜索结果摘要
+        JSON 格式的搜索结果列表，每项包含 title、url、snippet
     """
     try:
         from ddgs import DDGS
+
         max_results = min(max_results, 10)
         with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=max_results))
+            raw = list(ddgs.text(
+                query,
+                max_results=max_results,
+                region="cn-zh",      # 中文区域，优先返回中文结果
+            ))
 
-        if not results:
-            return f"未找到关于「{query}」的搜索结果，请尝试换一种说法。"
+        if not raw:
+            # 降级：去掉区域限制再试一次
+            with DDGS() as ddgs:
+                raw = list(ddgs.text(query, max_results=max_results))
 
-        lines = [f"搜索关键词：{query}\n"]
-        for i, r in enumerate(results, 1):
-            title = r.get("title", "(无标题)")
-            body = r.get("body", "")
-            href = r.get("href", "")
-            lines.append(f"{i}. {title}")
-            if body:
-                lines.append(f"   {body[:200]}")
-            if href:
-                lines.append(f"   来源: {href}")
-            lines.append("")
+        if not raw:
+            return json.dumps(
+                [{"title": "无结果", "url": "", "snippet": f"未找到「{query}」的相关信息，请换一个搜索词试试。"}],
+                ensure_ascii=False,
+            )
 
-        return "\n".join(lines).strip()
+        items = [
+            {
+                "title":   r.get("title", ""),
+                "url":     r.get("href", ""),
+                "snippet": r.get("body", ""),
+            }
+            for r in raw
+        ]
+        return json.dumps(items, ensure_ascii=False)
 
     except ImportError:
-        return (
-            "网络搜索功能不可用，请安装依赖：\n"
-            "pip install ddgs"
+        return json.dumps(
+            [{"title": "缺少依赖", "url": "", "snippet": "请安装：pip install ddgs"}],
+            ensure_ascii=False,
         )
     except Exception as exc:
-        return f"搜索失败: {exc}"
+        return json.dumps(
+            [{"title": "搜索失败", "url": "", "snippet": str(exc)}],
+            ensure_ascii=False,
+        )

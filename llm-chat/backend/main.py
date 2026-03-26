@@ -21,7 +21,7 @@ import httpx
 import uvicorn
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
 from models import ChatRequest, CreateConversationRequest, UpdateConversationRequest
@@ -38,8 +38,7 @@ from config import (
     BACKEND_PORT,
     EMBEDDING_MODEL,
     LONGTERM_MEMORY_ENABLED,
-    MCP_SERVERS,
-    OLLAMA_BASE_URL,
+    MCP_SERVERS, API_BASE_URL,
 )
 
 logger = logging.getLogger("main")
@@ -95,9 +94,9 @@ async def get_models():
     """列出 Ollama 中已下载的所有模型。"""
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
+            resp = await client.get(f"{API_BASE_URL}/api/tags")
             data = resp.json()
-            models = [m["name"] for m in data.get("models", [])]
+            models = [m["name"] for m in data.get("models", []) if not m["name"].startswith(EMBEDDING_MODEL.split(":")[0])]
     except Exception:
         models = [CHAT_MODEL]
     return {"models": models}
@@ -170,27 +169,34 @@ async def delete_conversation(conv_id: str):
 # ── 聊天（流式 SSE） ──────────────────────────────────────────────────────────
 
 @app.post("/api/chat")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, request: Request):
     """
     流式对话接口（SSE）。
 
     SSE 事件格式：
       data: {"content": "..."}         ← 增量 token
-      data: {"tool_call": {...}}        ← 工具调用（新增）
-      data: {"tool_result": {...}}      ← 工具结果（新增）
+      data: {"tool_call": {...}}        ← 工具调用
+      data: {"search_item": {...}}      ← 单条搜索结果（实时追加）
+      data: {"tool_result": {...}}      ← 工具完成信号
       data: {"done": true, "compressed": bool}  ← 完成信号
     """
     conv = memory_store.get(req.conversation_id)
     if not conv:
         conv = memory_store.create(req.conversation_id)
 
-    return StreamingResponse(
-        graph_runner.stream_response(
+    async def safe_stream():
+        async for chunk in graph_runner.stream_response(
             conv_id=req.conversation_id,
             user_message=req.message,
             model=req.model or CHAT_MODEL,
             temperature=req.temperature,
-        ),
+        ):
+            if await request.is_disconnected():
+                break
+            yield chunk
+
+    return StreamingResponse(
+        safe_stream(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

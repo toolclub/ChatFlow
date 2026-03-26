@@ -6,11 +6,10 @@ LangGraph Agent 状态定义
   - 对话完整历史存储在 memory/store.py（ConversationStore），不在 GraphState 中
   - 每次请求都是一个独立的图执行，不依赖 LangGraph checkpointer 跨轮持久化
 """
-from typing import Annotated, Sequence
+from typing import Annotated, Sequence, TypedDict
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
-from typing_extensions import TypedDict
 
 
 class GraphState(TypedDict):
@@ -31,3 +30,6 @@ class GraphState(TypedDict):
     # ── 输出（由 call_model / compress_memory 节点填充） ──────────────────
     full_response: str                        # LLM 最终回复内容（累积自最后一次 call_model）
     compressed: bool                          # 是否触发了本轮压缩
+    tool_model: str         # 专门用于工具调用
+    answer_model: str       # 专门用于最终回答
+    route: str              # 路由结果: 'chat' | 'code' | 'search' | ''
