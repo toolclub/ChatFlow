@@ -36,7 +36,13 @@ export async function sendMessage(
   model: string,
   images: string[],
   onChunk: (text: string) => void,
+  onToolCall: (name: string, input: Record<string, unknown>) => void,
+  onToolResult: (name: string, data: Record<string, unknown>) => void,
+  onSearchItem: (item: { url: string; title: string; status: string }) => void,
+  onStatus: (status: string, model?: string) => void,
+  onRoute: (model: string, intent: string) => void,
   onDone: () => void,
+  signal?: AbortSignal,
 ) {
   const body: Record<string, unknown> = {
     conversation_id: conversationId,
@@ -44,7 +50,6 @@ export async function sendMessage(
     model,
   }
   if (images.length > 0) {
-    // 去掉 data URL 前缀，只传 base64 内容（与 Ollama vision API 兼容）
     body.images = images.map(img => img.replace(/^data:image\/[a-z]+;base64,/, ''))
   }
 
@@ -52,6 +57,7 @@ export async function sendMessage(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    signal,
   })
 
   const reader = res.body?.getReader()
@@ -59,17 +65,26 @@ export async function sendMessage(
 
   if (!reader) return
 
+  let buffer = ''
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
 
-    const text = decoder.decode(value)
-    for (const line of text.split('\n')) {
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''   // 保留不完整的最后一行
+
+    for (const line of lines) {
       if (!line.startsWith('data: ')) continue
       try {
         const data = JSON.parse(line.slice(6))
-        if (data.content) onChunk(data.content)
-        if (data.done) onDone()
+        if (data.content)      onChunk(data.content)
+        if (data.tool_call)    onToolCall(data.tool_call.name, data.tool_call.input)
+        if (data.tool_result)  onToolResult(data.tool_result.name, data.tool_result)
+        if (data.search_item)  onSearchItem(data.search_item)
+        if (data.status)       onStatus(data.status, data.model)
+        if (data.route)        onRoute(data.route.model, data.route.intent)
+        if (data.done)         onDone()
       } catch {}
     }
   }

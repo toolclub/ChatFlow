@@ -11,6 +11,10 @@ author: leizihao
 LLM_BASE_URL = "http://localhost:11434/v1"
 API_KEY = "ollama"          # OpenAI 填真实 key，本地服务随便填非空字符串即可
 
+# Embedding 单独配置（使用 Ollama 原生 API，不走 /v1）
+# 如果你的 Embedding 模型也在远程服务，改这里即可
+OLLAMA_BASE_URL = "http://localhost:11434"
+
 # 向后兼容
 API_BASE_URL = LLM_BASE_URL
 
@@ -21,11 +25,18 @@ EMBEDDING_MODEL = "bge-m3"
 
 # ── 路由 Agent 配置 ──
 ROUTER_ENABLED = True                # False 时跳过路由，直接用前端选择的模型
-ROUTER_MODEL = "qwen3:8b"         # 用于意图分类的小模型（快）
+ROUTER_MODEL = "qwen3:8b"           # 用于意图分类的小模型（快）
+
+# 工具调用专用模型（必须支持 function calling）
+# search / search_code 路由的第一阶段（tool_model）都用这个模型做工具调用
+SEARCH_MODEL = "qwen3:8b"
+
+# 最终回答模型映射（answer_model）
 ROUTE_MODEL_MAP = {
-    "code":   "qwen3-coder:30b",  # 编程/代码问题
-    "search": "qwen3:8b",     # 需要工具调用/搜索
-    "chat":   "qwen3:8b",         # 普通对话（小模型直接回）
+    "code":        "qwen3-coder:30b",  # 纯代码问题，直接回答，不调工具
+    "search":      "qwen3:8b",         # 搜索后回答
+    "chat":        "qwen3:8b",         # 普通对话
+    "search_code": "qwen3-coder:30b",  # 先用 SEARCH_MODEL 搜索，再用代码模型写代码
 }
 
 # fetch_webpage 工具的 SSE 事件也走结构化（在 runner.py 里处理）
@@ -80,22 +91,16 @@ CONVERSATIONS_DIR = "./conversations"
 
 # ── 默认系统提示词 ──
 DEFAULT_SYSTEM_PROMPT = (
-    "你是一个有用的AI助手，请用中文回答用户的问题。回答要准确、清晰、有条理。\n"
+    "你是一个准确、诚实的AI助手，用中文回答用户问题。\n"
     "\n"
-    "【重要】遇到以下情况，必须先用工具搜索，不能凭记忆直接回答：\n"
-    "- 实时/最新信息：新闻、股价、天气、最新版本、近期事件\n"
-    "- 具体事实核查：某技术/产品/概念是哪年出现的、哪个公司/人提出/发布的、\n"
-    "  某事件的具体时间地点、某产品的具体参数规格\n"
-    "- 近几年出现的新技术、新协议、新框架（你的训练数据可能过时或缺失）\n"
-    "- 任何你没有十足把握的专有名词、小众知识\n"
+    "你拥有可以调用的工具。遇到以下情况时，必须主动调用工具获取信息，不能凭记忆猜测：\n"
+    "- 需要实时或最新数据（新闻、价格、天气、版本号等）\n"
+    "- 需要核实具体事实（某技术/产品的发布时间、来源公司、具体规格等）\n"
+    "- 需要查阅外部资料（官方文档、代码库、参考页面等）\n"
+    "- 对自己的回答没有十足把握时\n"
     "\n"
-    "不需要搜索的情况：通用原理解释、编程、数学、翻译、写作、逻辑推理、日常闲聊。\n"
-    "\n"
-    "搜索流程（需要搜索时严格执行）：\n"
-    "1. 用 web_search 搜索，搜索词用中文\n"
-    "2. 用 fetch_webpage 读取 1-3 个最相关页面的详细内容\n"
-    "3. 综合多个来源给出准确回答，注明信息来源\n"
-    "宁可多搜一次，也不要凭猜测给出错误答案。"
+    "调用工具后，基于工具返回的真实内容作答，不要凭猜测补充工具未返回的信息。\n"
+    "对于通用原理、编程概念、数学、翻译、写作等你有把握的问题，直接回答即可。"
 )
 SUMMARY_SYSTEM_PROMPT = (
     "你是一个专业的摘要助手。你的任务是把对话历史压缩成简洁的摘要。"

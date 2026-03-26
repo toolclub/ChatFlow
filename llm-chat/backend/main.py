@@ -247,6 +247,7 @@ async def test_embedding(text: str = "测试文本"):
 # ── 入口 ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    print("启动程序")
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",

@@ -16,7 +16,7 @@ from typing import Any
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import BaseTool
 
-from config import LONGTERM_MEMORY_ENABLED, ROUTER_MODEL, ROUTE_MODEL_MAP
+from config import LONGTERM_MEMORY_ENABLED, ROUTER_MODEL, ROUTE_MODEL_MAP, SEARCH_MODEL
 from llm.chat import get_chat_llm
 from graph.state import GraphState
 from memory import store as memory_store
@@ -28,21 +28,27 @@ logger = logging.getLogger("graph.nodes")
 
 # ── 节点 0：路由模型选择 ──────────────────────────────────────────────────────
 
-ROUTE_PROMPT = """你是一个意图分类器。根据用户消息，输出以下三个标签之一，不要输出任何其他内容：
-- code    （编程、代码、调试、算法、技术实现、写脚本）
-- search  （以下任一情况均需搜索）
-            1. 实时/最新信息：新闻、股价、天气、近期事件、最新版本
-            2. 具体事实核查：某技术/产品/概念是哪年出现的、哪个公司/人发布/提出的、
-               某事件的具体时间地点、某产品的具体参数规格
-            3. 模型可能不确定或容易答错的专有名词、小众知识、近几年出现的新技术/新概念
-- chat    （普通聊天、解释通用概念、翻译、写作、数学、逻辑推理、创意建议、日常对话等
-            ── 模型自己有把握回答准确的问题）
+ROUTE_PROMPT = """你是一个意图分类器。根据用户消息，输出以下四个标签之一，不要输出任何其他内容：
+
+- chat         （普通聊天、解释通用概念、翻译、写作、数学、逻辑推理、创意建议、日常对话
+                 ── 模型凭已有知识能准确回答的问题）
+
+- code         （纯代码任务：根据明确需求直接编写/调试/重构代码，不需要先查询外部资料）
+
+- search       （需要先联网查询再回答，但最终不是写代码：
+                 1. 实时/最新信息：新闻、股价、天气、近期事件、最新版本
+                 2. 具体事实核查：某技术/产品哪年出现、哪个公司提出、具体规格参数
+                 3. 对近 3 年新技术/协议/框架没有把握的知识性问题）
+
+- search_code  （需要先联网查询资料，再基于查询结果写代码：
+                 例如：查官方文档/仓库/示例后写 demo、根据最新 API 写代码、
+                 参考某框架的用法实现功能）
 
 【判断原则】
-- 凡是涉及"具体时间/日期"、"具体来源/作者/公司"、"具体版本号/规格"的问题，优先选 search
-- 通用原理解释（如"什么是 TCP/IP"）选 chat；具体事实（如"TCP/IP 是哪年标准化的"）选 search
-- 对近 3 年出现的新技术/协议/框架保持谨慎，优先 search
-- 当不确定时，选 search 而非乱答
+- 明确要求"查官方/查文档/查仓库/参考官方"再写代码 → search_code
+- 只是写代码，需求明确不需要查资料 → code
+- 只是查信息，不需要写代码 → search
+- 当不确定是 search 还是 search_code 时，优先选 search_code
 
 只输出标签本身，例如：chat"""
 
@@ -56,15 +62,20 @@ async def route_model(state: GraphState) -> dict:
 
     raw = resp.content.strip().lower()
     route = raw.split()[0] if raw.split() else "chat"
-    if route not in ("code", "search", "chat"):
+    if route not in ("code", "search", "chat", "search_code"):
         route = "chat"
 
     answer_model = ROUTE_MODEL_MAP.get(route, state["model"])
 
+    # search / search_code 的第一阶段必须用支持工具调用的模型（SEARCH_MODEL）；
+    # 第二阶段（call_model_after_tool）再切换到 answer_model（如代码模型）写最终答案。
+    # code / chat 路由不调用工具，tool_model 与 answer_model 相同。
+    needs_tools = route in ("search", "search_code")
+    tool_model = SEARCH_MODEL if needs_tools else answer_model
+
     return {
         "route": route,
-        # tool_model 与 answer_model 一致，均由 ROUTE_MODEL_MAP 决定
-        "tool_model": answer_model,
+        "tool_model": tool_model,
         "answer_model": answer_model,
     }
 
@@ -138,9 +149,10 @@ def make_call_model(tools: list[BaseTool]):
         temperature = state["temperature"]
         llm = get_chat_llm(model=model, temperature=temperature)
 
-        # 仅 search 路由或未启用路由（route 为空）时才绑定工具，
-        # 避免 chat/code 路由也触发网络搜索
-        use_tools = tools and (not route or route == "search")
+        # search / search_code 路由绑定工具（tool_model 已是支持工具调用的模型）；
+        # 未启用路由（route 为空）时也绑定，让模型自主决定是否调用；
+        # code / chat 路由不绑定，避免误触发网络搜索。
+        use_tools = tools and (not route or route in ("search", "search_code"))
         llm_with_tools = llm.bind_tools(tools) if use_tools else llm
 
         messages = list(state["messages"])

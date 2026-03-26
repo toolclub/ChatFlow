@@ -8,7 +8,8 @@ httpx>=0.27.0
 langchain>=0.3.0
 langchain-core>=0.3.0
 langchain-community>=0.3.0
-langchain-openai>=0.3.0          # ChatOpenAI + OpenAIEmbeddings（兼容 Ollama/vLLM/OpenAI 等）
+langchain-openai>=0.3.0          # ChatOpenAI（兼容 Ollama/vLLM/OpenAI 等 OpenAI 接口）
+langchain-ollama>=0.2.0          # OllamaEmbeddings（Embedding 使用 Ollama 原生 API）
 langchain-qdrant>=0.2.0          # QdrantVectorStore
 
 # ── LangGraph（Agent 编排） ──

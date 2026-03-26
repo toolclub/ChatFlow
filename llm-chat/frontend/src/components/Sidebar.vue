@@ -3,21 +3,17 @@ import { ref, computed } from 'vue'
 import type { ConversationInfo } from '../types'
 import {
   Plus, Search, ChatDotRound, Delete, Connection,
-  ArrowRight, Monitor
 } from '@element-plus/icons-vue'
 
 const props = defineProps<{
   conversations: ConversationInfo[]
   currentConvId: string | null
-  models: string[]
-  selectedModel: string
 }>()
 
 const emit = defineEmits<{
   newChat: []
   select: [id: string]
   delete: [id: string]
-  'update:selectedModel': [model: string]
 }>()
 
 const searchQuery = ref('')
@@ -118,32 +114,11 @@ function doDelete(id: string) {
       </div>
     </div>
 
-    <!-- 底部：模型选择 + 状态 -->
+    <!-- 底部：运行状态 -->
     <div class="sidebar-footer">
-      <div class="footer-label">
-        <el-icon><Monitor /></el-icon>
-        <span>模型选择</span>
-      </div>
-
-      <el-select
-        :model-value="selectedModel"
-        @update:model-value="emit('update:selectedModel', $event)"
-        placeholder="选择模型"
-        style="width: 100%"
-        size="small"
-      >
-        <el-option v-for="m in models" :key="m" :value="m">
-          <div class="model-option">
-            <span class="model-option-dot"></span>
-            <span>{{ m }}</span>
-          </div>
-        </el-option>
-      </el-select>
-
-      <!-- 模型状态 -->
       <div class="model-status">
         <span class="status-dot pulse"></span>
-        <span class="status-text">已连接 · 正常运行</span>
+        <span class="status-text">智能路由 · 自动选模型</span>
         <el-icon class="status-icon"><Connection /></el-icon>
       </div>
     </div>

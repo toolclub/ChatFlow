@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { nextTick, watch, ref, computed } from 'vue'
-import type { Message, SendPayload } from '../types'
+import { nextTick, watch, ref, computed, onMounted, onUnmounted } from 'vue'
+import type { Message, SendPayload, AgentStatus } from '../types'
 import MessageItem from './MessageItem.vue'
 import InputBox from './InputBox.vue'
 import { ChatDotRound, Lightning, EditPen, DataAnalysis, Grid, TrendCharts } from '@element-plus/icons-vue'
@@ -8,12 +8,29 @@ import { ChatDotRound, Lightning, EditPen, DataAnalysis, Grid, TrendCharts } fro
 const props = defineProps<{
   messages: Message[]
   loading: boolean
-  selectedModel: string
+  agentStatus: AgentStatus
 }>()
 
 const emit = defineEmits<{ send: [payload: SendPayload] }>()
 
 const messagesContainer = ref<HTMLDivElement>()
+
+// 用户是否手动向上滚动了（若是则不强制跳底）
+let userScrolledUp = false
+
+function onMessagesScroll() {
+  if (!messagesContainer.value) return
+  const el = messagesContainer.value
+  const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+  userScrolledUp = distFromBottom > 120
+}
+
+function scrollToBottom(force = false) {
+  if (!messagesContainer.value) return
+  if (force || !userScrolledUp) {
+    messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight
+  }
+}
 
 // 流式进度模拟（0-95 时缓慢增加，完成后跳到100）
 const progress = ref(0)
@@ -21,6 +38,7 @@ let progressTimer: ReturnType<typeof setInterval> | null = null
 
 watch(() => props.loading, (val) => {
   if (val) {
+    userScrolledUp = false   // 新请求开始时重置，确保跳到底部
     progress.value = 5
     progressTimer = setInterval(() => {
       if (progress.value < 90) {
@@ -38,10 +56,21 @@ watch(
   () => props.messages.length > 0 ? props.messages[props.messages.length - 1].content : '',
   async () => {
     await nextTick()
-    if (messagesContainer.value) {
-      messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight
-    }
+    scrollToBottom()
   },
+)
+
+// 新消息列表时强制跳底（切换对话）
+watch(
+  () => props.messages.length,
+  async (newLen, oldLen) => {
+    if (newLen < oldLen) {
+      // 对话切换，重置并跳底
+      userScrolledUp = false
+      await nextTick()
+      scrollToBottom(true)
+    }
+  }
 )
 
 const suggestions = [
@@ -80,14 +109,40 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
         <span class="header-title">对话</span>
       </div>
       <div class="header-right">
-        <el-tag type="info" size="small" class="model-tag" effect="plain">
-          <span class="model-dot"></span>
-          {{ selectedModel || '本地模型' }}
-        </el-tag>
-        <el-tag v-if="loading" type="warning" size="small" effect="plain" class="gen-tag">
-          <span class="spin-dot"></span>
-          生成中...
-        </el-tag>
+        <!-- 空闲：未使用过显示"就绪"，用过后显示上次模型 -->
+        <div v-if="agentStatus.state === 'idle'" class="status-chip idle">
+          <span class="chip-dot"></span>
+          <span>{{ agentStatus.model ? agentStatus.model : '就绪' }}</span>
+        </div>
+        <!-- 完成 -->
+        <div v-else-if="agentStatus.state === 'done'" class="status-chip done">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+            <circle cx="8" cy="8" r="6" stroke="#22c55e" stroke-width="1.5"/>
+            <path d="M5 8l2 2 4-4" stroke="#22c55e" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <span>{{ agentStatus.model }} · 回答完成</span>
+        </div>
+        <!-- 路由中 -->
+        <div v-else-if="agentStatus.state === 'routing'" class="status-chip routing">
+          <svg class="chip-spin" width="12" height="12" viewBox="0 0 16 16" fill="none">
+            <circle cx="8" cy="8" r="6" stroke="#a5b4fc" stroke-width="2" stroke-dasharray="20 18"/>
+          </svg>
+          <span>分析问题中...</span>
+        </div>
+        <!-- 思考中 -->
+        <div v-else-if="agentStatus.state === 'thinking'" class="status-chip thinking">
+          <svg class="chip-spin" width="12" height="12" viewBox="0 0 16 16" fill="none">
+            <circle cx="8" cy="8" r="6" stroke="#6366f1" stroke-width="2" stroke-dasharray="20 18"/>
+          </svg>
+          <span>{{ agentStatus.model || '模型' }} · 生成中</span>
+        </div>
+        <!-- 工具调用 -->
+        <div v-else-if="agentStatus.state === 'tool'" class="status-chip tool">
+          <svg class="chip-spin" width="12" height="12" viewBox="0 0 16 16" fill="none">
+            <circle cx="8" cy="8" r="6" stroke="#f59e0b" stroke-width="2" stroke-dasharray="20 18"/>
+          </svg>
+          <span>调用 {{ agentStatus.tool || '工具' }}...</span>
+        </div>
       </div>
     </div>
 
@@ -127,7 +182,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
 
     <!-- ── 对话视图 ── -->
     <div v-else class="chat-body">
-      <div class="messages-scroll" ref="messagesContainer">
+      <div class="messages-scroll" ref="messagesContainer" @scroll="onMessagesScroll">
         <div class="messages-inner">
           <MessageItem
             v-for="(msg, i) in messages"
@@ -217,38 +272,43 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   align-items: center;
   gap: 6px;
 }
-.model-tag {
-  border-radius: 20px !important;
-  font-size: 12px !important;
-  display: flex !important;
-  align-items: center !important;
-  gap: 5px !important;
-  font-family: inherit !important;
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid var(--cf-border);
+  background: var(--cf-card);
+  color: var(--cf-text-2);
+  transition: all 0.3s;
+  font-family: inherit;
 }
-.model-dot {
-  width: 6px; height: 6px;
-  border-radius: 50%;
-  background: var(--cf-green);
-  display: inline-block;
-}
-.gen-tag {
-  border-radius: 20px !important;
-  font-size: 12px !important;
-  display: flex !important;
-  align-items: center !important;
-  gap: 5px !important;
-  font-family: inherit !important;
-}
-.spin-dot {
+.status-chip.idle   { border-color: #bbf7d0; color: #16a34a; background: #f0fdf4; }
+.status-chip.done   { border-color: #bbf7d0; color: #16a34a; background: #f0fdf4; }
+.status-chip.routing  { border-color: #e0e7ff; color: #6366f1; background: #eef2ff; }
+.status-chip.thinking { border-color: #e0e7ff; color: #6366f1; background: #eef2ff; }
+.status-chip.tool   { border-color: #fde68a; color: #b45309; background: #fffbeb; }
+.chip-dot {
   width: 6px; height: 6px;
   border-radius: 50%;
   background: currentColor;
-  display: inline-block;
-  animation: blink 1s ease-in-out infinite;
+  flex-shrink: 0;
 }
-@keyframes blink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.2; }
+.chip-sub {
+  color: currentColor;
+  opacity: 0.6;
+  font-size: 11px;
+}
+.chip-spin {
+  flex-shrink: 0;
+  animation: spin-ccw 1s linear infinite;
+  transform-origin: center;
+}
+@keyframes spin-ccw {
+  to { transform: rotate(360deg); }
 }
 
 /* 空状态 */
