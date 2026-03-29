@@ -30,6 +30,9 @@ dependencies = [
     # ── 向量数据库 ──
     "qdrant-client>=1.9.0",
 
+    # ── 配置管理 ──
+    "pydantic-settings>=2.3.0",
+
     # ── 内置工具依赖 ──
     "ddgs>=1.0.0",
 ]

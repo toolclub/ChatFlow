@@ -9,11 +9,14 @@ const props = defineProps<{
   messages: Message[]
   loading: boolean
   agentStatus: AgentStatus
+  hasCognitiveContent?: boolean  // 是否有历史认知内容（用于显示展开按钮）
+  panelOpen?: boolean             // 认知面板当前是否展开
 }>()
 
 const emit = defineEmits<{
   send: [payload: SendPayload]
   stop: []
+  togglePanel: []                 // 切换认知面板展开/折叠
 }>()
 
 const messagesContainer = ref<HTMLDivElement>()
@@ -116,6 +119,20 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
         <span class="header-title">AI 对话</span>
       </div>
       <div class="header-right">
+        <!-- 认知面板切换按钮（有历史内容时显示） -->
+        <el-tooltip v-if="hasCognitiveContent" :content="panelOpen ? '折叠认知面板' : '展开认知面板'" placement="bottom">
+          <el-button
+            text size="small"
+            :type="panelOpen ? 'primary' : 'default'"
+            style="padding:4px 7px;font-size:13px;"
+            @click="emit('togglePanel')"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style="opacity:0.8">
+              <path d="M12 3C12 3 13.2 8.8 18 11C13.2 13.2 12 19 12 19C12 19 10.8 13.2 6 11C10.8 8.8 12 3 12 3Z"/>
+            </svg>
+          </el-button>
+        </el-tooltip>
+
         <!-- 就绪 -->
         <el-tag v-if="agentStatus.state === 'idle'" type="success" effect="plain" round :closable="false" class="s-tag">
           {{ agentStatus.model || '就绪' }}
@@ -129,6 +146,11 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
         <!-- 路由中 -->
         <el-tag v-else-if="agentStatus.state === 'routing'" type="info" effect="plain" round :closable="false" class="s-tag">
           <el-icon class="s-spin" style="margin-right:4px"><Loading /></el-icon>分析中
+        </el-tag>
+
+        <!-- 规划中 -->
+        <el-tag v-else-if="agentStatus.state === 'planning'" type="info" effect="plain" round :closable="false" class="s-tag" style="color:#8b5cf6;border-color:#c4b5fd">
+          <el-icon class="s-spin" style="margin-right:4px"><Loading /></el-icon>规划中
         </el-tag>
 
         <!-- 生成中 -->

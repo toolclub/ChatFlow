@@ -1,3 +1,5 @@
+import type { PlanStep } from '../types'
+
 const API_BASE = ''
 
 // ── 浏览器唯一标识（localStorage 持久化，同浏览器同 origin 共享） ─────────────
@@ -74,6 +76,8 @@ export async function sendMessage(
   onSearchItem: (item: { url: string; title: string; status: string }) => void,
   onStatus: (status: string, model?: string) => void,
   onRoute: (model: string, intent: string) => void,
+  onPlanGenerated: (steps: PlanStep[]) => void,
+  onReflection: (content: string, decision: string) => void,
   onDone: () => void,
   onStopped: () => void,
   signal?: AbortSignal,
@@ -106,20 +110,22 @@ export async function sendMessage(
 
     buffer += decoder.decode(value, { stream: true })
     const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''   // 保留不完整的最后一行
+    buffer = lines.pop() ?? ''
 
     for (const line of lines) {
       if (!line.startsWith('data: ')) continue
       try {
         const data = JSON.parse(line.slice(6))
-        if (data.content)      onChunk(data.content)
-        if (data.tool_call)    onToolCall(data.tool_call.name, data.tool_call.input)
-        if (data.tool_result)  onToolResult(data.tool_result.name, data.tool_result)
-        if (data.search_item)  onSearchItem(data.search_item)
-        if (data.status)       onStatus(data.status, data.model)
-        if (data.route)        onRoute(data.route.model, data.route.intent)
-        if (data.done)         onDone()
-        if (data.stopped)      onStopped()
+        if (data.content)           onChunk(data.content)
+        if (data.tool_call)         onToolCall(data.tool_call.name, data.tool_call.input)
+        if (data.tool_result)       onToolResult(data.tool_result.name, data.tool_result)
+        if (data.search_item)       onSearchItem(data.search_item)
+        if (data.status)            onStatus(data.status, data.model)
+        if (data.route)             onRoute(data.route.model, data.route.intent)
+        if (data.plan_generated)    onPlanGenerated(data.plan_generated.steps)
+        if (data.reflection)        onReflection(data.reflection.content, data.reflection.decision)
+        if (data.done)              onDone()
+        if (data.stopped)           onStopped()
       } catch {}
     }
   }

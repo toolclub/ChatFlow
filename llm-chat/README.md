@@ -1,186 +1,190 @@
-# LLM Chat — 本地大语言模型对话系统
+# ChatFlow — 本地 LLM 智能对话系统
 
-## 目录结构
-
-```
-llm-chat/
-├── backend/
-│   ├── main.py              # FastAPI 主入口
-│   ├── config.py            # 集中配置（含功能开关）
-│   ├── harness.py           # Agent 总线，连接各层
-│   ├── ollama_client.py     # Ollama API 客户端
-│   ├── models.py            # Pydantic 数据模型
-│   ├── layers/
-│   │   ├── prompt.py        # 第 1 层：System Prompt 管理
-│   │   ├── capability.py    # 第 2 层：模型列表、Embedding
-│   │   ├── memory.py        # 第 3 层：记忆数据结构
-│   │   ├── longterm.py      # 第 3b 层：长期记忆（Qdrant RAG）
-│   │   ├── runtime.py       # 第 4 层：流式/同步调用
-│   │   ├── state.py         # 第 5 层：进程内工作记忆
-│   │   ├── context.py       # 第 6 层：上下文组装 + 压缩
-│   │   ├── persistence.py   # 第 7 层：磁盘持久化
-│   │   ├── verification.py  # 第 8 层：日志可观测性
-│   │   └── extension.py     # 第 9 层：CORS 等扩展
-│   └── conversations/       # 对话持久化存储（自动创建）
-└── frontend/
-    ├── src/
-    │   ├── App.vue
-    │   ├── main.ts
-    │   ├── style.css
-    │   ├── api/index.ts
-    │   ├── components/
-    │   │   ├── Sidebar.vue
-    │   │   ├── ChatView.vue
-    │   │   ├── MessageItem.vue
-    │   │   └── InputBox.vue
-    │   ├── composables/useChat.ts
-    │   └── types/index.ts
-    ├── package.json
-    └── vite.config.ts
-```
+基于 LangChain + LangGraph 构建的本地 AI 对话系统，支持多意图路由、自动规划、工具调用、长期记忆和工作流编排。
 
 ---
 
-## 前提条件
+## 核心特性
 
-1. 安装 [Ollama](https://ollama.com/download)（Windows 版双击安装，安装后自动后台运行）
-2. 下载模型：
-   ```bash
-   ollama pull qwen2.5:14b      # 对话主模型
-   ollama pull qwen2.5:1.5b     # 摘要压缩模型
-   ollama pull bge-m3           # Embedding 模型（长期记忆启用时需要）
-   ```
-3. （可选）部署 [Qdrant](https://qdrant.tech/documentation/quick-start/) 以启用长期记忆：
-   ```bash
-   docker run -p 6333:6333 qdrant/qdrant
-   ```
-   > 不部署 Qdrant 时，将 `config.py` 中的 `LONGTERM_MEMORY_ENABLED` 设为 `False` 即可。
+- **多意图路由**：自动识别问题类型（代码 / 搜索 / 对话 / 搜索+代码），路由到对应模型
+- **自动规划**：复杂任务自动拆分为多步骤执行计划，可视化展示进度
+- **可编辑工作流**：前端直接拖拽、插入、删除执行步骤后重新执行
+- **工具调用**：Web 搜索、网页阅读、时间查询、计算器，支持 MCP 协议扩展
+- **三级记忆体系**：短期（滑动窗口）→ 中期（语义压缩摘要）→ 长期（Qdrant RAG 向量检索）
+- **选择性遗忘**：话题切换时自动忽略无关历史，保持回答质量
+- **流式 SSE 输出**：实时逐 token 渲染，工具调用进度实时展示
 
 ---
 
-## 启动后端
+## 快速开始
+
+### 方式一：Docker Compose 一键部署（推荐）
+
+**前提**：
+1. 安装 [Docker Desktop](https://www.docker.com/products/docker-desktop/)（Windows/Mac）
+2. 安装 [Ollama](https://ollama.com/download) 并下载模型：
+   ```bash
+   ollama pull qwen3:8b
+   ollama pull bge-m3
+   ```
+
+**启动**：
 
 ```bash
-cd llm-chat/backend
+cd llm-chat
 
-# 创建虚拟环境
+# 复制配置文件（可选，有合理默认值）
+cp .env.example .env
+# 编辑 .env 按需修改模型名称等
+
+# 一键启动三个容器（backend + frontend + qdrant）
+docker compose up -d
+
+# 查看日志
+docker compose logs -f
+```
+
+浏览器访问 **http://localhost** 即可使用。
+
+> **Windows Docker 说明**：容器内通过 `host.docker.internal` 访问宿主机上的 Ollama，已在 `docker-compose.yml` 中预设。
+
+**停止**：
+```bash
+docker compose down
+```
+
+**重新构建**（代码变更后）：
+```bash
+docker compose up -d --build
+```
+
+---
+
+### 方式二：本地手动启动（开发模式）
+
+**前提**：Python 3.11+、Node.js 18+、Ollama 已运行
+
+```bash
+# 1. 下载模型
+ollama pull qwen3:8b
+ollama pull bge-m3
+
+# 2. 启动后端
+cd llm-chat/backend
 python -m venv venv
-
-# 激活（Windows）
-venv\Scripts\activate
-
-# 安装依赖
+venv\Scripts\activate          # Windows
+# source venv/bin/activate     # macOS/Linux
 pip install -e .
-
-# 启动
-python main.py
-```
-
-后端运行在 http://localhost:8000，API 文档：http://localhost:8000/docs
-
----
-
-## 启动前端
-
-```bash
-cd llm-chat/frontend
-
-# 安装依赖
-npm install
-
-# 启动开发服务器
-npm run dev
-```
-
-前端运行在 http://localhost:5173
-
----
-
-## 每次使用
-
-```bash
-# 1. 确认 Ollama 已运行
-ollama list
-
-# 2. 启动后端（新终端）
-cd llm-chat/backend
-venv\Scripts\activate
 python main.py
 
 # 3. 启动前端（新终端）
 cd llm-chat/frontend
+npm install
 npm run dev
 ```
 
-浏览器打开 http://localhost:5173 即可使用。
+访问 **http://localhost:5173**
 
 ---
 
-## 记忆体系
+## 配置说明
 
-系统采用三级记忆架构，兼顾上下文丰富性与 Token 效率：
+所有配置均支持通过 `.env` 文件或环境变量覆盖，无需修改代码。
 
-### 1. 短期记忆（滑动窗口）
-
-最近 `SHORT_TERM_MAX_TURNS`（默认 10）轮的完整对话原文，每轮都会发送给模型。对话历史永久保留在磁盘，不会删除。
-
-### 2. 中期摘要（语义压缩）
-
-当未摘要的消息数量达到 `COMPRESS_TRIGGER`（默认 8）轮时，自动触发压缩：
-- 用轻量摘要模型（`qwen2.5:1.5b`）将旧对话压缩为滚动摘要
-- 摘要以 `【对话背景摘要】` 的形式注入上下文
-- 原始消息永远不删除，游标向前推进
-
-### 3. 长期记忆（RAG 向量检索）
-
-> 需要部署 Qdrant，并将 `LONGTERM_MEMORY_ENABLED = True`
-
-- 每次触发压缩时，将该批对话 Q&A 对批量写入 Qdrant（而非每轮写入）
-- 每轮对话开始前，用当前问题做 Embedding 检索最相关的历史 Q&A
-- 相关结果以 `【长期记忆】` 的形式注入上下文
-- 检索分数低于 `LONGTERM_SCORE_THRESHOLD`（默认 0.5）的结果自动过滤
-
----
-
-## 选择性遗忘
-
-当模型收到的问题与当前对话历史无关时，系统会自动"忘记"无关上下文，只将最近 `SHORT_TERM_FORGET_TURNS`（默认 2）轮发送给模型，避免无关历史干扰回答质量。
-
-### 触发条件（同时满足）
-
-1. **RAG 未命中**：向量检索没有找到相关历史记忆（`LONGTERM_MEMORY_ENABLED=False` 时此条件视为满足）
-2. **话题不相关**：
-   - 若已有摘要：当前问题与摘要的余弦相似度低于 `SUMMARY_RELEVANCE_THRESHOLD`（默认 0.4）
-   - 若尚无摘要（早期对话）：当前问题与最近 2 条用户消息的平均余弦相似度低于阈值
-
-### 效果示例
-
-```
-第1轮：如何用 Python 写快速排序？   → 正常流程（历史不足）
-第2轮：能再优化一下时间复杂度吗？   → 正常流程（相关追问，相似度高）
-第3轮：苹果是什么颜色？             → 触发遗忘（话题切换，只发近2轮）
+```bash
+cp .env.example .env
 ```
 
-### 相关配置
-
-```python
-LONGTERM_MEMORY_ENABLED = True      # 是否启用 RAG 长期记忆
-SUMMARY_RELEVANCE_THRESHOLD = 0.4   # 相似度低于此值触发遗忘
-SHORT_TERM_FORGET_TURNS = 2         # 遗忘模式下只保留最近 N 轮
-```
-
----
-
-## 配置说明（config.py）
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `CHAT_MODEL` | `qwen2.5:14b` | 对话主模型 |
-| `SUMMARY_MODEL` | `qwen2.5:1.5b` | 摘要压缩模型 |
+| 环境变量 | 默认值 | 说明 |
+|---------|--------|------|
+| `LLM_BASE_URL` | `http://localhost:11434/v1` | LLM 服务地址（支持 Ollama / vLLM / OpenAI） |
+| `API_KEY` | `ollama` | API Key（OpenAI 填真实 Key） |
+| `CHAT_MODEL` | `qwen3:8b` | 默认对话模型 |
 | `EMBEDDING_MODEL` | `bge-m3` | Embedding 模型 |
-| `SHORT_TERM_MAX_TURNS` | `10` | 短期记忆滑动窗口轮数 |
-| `COMPRESS_TRIGGER` | `8` | 触发摘要压缩的轮数 |
-| `LONGTERM_MEMORY_ENABLED` | `True` | 是否启用 Qdrant 长期记忆 |
-| `LONGTERM_SCORE_THRESHOLD` | `0.5` | RAG 最低相似度过滤阈值 |
-| `SUMMARY_RELEVANCE_THRESHOLD` | `0.4` | 话题相关性判断阈值（遗忘机制） |
-| `SHORT_TERM_FORGET_TURNS` | `2` | 遗忘模式下保留的对话轮数 |
+| `ROUTER_ENABLED` | `true` | 是否启用意图路由 |
+| `LONGTERM_MEMORY_ENABLED` | `true` | 是否启用 Qdrant 长期记忆 |
+| `QDRANT_URL` | `http://localhost:6333` | Qdrant 地址（Docker 内用 `http://qdrant:6333`） |
+
+完整配置见 [`.env.example`](.env.example)。
+
+---
+
+## 项目结构
+
+```
+llm-chat/
+├── backend/
+│   ├── config.py          # 配置中心（pydantic-settings，支持 .env）
+│   ├── main.py            # FastAPI 入口
+│   ├── models.py          # Pydantic 请求/响应模型
+│   ├── graph/             # LangGraph Agent 图
+│   │   ├── agent.py       # 图构建与编译
+│   │   ├── nodes.py       # 路由 / 规划 / 执行 / 反思节点
+│   │   ├── edges.py       # 条件路由逻辑
+│   │   ├── runner.py      # 流式执行 + SSE 事件生成
+│   │   └── state.py       # AgentState 类型定义
+│   ├── llm/               # LLM / Embedding 工厂
+│   ├── memory/            # 短期 + 中期记忆
+│   ├── rag/               # 长期记忆（Qdrant RAG）
+│   ├── tools/             # 内置工具 + MCP 加载器
+│   ├── Dockerfile
+│   └── pyproject.toml
+├── frontend/
+│   ├── src/
+│   │   ├── components/    # Vue 组件（Chat / CognitivePanel / MessageItem 等）
+│   │   ├── composables/   # useChat 组合式函数
+│   │   ├── types/         # TypeScript 类型定义
+│   │   └── api/           # 后端 API 调用封装
+│   ├── nginx.conf         # 生产 Nginx 配置
+│   └── Dockerfile
+├── docker-compose.yml     # 三容器编排
+├── .env.example           # 配置模板
+├── LICENSE
+└── CHANGELOG.md
+```
+
+---
+
+## 三级记忆体系
+
+| 层级 | 机制 | 存储 |
+|------|------|------|
+| **短期记忆** | 滑动窗口（最近 10 轮） | 内存 + 磁盘 JSON |
+| **中期摘要** | 达到触发轮数时自动压缩 | 磁盘 JSON |
+| **长期记忆** | 压缩时写入 Qdrant，每轮检索 Top-K | Qdrant 向量库 |
+
+**选择性遗忘**：当前问题与历史话题相似度低于阈值时，自动只发近 2 轮消息给模型，避免无关历史干扰。
+
+---
+
+## MCP 工具扩展
+
+在 `.env` 中添加：
+
+```bash
+MCP_SERVERS={"filesystem":{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","./data"],"transport":"stdio"}}
+```
+
+或直接在 `config.py` 的 `mcp_servers` 字典中配置。
+
+---
+
+## API 文档
+
+后端启动后访问：**http://localhost:8000/docs**
+
+主要接口：
+- `POST /api/chat` — 流式对话（SSE）
+- `GET /api/conversations` — 对话列表
+- `GET /api/tools` — 可用工具列表
+- `GET /api/conversations/{id}/memory` — 记忆状态调试
+
+---
+
+## 贡献
+
+见 [CONTRIBUTING.md](CONTRIBUTING.md)
+
+## 许可证
+
+[MIT License](LICENSE)

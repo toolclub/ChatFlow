@@ -24,58 +24,100 @@ function faviconUrl(url: string) {
 }
 
 // ─── Marked + highlight.js 实例 ───
-// marked v13: renderer.code(text, lang, escaped) — 三个位置参数，非 token 对象
-const markedInstance = new Marked()
-markedInstance.use({
-  gfm: true,
-  renderer: {
-    code(text: string, lang: string): string {
-      const language = (lang || 'plaintext').toLowerCase()
+// marked v13 breaking change: renderer methods receive a token object, not positional args.
+// 兼容写法：检查第一个参数是否为对象（v13 token）或字符串（旧版）。
+function buildCodeHtml(rawToken: any): string {
+  // v13: token = { type:'code', text:'...', lang:'python', raw:'...' }
+  // old: code(text: string, lang: string)
+  const text: string = typeof rawToken === 'object' && rawToken !== null
+    ? (rawToken.text ?? '')
+    : String(rawToken ?? '')
+  const lang: string = typeof rawToken === 'object' && rawToken !== null
+    ? (rawToken.lang ?? '')
+    : ''
 
-      let highlighted: string
-      try {
-        if (hljs.getLanguage(language)) {
-          highlighted = hljs.highlight(text, { language, ignoreIllegals: true }).value
-        } else {
-          highlighted = hljs.highlightAuto(text).value
-        }
-      } catch {
-        highlighted = text
-          .replace(/&/g, '&amp;')
-          .replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;')
-      }
+  const language = (lang || 'plaintext').toLowerCase()
 
-      const isPreviewable = PREVIEWABLE.has(language)
-      const encoded = encodeURIComponent(text)
-
-      const previewBtn = isPreviewable
-        ? `<button class="cb-btn cb-preview" data-code="${encoded}" data-lang="${language}" title="在沙盒中预览渲染效果">
-            <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-              <path d="M1 8s3-5 7-5 7 5 7 5-3 5-7 5-7-5-7-5z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
-              <circle cx="8" cy="8" r="2.5" stroke="currentColor" stroke-width="1.5"/>
-            </svg>
-            <span class="cb-text">预览</span>
-          </button>`
-        : ''
-
-      return `<div class="code-block">
-        <div class="code-header">
-          <span class="code-lang-badge">${language}</span>
-          <div class="code-action-row">
-            ${previewBtn}
-            <button class="cb-btn cb-copy" data-code="${encoded}" title="复制代码">
-              <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-                <rect x="5.5" y="5.5" width="8" height="9" rx="1.5" stroke="currentColor" stroke-width="1.4"/>
-                <path d="M3 10.5V3a1 1 0 011-1h7.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
-              </svg>
-              <span class="cb-text">复制</span>
-            </button>
-          </div>
-        </div>
-        <pre class="code-pre"><code class="hljs">${highlighted}</code></pre>
-      </div>`
+  let highlighted: string
+  try {
+    if (hljs.getLanguage(language)) {
+      highlighted = hljs.highlight(text, { language, ignoreIllegals: true }).value
+    } else {
+      highlighted = hljs.highlightAuto(text).value
     }
+  } catch {
+    highlighted = text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+  }
+
+  const isPreviewable = PREVIEWABLE.has(language)
+  const encoded = encodeURIComponent(text)
+
+  const previewBtn = isPreviewable
+    ? `<button class="cb-btn cb-preview" data-code="${encoded}" data-lang="${language}" title="在沙盒中预览渲染效果">
+        <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
+          <path d="M1 8s3-5 7-5 7 5 7 5-3 5-7 5-7-5-7-5z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+          <circle cx="8" cy="8" r="2.5" stroke="currentColor" stroke-width="1.5"/>
+        </svg>
+        <span class="cb-text">预览</span>
+      </button>`
+    : ''
+
+  return `<div class="code-block">
+    <div class="code-header">
+      <span class="code-lang-badge">${language}</span>
+      <div class="code-action-row">
+        ${previewBtn}
+        <button class="cb-btn cb-copy" data-code="${encoded}" title="复制代码">
+          <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
+            <rect x="5.5" y="5.5" width="8" height="9" rx="1.5" stroke="currentColor" stroke-width="1.4"/>
+            <path d="M3 10.5V3a1 1 0 011-1h7.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+          </svg>
+          <span class="cb-text">复制</span>
+        </button>
+      </div>
+    </div>
+    <pre class="code-pre"><code class="hljs">${highlighted}</code></pre>
+  </div>`
+}
+
+const markedInstance = new Marked({ gfm: true, breaks: false })
+markedInstance.use({
+  renderer: {
+    // v13 token-based API (first arg is token object)
+    code(token: any): string {
+      return buildCodeHtml(token)
+    },
+
+    // 自定义表格渲染：套一层可横向滚动的 wrapper，防止宽表格溢出
+    table(token: any): string {
+      // token.header: TableCell[], token.rows: TableCell[][]
+      // 直接调用默认渲染逻辑后包裹 wrapper
+      const header = token.header ?? []
+      const rows   = token.rows   ?? []
+      const align  = token.align  ?? []
+
+      const thCells = header.map((cell: any, i: number) => {
+        const a = align[i]
+        const style = a ? ` style="text-align:${a}"` : ''
+        const txt = typeof cell === 'object' ? (cell.text ?? '') : String(cell)
+        return `<th${style}>${txt}</th>`
+      }).join('')
+
+      const bodyRows = rows.map((row: any[]) => {
+        const tds = row.map((cell: any, i: number) => {
+          const a = align[i]
+          const style = a ? ` style="text-align:${a}"` : ''
+          const txt = typeof cell === 'object' ? (cell.text ?? '') : String(cell)
+          return `<td${style}>${txt}</td>`
+        }).join('')
+        return `<tr>${tds}</tr>`
+      }).join('\n')
+
+      return `<div class="table-wrapper"><table><thead><tr>${thCells}</tr></thead><tbody>${bodyRows}</tbody></table></div>`
+    },
   }
 })
 
@@ -171,7 +213,32 @@ watch(
             class="user-img"
           />
         </div>
-        <div v-if="message.content" class="user-bubble">{{ message.content }}</div>
+
+        <!-- Workflow plan card (replaces plain bubble for workflow messages) -->
+        <div v-if="message.workflowPlan?.length" class="wf-card">
+          <div class="wf-card-header">
+            <div class="wf-card-badge">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none">
+                <path d="M12 3C12 3 13.2 8.8 18 11C13.2 13.2 12 19 12 19C12 19 10.8 13.2 6 11C10.8 8.8 12 3 12 3Z" fill="currentColor"/>
+              </svg>
+              工作流执行
+            </div>
+            <span class="wf-card-count">{{ message.workflowPlan.length }} 步</span>
+          </div>
+          <div v-if="message.workflowGoal" class="wf-card-goal">{{ message.workflowGoal }}</div>
+          <div class="wf-card-steps">
+            <div v-for="(step, i) in message.workflowPlan.slice(0, 7)" :key="i" class="wf-card-step">
+              <span class="wf-step-num">{{ i + 1 }}</span>
+              <span class="wf-step-title">{{ step.title }}</span>
+            </div>
+            <div v-if="message.workflowPlan.length > 7" class="wf-card-more">
+              +{{ message.workflowPlan.length - 7 }} 个步骤
+            </div>
+          </div>
+        </div>
+
+        <!-- Plain text bubble (non-workflow messages) -->
+        <div v-else-if="message.content" class="user-bubble">{{ message.content }}</div>
       </div>
       <!-- 用户头像：极简人形剪影 -->
       <div class="user-avatar">
@@ -384,6 +451,102 @@ watch(
   word-break: break-word;
   box-shadow: none;
   letter-spacing: -0.1px;
+}
+
+/* ── Workflow plan card ── */
+.wf-card {
+  background: #fff;
+  border: 1.5px solid #e0e7ff;
+  border-radius: 14px;
+  overflow: hidden;
+  max-width: 320px;
+  box-shadow: 0 2px 10px rgba(99,102,241,0.08);
+}
+.wf-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 12px 8px;
+  background: linear-gradient(135deg, #eef2ff 0%, #f5f3ff 100%);
+  border-bottom: 1px solid #e0e7ff;
+}
+.wf-card-badge {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #4f46e5;
+}
+.wf-card-count {
+  font-size: 11px;
+  font-weight: 600;
+  color: #8b5cf6;
+  background: rgba(139,92,246,0.1);
+  padding: 1px 7px;
+  border-radius: 10px;
+}
+.wf-card-goal {
+  padding: 7px 12px 5px;
+  font-size: 12.5px;
+  color: #374151;
+  line-height: 1.45;
+  border-bottom: 1px solid #f3f4f6;
+  font-weight: 500;
+}
+.wf-card-steps {
+  padding: 6px 0 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.wf-card-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  transition: background 0.12s;
+}
+.wf-card-step:hover { background: #f9fafb; }
+.wf-step-num {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #eef2ff;
+  border: 1px solid #c7d2fe;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9.5px;
+  font-weight: 700;
+  color: #6366f1;
+  flex-shrink: 0;
+}
+.wf-step-title {
+  font-size: 12px;
+  color: #374151;
+  line-height: 1.4;
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wf-card-more {
+  padding: 3px 12px 5px;
+  font-size: 11px;
+  color: #9ca3af;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.wf-card-more::before {
+  content: '';
+  display: inline-block;
+  width: 18px;
+  height: 1px;
+  background: #e5e7eb;
+  flex-shrink: 0;
 }
 
 /* AI */
@@ -637,7 +800,22 @@ watch(
 
 .markdown-body hr { border: none; border-top: 1px solid #e4e6ef; margin: 18px 0; }
 
-/* 表格 */
+/* 表格 wrapper — 支持横向滚动（防止宽表格溢出） */
+.markdown-body .table-wrapper {
+  width: 100%;
+  overflow-x: auto;
+  margin: 14px 0;
+  border-radius: 8px;
+  border: 1px solid #e4e6ef;
+}
+.markdown-body .table-wrapper table {
+  border-collapse: collapse;
+  width: 100%;
+  min-width: 400px;
+  font-size: 13.5px;
+  margin: 0;
+  border: none;
+}
 .markdown-body table {
   border-collapse: collapse; width: 100%;
   margin: 14px 0; font-size: 13.5px;
@@ -646,6 +824,7 @@ watch(
 }
 .markdown-body th, .markdown-body td {
   border: 1px solid #e4e6ef; padding: 8px 14px; text-align: left;
+  white-space: nowrap;
 }
 .markdown-body th {
   background: #f3f4f8; font-weight: 600;

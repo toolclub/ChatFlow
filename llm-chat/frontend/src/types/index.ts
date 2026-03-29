@@ -14,18 +14,28 @@ export interface ToolCallRecord {
   name: string
   input: Record<string, unknown>
   output?: string
-  results?: SearchResultItem[]   // legacy (不再使用)
-  searchItems?: SearchItem[]     // web_search 逐条实时追加
-  fetchStatus?: 'loading' | 'done' | 'fail'  // fetch_webpage 状态
+  results?: SearchResultItem[]
+  searchItems?: SearchItem[]
+  fetchStatus?: 'loading' | 'done' | 'fail'
   done: boolean
+}
+
+export interface PlanStep {
+  id: string
+  title: string
+  description: string
+  status: 'pending' | 'running' | 'done' | 'failed'
+  result?: string
 }
 
 export interface Message {
   role: 'user' | 'assistant'
   content: string
-  images?: string[]  // base64 data URLs
+  images?: string[]
   timestamp?: number
   toolCalls?: ToolCallRecord[]
+  workflowPlan?: PlanStep[]   // set when message is a workflow execution request
+  workflowGoal?: string       // original user question for workflow messages
 }
 
 export interface ConversationInfo {
@@ -48,7 +58,35 @@ export interface SendPayload {
 }
 
 export interface AgentStatus {
-  state: 'idle' | 'routing' | 'thinking' | 'tool' | 'done'
-  model: string   // 当前工作模型
-  tool?: string   // 当前调用的工具名
+  state: 'idle' | 'routing' | 'planning' | 'thinking' | 'tool' | 'done'
+  model: string
+  tool?: string
+  intent?: string
+}
+
+export interface TraceEntry {
+  type: 'tool_call' | 'tool_result' | 'reflection' | 'step_start' | 'search_item' | 'info'
+  content: string
+  toolName?: string
+  timestamp: number
+}
+
+export interface CognitiveState {
+  plan: PlanStep[]
+  currentStepIndex: number
+  reflection: string
+  reflectorDecision: string
+  traceLog: TraceEntry[]
+  isActive: boolean
+}
+
+export function makeEmptyCognitiveState(): CognitiveState {
+  return {
+    plan: [],
+    currentStepIndex: 0,
+    reflection: '',
+    reflectorDecision: '',
+    traceLog: [],
+    isActive: false,
+  }
 }

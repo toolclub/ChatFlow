@@ -1,0 +1,80 @@
+services:
+
+  # ── Qdrant 向量数据库 ─────────────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: chatflow-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"   # REST API / Dashboard
+      - "6334:6334"   # gRPC（可选）
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:6333/readyz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Python FastAPI 后端 ────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: chatflow-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      # 对话数据持久化到宿主机，避免重建容器丢失数据
+      - ./data/conversations:/app/conversations
+    env_file:
+      # 优先读取 llm-chat/.env，文件不存在时使用下方 environment 默认值
+      - path: .env
+        required: false
+    environment:
+      # Docker 容器内连接宿主机 Ollama（Windows/Mac Docker Desktop 专用）
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:11434/v1}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      API_KEY: ${API_KEY:-ollama}
+      CHAT_MODEL: ${CHAT_MODEL:-qwen3:8b}
+      SUMMARY_MODEL: ${SUMMARY_MODEL:-qwen3:8b}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
+      ROUTER_ENABLED: ${ROUTER_ENABLED:-true}
+      ROUTER_MODEL: ${ROUTER_MODEL:-qwen3:8b}
+      SEARCH_MODEL: ${SEARCH_MODEL:-qwen3:8b}
+      # 容器内用 service name 访问 Qdrant
+      QDRANT_URL: http://qdrant:6333
+      LONGTERM_MEMORY_ENABLED: ${LONGTERM_MEMORY_ENABLED:-true}
+      CONVERSATIONS_DIR: /app/conversations
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/tools || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  # ── Vue 前端（Nginx 静态服务 + API 反代）─────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: chatflow-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  qdrant_data:
+    name: chatflow-qdrant-data
+
+networks:
+  default:
+    name: chatflow-network
