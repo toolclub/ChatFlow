@@ -39,7 +39,7 @@ cp .env.example .env
 
 # 一键启动三个容器（backend + frontend + qdrant）
 docker compose up -d
-
+ 
 # 查看日志
 docker compose logs -f
 ```
