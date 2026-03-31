@@ -4,15 +4,17 @@ author: leizihao
 email: lzh19162600626@gmail.com
 
 启动顺序（lifespan）：
-  1. 从磁盘加载全部对话到内存
-  2. 初始化 Qdrant Collection（若启用长期记忆）
-  3. 加载 MCP 工具（若配置了 MCP_SERVERS）
-  4. 构建并编译 LangGraph Agent 图
+  0. 初始化日志系统
+  1. 初始化 PostgreSQL 连接并创建表结构
+  2. 从数据库加载全部对话到内存缓存
+  3. 初始化 Qdrant Collection（若启用长期记忆）
+  4. 加载 MCP 工具（若配置了 MCP_SERVERS）
+  5. 构建并编译 LangGraph Agent 图
 
-REST API 与原版完全兼容，前端无需修改。
 新增接口：
-  GET  /api/tools          —— 查看当前可用工具列表
-  GET  /api/conversations/{id}/memory  —— 记忆状态调试（新增 active_tools 字段）
+  GET  /api/tools                        —— 查看当前可用工具列表
+  GET  /api/conversations/{id}/memory    —— 记忆状态调试
+  GET  /api/conversations/{id}/tools     —— 对话工具调用历史（供前端刷新后复现）
 """
 import asyncio
 import logging
@@ -27,19 +29,26 @@ from fastapi.responses import StreamingResponse
 
 from models import ChatRequest, CreateConversationRequest, UpdateConversationRequest
 from memory import store as memory_store
+from memory.tool_events import get_tool_events
 from rag import retriever as rag_retriever
 from tools.mcp.loader import load_mcp_tools
 from tools import get_all_tools, get_tool_names, get_tools_info
 from graph import agent as graph_agent
 from graph import runner as graph_runner
-from layers.extension import apply_cors  # 保留原有 CORS 配置
+from layers.extension import apply_cors
+from db.database import init_engine, get_engine
+from db.models import Base
+from logging_config import setup_logging
 from config import (
     CHAT_MODEL,
     BACKEND_HOST,
     BACKEND_PORT,
     EMBEDDING_MODEL,
     LONGTERM_MEMORY_ENABLED,
-    MCP_SERVERS, API_BASE_URL,
+    MCP_SERVERS,
+    API_BASE_URL,
+    DATABASE_URL,
+    LOG_DIR,
 )
 
 logger = logging.getLogger("main")
@@ -51,10 +60,20 @@ logger = logging.getLogger("main")
 async def lifespan(app: FastAPI):
     # ── 启动 ──
 
-    # 1. 从磁盘加载对话历史
-    memory_store.init()
+    # 0. 初始化日志系统
+    setup_logging(LOG_DIR)
 
-    # 2. 初始化 Qdrant
+    # 1. 初始化数据库连接并自动建表
+    init_engine(DATABASE_URL)
+    engine = get_engine()
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    logger.info("数据库初始化完成")
+
+    # 2. 从数据库加载对话到内存缓存
+    await memory_store.init()
+
+    # 3. 初始化 Qdrant
     if LONGTERM_MEMORY_ENABLED:
         try:
             await rag_retriever.init_collection()
@@ -63,13 +82,13 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("长期记忆（RAG）已禁用，跳过 Qdrant 初始化")
 
-    # 3. 加载 MCP 工具
+    # 4. 加载 MCP 工具
     if MCP_SERVERS:
         await load_mcp_tools(MCP_SERVERS)
     else:
         logger.info("未配置 MCP 服务器，跳过 MCP 工具加载")
 
-    # 4. 构建 LangGraph Agent 图
+    # 5. 构建 LangGraph Agent 图
     all_tools = get_all_tools()
     graph_agent.init(tools=all_tools, model=CHAT_MODEL)
 
@@ -81,7 +100,7 @@ async def lifespan(app: FastAPI):
     )
 
     yield
-    # ── 关闭（无需操作，Qdrant 客户端无持久连接） ──
+    # ── 关闭 ──
 
 
 app = FastAPI(title="ChatFlow", version="2.0.0", lifespan=lifespan)
@@ -100,7 +119,10 @@ async def get_models():
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(f"{API_BASE_URL}/api/tags")
             data = resp.json()
-            models = [m["name"] for m in data.get("models", []) if not m["name"].startswith(EMBEDDING_MODEL.split(":")[0])]
+            models = [
+                m["name"] for m in data.get("models", [])
+                if not m["name"].startswith(EMBEDDING_MODEL.split(":")[0])
+            ]
     except Exception:
         models = [CHAT_MODEL]
     return {"models": models}
@@ -126,7 +148,7 @@ async def get_conversations(request: Request):
 async def create_conversation(req: CreateConversationRequest, request: Request):
     client_id = request.headers.get("X-Client-ID", "")
     conv_id = str(uuid.uuid4())[:8]
-    conv = memory_store.create(
+    conv = await memory_store.create(
         conv_id=conv_id,
         title=req.title or "新对话",
         system_prompt=req.system_prompt or "",
@@ -161,13 +183,13 @@ async def update_conversation(conv_id: str, req: UpdateConversationRequest):
         conv.title = req.title
     if req.system_prompt is not None:
         conv.system_prompt = req.system_prompt
-    memory_store.save(conv)
+    await memory_store.save(conv)
     return {"ok": True}
 
 
 @app.delete("/api/conversations/{conv_id}")
 async def delete_conversation(conv_id: str):
-    memory_store.delete(conv_id)
+    await memory_store.delete(conv_id)
     if LONGTERM_MEMORY_ENABLED:
         await rag_retriever.delete_by_conv(conv_id)
     return {"ok": True}
@@ -191,7 +213,7 @@ async def chat(req: ChatRequest, request: Request):
     client_id = request.headers.get("X-Client-ID", "")
     conv = memory_store.get(req.conversation_id)
     if not conv:
-        conv = memory_store.create(req.conversation_id, client_id=client_id)
+        conv = await memory_store.create(req.conversation_id, client_id=client_id)
 
     # 如果该会话已有正在进行的流，先取消
     old_event = _stop_events.get(req.conversation_id)
@@ -208,6 +230,7 @@ async def chat(req: ChatRequest, request: Request):
                 user_message=req.message,
                 model=req.model or CHAT_MODEL,
                 temperature=req.temperature,
+                client_id=client_id,
             ):
                 if await request.is_disconnected() or stop_event.is_set():
                     yield "data: {\"stopped\": true}\n\n"
@@ -238,6 +261,15 @@ async def stop_chat(conv_id: str):
 async def list_tools():
     """列出当前所有可用工具（内置 + MCP + 动态注册）。"""
     return {"tools": get_tools_info()}
+
+
+# ── 对话工具调用历史 ───────────────────────────────────────────────────────────
+
+@app.get("/api/conversations/{conv_id}/tools")
+async def get_conversation_tools(conv_id: str):
+    """获取对话的工具调用历史（供前端刷新后复现"此会话经历了什么"）。"""
+    events = await get_tool_events(conv_id)
+    return {"events": events}
 
 
 # ── 记忆调试接口 ───────────────────────────────────────────────────────────────
@@ -277,9 +309,5 @@ async def test_embedding(text: str = "测试文本"):
 # ── 入口 ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print("启动程序")
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+    setup_logging(LOG_DIR)
     uvicorn.run(app, host=BACKEND_HOST, port=BACKEND_PORT)

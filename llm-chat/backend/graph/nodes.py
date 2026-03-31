@@ -75,6 +75,12 @@ async def route_model(state: GraphState) -> dict:
     needs_tools = route in ("search", "search_code")
     tool_model = SEARCH_MODEL if needs_tools else answer_model
 
+    from logging_config import get_conv_logger
+    get_conv_logger(state.get("client_id", ""), state.get("conv_id", "")).info(
+        "路由决策 | route=%s | tool_model=%s | answer_model=%s | user_msg=%.60s",
+        route, tool_model, answer_model, user_msg,
+    )
+
     return {
         "route": route,
         "tool_model": tool_model,
@@ -454,22 +460,59 @@ def _mark_step(plan: list, idx: int, status: str) -> list:
 async def save_response(state: GraphState) -> dict:
     """
     将本轮用户消息和 AI 最终回复追加到 ConversationStore 并持久化。
-    同时保存工具调用摘要，便于后续"继续对话"时 LLM 了解历史工具调用内容。
+    同时保存工具调用事件到 tool_events 表供前端历史查看。
     """
     conv_id = state["conv_id"]
+    client_id = state.get("client_id", "")
     user_msg = state["user_message"]
     full_response = state.get("full_response", "")
 
-    memory_store.add_message(conv_id, "user", user_msg)
+    # 对话链路日志
+    from logging_config import get_conv_logger
+    clog = get_conv_logger(client_id, conv_id)
+    route = state.get("route", "chat")
+    plan = state.get("plan", [])
+    tool_events_list = _extract_tool_events(state)
+    tool_names = [ev["tool_name"] for ev in tool_events_list]
+    clog.info(
+        "对话完成 | route=%s | model=%s | plan_steps=%d | tools=%s | response_len=%d | user_msg=%.60s",
+        route,
+        state.get("answer_model", state.get("model", "")),
+        len(plan),
+        tool_names,
+        len(full_response),
+        user_msg,
+    )
+
+    await memory_store.add_message(conv_id, "user", user_msg)
     if full_response:
-        # 提取工具调用摘要并附加到 assistant 回复中
         tool_summary = _build_tool_summary(state)
         content_to_save = full_response
         if tool_summary:
             content_to_save = full_response + "\n\n" + tool_summary
-        memory_store.add_message(conv_id, "assistant", content_to_save)
+        await memory_store.add_message(conv_id, "assistant", content_to_save)
+
+    # 保存工具调用事件（供前端历史展示）
+    if tool_events_list:
+        from memory.tool_events import save_tool_event
+        for ev in tool_events_list:
+            await save_tool_event(conv_id, ev["tool_name"], ev["tool_input"])
 
     return {}
+
+
+def _extract_tool_events(state: GraphState) -> list[dict]:
+    """从 messages 中提取工具调用事件列表（用于持久化到 tool_events 表）"""
+    messages = list(state.get("messages", []))
+    events = []
+    for m in messages:
+        if hasattr(m, "tool_calls") and m.tool_calls:
+            for tc in m.tool_calls:
+                name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
+                args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                if name:
+                    events.append({"tool_name": name, "tool_input": args or {}})
+    return events
 
 
 def _build_tool_summary(state: GraphState) -> str:
@@ -502,8 +545,12 @@ async def compress_memory(state: GraphState) -> dict:
     不影响流式输出（在 save_response 之后运行）。
     """
     conv_id = state["conv_id"]
+    client_id = state.get("client_id", "")
     try:
         compressed = await maybe_compress(conv_id)
+        if compressed:
+            from logging_config import get_conv_logger
+            get_conv_logger(client_id, conv_id).info("记忆压缩触发 conv=%s", conv_id)
     except Exception as exc:
         logger.error("压缩失败 conv=%s: %s", conv_id, exc)
         compressed = False

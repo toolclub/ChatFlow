@@ -7,15 +7,36 @@ services:
     restart: unless-stopped
     ports:
       - "6333:6333"   # REST API / Dashboard
-      - "6334:6334"   # gRPC（可选）
+      - "6334:6334"   # gRPC(可选)
     volumes:
-      - qdrant_data:/qdrant/storage
+      - D:/docker/qdrant_storage:/qdrant/storage
     healthcheck:
       test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/6333"]
       interval: 15s
       timeout: 5s
       retries: 5
       start_period: 10s
+
+  # ── PostgreSQL 关系型数据库 ───────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: chatflow-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    volumes:
+      - D:/docker/postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-chatflow}
+      POSTGRES_USER: ${POSTGRES_USER:-chatflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-chatflow123}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-chatflow} -d ${POSTGRES_DB:-chatflow}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   # ── Python FastAPI 后端 ────────────────────────────────────────────────────
   backend:
     build:
@@ -26,14 +47,11 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # 对话数据持久化到宿主机，避免重建容器丢失数据
-      - ./data/conversations:/app/conversations
+      - ./logs:/var/log/chatflow
     env_file:
-      # 优先读取 llm-chat/.env，文件不存在时使用下方 environment 默认值
       - path: .env
         required: false
     environment:
-      # Docker 容器内连接宿主机 Ollama（Windows/Mac Docker Desktop 专用）
       LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:11434/v1}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       API_KEY: ${API_KEY:-ollama}
@@ -43,12 +61,20 @@ services:
       ROUTER_ENABLED: ${ROUTER_ENABLED:-true}
       ROUTER_MODEL: ${ROUTER_MODEL:-qwen3:8b}
       SEARCH_MODEL: ${SEARCH_MODEL:-qwen3:8b}
-      # 容器内用 service name 访问 Qdrant
       QDRANT_URL: http://qdrant:6333
       LONGTERM_MEMORY_ENABLED: ${LONGTERM_MEMORY_ENABLED:-true}
       CONVERSATIONS_DIR: /app/conversations
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-chatflow}
+      POSTGRES_USER: ${POSTGRES_USER:-chatflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-chatflow123}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-chatflow}:${POSTGRES_PASSWORD:-chatflow123}@postgres:5432/${POSTGRES_DB:-chatflow}
+      LOG_DIR: /var/log/chatflow
     depends_on:
       qdrant:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/tools || exit 1"]
@@ -57,7 +83,7 @@ services:
       retries: 5
       start_period: 20s
 
-  # ── Vue 前端（Nginx 静态服务 + API 反代）─────────────────────────────────
+  # ── Vue 前端(Nginx 静态服务 + API 反代)─────────────────────────────────
   frontend:
     build:
       context: ./frontend
@@ -69,10 +95,6 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-
-volumes:
-  qdrant_data:
-    name: chatflow-qdrant-data
 
 networks:
   default:

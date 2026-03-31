@@ -104,9 +104,19 @@ export function useChat() {
     const data = await api.fetchConversation(id)
     const s = getOrCreate(id)
     s.messages = (data.messages || []).map((m: Message) => ({
-      role: m.role, content: m.content, images: m.images, timestamp: m.timestamp,
+      role: m.role,
+      content: m.role === 'assistant'
+        ? m.content.replace(/\n\n【工具调用记录】[\s\S]*$/, '')
+        : m.content,
+      images: m.images,
+      timestamp: m.timestamp,
     }))
     s.cognitive = makeEmptyCognitiveState()
+    // 加载工具调用历史（供刷新后复现）
+    try {
+      const toolEvents = await api.fetchConvTools(id)
+      s.cognitive.historyEvents = toolEvents
+    } catch {}
   }
 
   async function newConversation() {

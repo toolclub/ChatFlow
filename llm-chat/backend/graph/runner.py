@@ -320,6 +320,7 @@ async def stream_response(
     user_message: str,
     model: str,
     temperature: float = 0.7,
+    client_id: str = "",
 ) -> AsyncGenerator[str, None]:
     """
     驱动 LangGraph 图执行，将事件流翻译为 FastAPI SSE 字符串流。
@@ -329,6 +330,7 @@ async def stream_response(
 
     initial_state: GraphState = {
         "conv_id": conv_id,
+        "client_id": client_id,
         "user_message": user_message,
         "model": model,
         "temperature": temperature,

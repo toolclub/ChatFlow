@@ -24,11 +24,7 @@ function faviconUrl(url: string) {
 }
 
 // ─── Marked + highlight.js 实例 ───
-// marked v13 breaking change: renderer methods receive a token object, not positional args.
-// 兼容写法：检查第一个参数是否为对象（v13 token）或字符串（旧版）。
 function buildCodeHtml(rawToken: any): string {
-  // v13: token = { type:'code', text:'...', lang:'python', raw:'...' }
-  // old: code(text: string, lang: string)
   const text: string = typeof rawToken === 'object' && rawToken !== null
     ? (rawToken.text ?? '')
     : String(rawToken ?? '')
@@ -86,15 +82,10 @@ function buildCodeHtml(rawToken: any): string {
 const markedInstance = new Marked({ gfm: true, breaks: false })
 markedInstance.use({
   renderer: {
-    // v13 token-based API (first arg is token object)
     code(token: any): string {
       return buildCodeHtml(token)
     },
-
-    // 自定义表格渲染：套一层可横向滚动的 wrapper，防止宽表格溢出
     table(token: any): string {
-      // token.header: TableCell[], token.rows: TableCell[][]
-      // 直接调用默认渲染逻辑后包裹 wrapper
       const header = token.header ?? []
       const rows   = token.rows   ?? []
       const align  = token.align  ?? []
@@ -214,7 +205,7 @@ watch(
           />
         </div>
 
-        <!-- Workflow plan card (replaces plain bubble for workflow messages) -->
+        <!-- Workflow plan card -->
         <div v-if="message.workflowPlan?.length" class="wf-card">
           <div class="wf-card-header">
             <div class="wf-card-badge">
@@ -237,10 +228,9 @@ watch(
           </div>
         </div>
 
-        <!-- Plain text bubble (non-workflow messages) -->
+        <!-- Plain text bubble -->
         <div v-else-if="message.content" class="user-bubble">{{ message.content }}</div>
       </div>
-      <!-- 用户头像：极简人形剪影 -->
       <div class="user-avatar">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none">
           <circle cx="12" cy="7.5" r="3.8" fill="#374151"/>
@@ -251,7 +241,6 @@ watch(
 
     <!-- AI 消息 -->
     <template v-else>
-      <!-- AI 头像：星光 sparkle（ChatGPT 极简风） -->
       <div class="ai-avatar">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none">
           <path d="M12 3C12 3 13.2 8.8 18 11C13.2 13.2 12 19 12 19C12 19 10.8 13.2 6 11C10.8 8.8 12 3 12 3Z" fill="#111827"/>
@@ -704,7 +693,7 @@ watch(
   border: 1px solid #e0e7ff;
 }
 
-/* ── 代码块（浅灰主题） ── */
+/* ── 代码块 ── */
 .markdown-body .code-block {
   margin: 14px 0;
   border-radius: 10px;
@@ -713,7 +702,6 @@ watch(
   background: #f6f8fa;
   box-shadow: 0 1px 4px rgba(0,0,0,0.06);
 }
-
 .markdown-body .code-header {
   display: flex;
   align-items: center;
@@ -723,113 +711,54 @@ watch(
   border-bottom: 1px solid #d0d7de;
   user-select: none;
 }
-
 .markdown-body .code-lang-badge {
-  font-size: 11.5px;
-  font-weight: 600;
-  color: #57606a;
+  font-size: 11.5px; font-weight: 600; color: #57606a;
   font-family: 'Fira Code', Consolas, monospace;
-  text-transform: lowercase;
-  letter-spacing: 0.3px;
+  text-transform: lowercase; letter-spacing: 0.3px;
 }
-
-.markdown-body .code-action-row {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-/* 代码块按钮 */
+.markdown-body .code-action-row { display: flex; align-items: center; gap: 4px; }
 .markdown-body .cb-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 9px;
-  border-radius: 6px;
-  border: 1px solid #d0d7de;
-  background: transparent;
-  color: #57606a;
-  font-size: 11.5px;
-  font-family: inherit;
-  cursor: pointer;
-  transition: all 0.15s;
-  line-height: 1.4;
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 9px; border-radius: 6px;
+  border: 1px solid #d0d7de; background: transparent;
+  color: #57606a; font-size: 11.5px; font-family: inherit;
+  cursor: pointer; transition: all 0.15s; line-height: 1.4;
 }
-.markdown-body .cb-btn:hover {
-  border-color: #8b949e;
-  color: #24292f;
-  background: #fff;
-}
-.markdown-body .cb-btn.cb-done {
-  border-color: #2da44e !important;
-  color: #1a7f37 !important;
-  background: #dafbe1 !important;
-}
-.markdown-body .cb-preview:hover {
-  border-color: #6366f1;
-  color: #4f46e5;
-  background: #eef2ff;
-}
-
-/* 代码内容 */
+.markdown-body .cb-btn:hover { border-color: #8b949e; color: #24292f; background: #fff; }
+.markdown-body .cb-btn.cb-done { border-color: #2da44e !important; color: #1a7f37 !important; background: #dafbe1 !important; }
+.markdown-body .cb-preview:hover { border-color: #6366f1; color: #4f46e5; background: #eef2ff; }
 .markdown-body .code-pre {
-  margin: 0;
-  padding: 14px 18px;
-  overflow-x: auto;
-  background: #f6f8fa;
-  font-size: 13px;
-  line-height: 1.65;
+  margin: 0; padding: 14px 18px; overflow-x: auto;
+  background: #f6f8fa; font-size: 13px; line-height: 1.65;
 }
 .markdown-body .code-pre code.hljs {
-  background: transparent !important;
-  padding: 0;
+  background: transparent !important; padding: 0;
   font-family: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
-  font-size: inherit;
-  line-height: inherit;
-  font-weight: 400;
-  border: none;
+  font-size: inherit; line-height: inherit; font-weight: 400; border: none;
 }
 
-/* blockquote */
 .markdown-body blockquote {
-  border-left: 3px solid #a5b4fc;
-  padding: 8px 16px; color: #6b7280;
-  margin: 12px 0; background: #f5f3ff;
-  border-radius: 0 8px 8px 0; font-style: italic;
+  border-left: 3px solid #a5b4fc; padding: 8px 16px; color: #6b7280;
+  margin: 12px 0; background: #f5f3ff; border-radius: 0 8px 8px 0; font-style: italic;
 }
-
 .markdown-body hr { border: none; border-top: 1px solid #e4e6ef; margin: 18px 0; }
 
-/* 表格 wrapper — 支持横向滚动（防止宽表格溢出） */
 .markdown-body .table-wrapper {
-  width: 100%;
-  overflow-x: auto;
-  margin: 14px 0;
-  border-radius: 8px;
-  border: 1px solid #e4e6ef;
+  width: 100%; overflow-x: auto; margin: 14px 0;
+  border-radius: 8px; border: 1px solid #e4e6ef;
 }
 .markdown-body .table-wrapper table {
-  border-collapse: collapse;
-  width: 100%;
-  min-width: 400px;
-  font-size: 13.5px;
-  margin: 0;
-  border: none;
+  border-collapse: collapse; width: 100%; min-width: 400px;
+  font-size: 13.5px; margin: 0; border: none;
 }
 .markdown-body table {
-  border-collapse: collapse; width: 100%;
-  margin: 14px 0; font-size: 13.5px;
-  border-radius: 8px; overflow: hidden;
-  border: 1px solid #e4e6ef;
+  border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 13.5px;
+  border-radius: 8px; overflow: hidden; border: 1px solid #e4e6ef;
 }
 .markdown-body th, .markdown-body td {
-  border: 1px solid #e4e6ef; padding: 8px 14px; text-align: left;
-  white-space: nowrap;
+  border: 1px solid #e4e6ef; padding: 8px 14px; text-align: left; white-space: nowrap;
 }
-.markdown-body th {
-  background: #f3f4f8; font-weight: 600;
-  color: #374151; font-size: 13px;
-}
+.markdown-body th { background: #f3f4f8; font-weight: 600; color: #374151; font-size: 13px; }
 .markdown-body tr:nth-child(even) td { background: #f9fafb; }
 .markdown-body tr:hover td { background: #eef2ff; }
 </style>

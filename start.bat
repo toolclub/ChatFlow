@@ -1,77 +1,73 @@
 @echo off
-title LLM Chat - Start
+title ChatFlow - Start
+chcp 65001 > nul
 
 echo ============================================
-echo   LLM Chat Start Script
+echo   ChatFlow Docker Compose Start
 echo ============================================
 echo.
 
-REM -- Paths relative to this script's directory --
-set "PROJECT_ROOT=%~dp0"
-set "BACKEND_DIR=%PROJECT_ROOT%llm-chat\backend"
-set "FRONTEND_DIR=%PROJECT_ROOT%llm-chat\frontend"
-set "CLOUDFLARED=%PROJECT_ROOT%cloudflared.exe"
-set "CLOUDFLARED_CONFIG=%PROJECT_ROOT%cloudflared-config.yml"
-set "LOG_ROOT=D:\app\ChatFlow"
+set "ROOT_DIR=%~dp0"
+set "COMPOSE_DIR=%~dp0llm-chat"
+set "CLOUDFLARED=%~dp0cloudflared.exe"
+set "CLOUDFLARED_CONFIG=%~dp0cloudflared-config.yml"
 
-REM -- Check if already running --
-tasklist /FI "WINDOWTITLE eq LLM-Backend" 2>nul | findstr "cmd.exe" >nul
-if %errorlevel%==0 (
-    echo [WARN] Services already running. Run stop.bat first.
-    pause
-    exit /b 1
-)
-
-REM -- Create log directories --
-if not exist "%LOG_ROOT%" mkdir "%LOG_ROOT%"
-if not exist "%LOG_ROOT%\backend" mkdir "%LOG_ROOT%\backend"
-if not exist "%LOG_ROOT%\frontend" mkdir "%LOG_ROOT%\frontend"
-
-REM -- Check venv exists --
-if not exist "%BACKEND_DIR%\venv\Scripts\activate.bat" (
-    echo [ERROR] Python venv not found: %BACKEND_DIR%\venv
-    pause
-    exit /b 1
-)
-
-REM -- 1. Install backend dependencies --
-echo [1/4] Installing backend dependencies...
-call "%BACKEND_DIR%\venv\Scripts\pip.exe" install -e "%BACKEND_DIR%" --quiet
+REM -- Check Docker is running --
+docker info > nul 2>&1
 if %errorlevel% neq 0 (
-    echo [ERROR] pip install failed.
+    echo [ERROR] Docker is not running. Please start Docker Desktop first.
     pause
     exit /b 1
 )
 
-REM -- 2. Start backend --
-echo [2/4] Starting backend FastAPI :8000 ...
-start "LLM-Backend" cmd /k "cd /d %BACKEND_DIR% && call venv\Scripts\activate && python main.py >> %LOG_ROOT%\backend\backend.log 2>&1"
-echo     Waiting for backend...
-timeout /t 4 /nobreak > nul
+REM -- Create logs directory (mounted into container) --
+if not exist "%~dp0logs" mkdir "%~dp0logs"
 
-REM -- 3. Start frontend --
-echo [3/4] Starting frontend Vue3/Vite :80 ...
-start "LLM-Frontend" cmd /k "cd /d %FRONTEND_DIR% && npm run dev >> %LOG_ROOT%\frontend\frontend.log 2>&1"
-echo     Waiting for frontend...
-timeout /t 8 /nobreak > nul
+echo [1/3] Building and starting all services...
+cd /d "%COMPOSE_DIR%"
+docker compose up -d --build
+if %errorlevel% neq 0 (
+    echo [ERROR] docker compose up failed.
+    pause
+    exit /b 1
+)
 
-REM -- 4. Start Cloudflare tunnel --
-echo [4/4] Starting Cloudflare tunnel...
-start "LLM-Cloudflared" cmd /k "%CLOUDFLARED% tunnel --config "%CLOUDFLARED_CONFIG%" run chatflow >> %LOG_ROOT%\cloudflared.log 2>&1"
+echo.
+echo [2/3] Waiting for services to become healthy...
+timeout /t 5 /nobreak > nul
+
+REM -- Show container status --
+docker compose ps
+echo.
+
+REM -- Start cloudflared tunnel in background --
+echo [3/3] Starting Cloudflare Tunnel...
+if not exist "%CLOUDFLARED%" (
+    echo [WARN] cloudflared.exe not found, skipping tunnel.
+) else if not exist "%CLOUDFLARED_CONFIG%" (
+    echo [WARN] cloudflared-config.yml not found, skipping tunnel.
+) else (
+    REM Kill any existing cloudflared process first
+    taskkill /f /im cloudflared.exe > nul 2>&1
+    start /b "" "%CLOUDFLARED%" tunnel --config "%CLOUDFLARED_CONFIG%" run > "%~dp0logs\cloudflared.log" 2>&1
+    timeout /t 2 /nobreak > nul
+    echo [OK] Cloudflare Tunnel started (log: logs\cloudflared.log)
+)
 
 echo.
 echo ============================================
 echo   All services started!
 echo ============================================
 echo.
-echo   Local:    http://localhost
-echo   API docs: http://localhost:8000/docs
-echo   Public:   https://chatflow-live.com
+echo   Frontend:  http://localhost
+echo   API docs:  http://localhost:8000/docs
+echo   Qdrant:    http://localhost:6333/dashboard
+echo   Tunnel:    https://chatflow-live.com
 echo.
 echo   Logs:
-echo     Backend:    %LOG_ROOT%\backend\backend.log
-echo     Frontend:   %LOG_ROOT%\frontend\frontend.log
-echo     Tunnel:     %LOG_ROOT%\cloudflared.log
+echo     App logs:   %~dp0logs\
+echo     Tunnel log: %~dp0logs\cloudflared.log
+echo     Container:  docker compose logs -f backend
 echo.
 echo   Run stop.bat to shut down all services.
 echo ============================================

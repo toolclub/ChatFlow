@@ -34,8 +34,8 @@ export interface Message {
   images?: string[]
   timestamp?: number
   toolCalls?: ToolCallRecord[]
-  workflowPlan?: PlanStep[]   // set when message is a workflow execution request
-  workflowGoal?: string       // original user question for workflow messages
+  workflowPlan?: PlanStep[]
+  workflowGoal?: string
 }
 
 export interface ConversationInfo {
@@ -71,6 +71,13 @@ export interface TraceEntry {
   timestamp: number
 }
 
+export interface ToolHistoryEvent {
+  id: number
+  tool_name: string
+  tool_input: Record<string, unknown>
+  created_at: number
+}
+
 export interface CognitiveState {
   plan: PlanStep[]
   currentStepIndex: number
@@ -78,6 +85,7 @@ export interface CognitiveState {
   reflectorDecision: string
   traceLog: TraceEntry[]
   isActive: boolean
+  historyEvents: ToolHistoryEvent[]
 }
 
 export function makeEmptyCognitiveState(): CognitiveState {
@@ -88,5 +96,6 @@ export function makeEmptyCognitiveState(): CognitiveState {
     reflectorDecision: '',
     traceLog: [],
     isActive: false,
+    historyEvents: [],
   }
 }

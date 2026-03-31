@@ -90,6 +90,12 @@ class Settings(BaseSettings):
     # ── 持久化目录 ────────────────────────────────────────────────────────────
     conversations_dir: str = "./conversations"
 
+    # ── 数据库 ────────────────────────────────────────────────────────────────
+    database_url: str = "postgresql://chatflow:chatflow123@localhost:5432/chatflow"
+
+    # ── 日志目录 ──────────────────────────────────────────────────────────────
+    log_dir: str = "./logs"
+
     # ── 默认系统提示词 ────────────────────────────────────────────────────────
     default_system_prompt: str = (
         "你是一个准确、诚实的AI助手，用中文回答用户问题。\n"
@@ -172,3 +178,6 @@ CONVERSATIONS_DIR         = settings.conversations_dir
 
 DEFAULT_SYSTEM_PROMPT     = settings.default_system_prompt
 SUMMARY_SYSTEM_PROMPT     = settings.summary_system_prompt
+
+DATABASE_URL              = settings.database_url
+LOG_DIR                   = settings.log_dir

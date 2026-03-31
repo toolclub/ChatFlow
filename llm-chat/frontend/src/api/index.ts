@@ -1,4 +1,4 @@
-import type { PlanStep } from '../types'
+import type { PlanStep, ToolHistoryEvent } from '../types'
 
 const API_BASE = ''
 
@@ -63,6 +63,14 @@ export async function stopStream(convId: string): Promise<void> {
     method: 'POST',
     headers: { 'X-Client-ID': getClientId() },
   }).catch(() => {})
+}
+
+export async function fetchConvTools(convId: string): Promise<ToolHistoryEvent[]> {
+  const res = await fetch(`${API_BASE}/api/conversations/${convId}/tools`, {
+    headers: { 'X-Client-ID': getClientId() },
+  })
+  const data = await res.json()
+  return data.events || []
 }
 
 export async function sendMessage(

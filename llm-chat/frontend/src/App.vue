@@ -18,7 +18,7 @@ const panelOpen = ref(true)
 // 是否存在值得展示的认知内容（计划或日志）
 const hasCognitiveContent = computed(() => {
   const cog = chat.cognitive.value
-  return cog.plan.length > 0 || cog.traceLog.length > 0
+  return cog.plan.length > 0 || cog.traceLog.length > 0 || cog.historyEvents.length > 0
 })
 
 // 面板展示条件：

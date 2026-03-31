@@ -10,6 +10,7 @@ class Message:
     role: str           # "user" | "assistant" | "system"
     content: str
     timestamp: float = field(default_factory=time.time)
+    id: int = 0         # DB 自增主键（0 表示尚未持久化）
 
 
 @dataclass

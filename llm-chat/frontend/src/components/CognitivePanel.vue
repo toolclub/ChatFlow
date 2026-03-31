@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue'
-import type { CognitiveState, PlanStep } from '../types'
+import type { CognitiveState, PlanStep, ToolHistoryEvent } from '../types'
 import { Edit, Loading, SuccessFilled, CircleCloseFilled, Plus, Delete } from '@element-plus/icons-vue'
 
 const props = defineProps<{
@@ -186,6 +186,29 @@ function traceColor(type: string) {
 }
 
 const doneCount = computed(() => localPlan.value.filter(s => s.status === 'done').length)
+
+// ── Tool history helpers ──────────────────────────────────────────────────────
+const HIST_TOOL_META: Record<string, { label: string; icon: string; color: string }> = {
+  web_search:           { label: '搜索了网络',  icon: '🔍', color: '#6366f1' },
+  fetch_webpage:        { label: '阅读了网页',  icon: '🌐', color: '#0ea5e9' },
+  get_current_datetime: { label: '获取了时间',  icon: '🕐', color: '#0ea5e9' },
+  calculator:           { label: '执行了计算',  icon: '🧮', color: '#10b981' },
+}
+function histToolMeta(name: string) {
+  return HIST_TOOL_META[name] ?? { label: `调用了 ${name}`, icon: '⚙️', color: '#6b7280' }
+}
+function histToolDetail(ev: ToolHistoryEvent): string {
+  const inp = ev.tool_input
+  if (!inp || Object.keys(inp).length === 0) return ''
+  const val = (inp.query ?? inp.url ?? inp.expression ?? inp.expr ?? inp.timezone ?? Object.values(inp)[0]) as unknown
+  return String(val ?? '').slice(0, 60)
+}
+function histFormatTime(ts: number): string {
+  const d = new Date(ts * 1000)
+  return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+// 有 live trace 时显示实时日志，否则显示历史工具记录
+const showLiveTrace = computed(() => props.loading || props.cognitive.traceLog.length > 0)
 </script>
 
 <template>
@@ -353,15 +376,36 @@ const doneCount = computed(() => localPlan.value.filter(s => s.status === 'done'
       </div>
     </transition>
 
-    <!-- Trace log -->
+    <!-- 底部面板：实时追踪日志 或 历史工具调用 -->
     <div class="trace-section">
-      <div class="trace-hd">追踪日志</div>
+      <div class="trace-hd">
+        <span v-if="showLiveTrace">追踪日志</span>
+        <span v-else-if="cognitive.historyEvents.length > 0">工具调用历史</span>
+        <span v-else>追踪日志</span>
+      </div>
       <div class="trace-body" ref="traceLogEl">
-        <div v-if="!cognitive.traceLog.length" class="trace-empty">暂无记录</div>
-        <div v-for="(e, i) in cognitive.traceLog" :key="i" class="trace-row">
-          <span class="trace-ic" :style="{ color: traceColor(e.type) }">{{ traceIcon(e.type) }}</span>
-          <span class="trace-txt">{{ e.content }}</span>
-        </div>
+        <!-- 实时追踪（流式推理中） -->
+        <template v-if="showLiveTrace">
+          <div v-if="!cognitive.traceLog.length" class="trace-empty">暂无记录</div>
+          <div v-for="(e, i) in cognitive.traceLog" :key="i" class="trace-row">
+            <span class="trace-ic" :style="{ color: traceColor(e.type) }">{{ traceIcon(e.type) }}</span>
+            <span class="trace-txt">{{ e.content }}</span>
+          </div>
+        </template>
+        <!-- 历史工具事件（刷新后从 DB 加载） -->
+        <template v-else>
+          <div v-if="!cognitive.historyEvents.length" class="trace-empty">暂无历史记录</div>
+          <div v-for="ev in cognitive.historyEvents" :key="ev.id" class="hist-row">
+            <span class="hist-icon">{{ histToolMeta(ev.tool_name).icon }}</span>
+            <div class="hist-body">
+              <span class="hist-name" :style="{ color: histToolMeta(ev.tool_name).color }">
+                {{ histToolMeta(ev.tool_name).label }}
+              </span>
+              <span v-if="histToolDetail(ev)" class="hist-detail">{{ histToolDetail(ev) }}</span>
+            </div>
+            <span class="hist-time">{{ histFormatTime(ev.created_at) }}</span>
+          </div>
+        </template>
       </div>
     </div>
 
@@ -677,6 +721,44 @@ const doneCount = computed(() => localPlan.value.filter(s => s.status === 'done'
 
 /* Dialog footer */
 .dialog-ft { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+
+/* Tool history rows */
+.hist-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 3px 4px;
+  border-radius: 5px;
+  transition: background 0.1s;
+}
+.hist-row:hover { background: rgba(99,102,241,0.04); }
+.hist-icon { font-size: 12px; flex-shrink: 0; line-height: 1.7; }
+.hist-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.hist-name {
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+.hist-detail {
+  font-size: 10px;
+  color: #9ca3af;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hist-time {
+  font-size: 9.5px;
+  color: #d1d5db;
+  flex-shrink: 0;
+  line-height: 1.8;
+}
 
 /* Animations */
 .banner-enter-active, .banner-leave-active { transition: all 0.22s ease; }
