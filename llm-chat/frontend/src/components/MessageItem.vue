@@ -32,7 +32,14 @@ function buildCodeHtml(rawToken: any): string {
     ? (rawToken.lang ?? '')
     : ''
 
-  const language = (lang || 'plaintext').toLowerCase()
+  const rawLang = lang.trim().toLowerCase()
+  // Content-based fallback: if no lang, detect HTML/SVG by content
+  const detectedLang = rawLang || (
+    /^\s*<!doctype\s+html/i.test(text) || /^\s*<html[\s>]/i.test(text) ? 'html'
+    : /^\s*<svg[\s>]/i.test(text) ? 'svg'
+    : ''
+  )
+  const language = detectedLang || 'plaintext'
 
   let highlighted: string
   try {
@@ -116,11 +123,15 @@ markedInstance.use({
 const props = defineProps<{ message: Message }>()
 
 // ─── 内容渲染 ───
-const renderedContent = computed(() =>
-  props.message.role === 'assistant'
-    ? markedInstance.parse(props.message.content || '') as string
-    : ''
-)
+const renderedContent = computed(() => {
+  if (props.message.role !== 'assistant') return ''
+  let content = (props.message.content || '')
+    .replace(/<think>[\s\S]*?<\/think>\n*/g, '')   // 去除完整 think 块
+  // 流式进行中时可能只有开头的 <think>，直接隐藏未完成的推理部分
+  const thinkStart = content.indexOf('<think>')
+  if (thinkStart !== -1) content = content.slice(0, thinkStart)
+  return markedInstance.parse(content.trim()) as string
+})
 
 // ─── 代码块事件委托 ───
 const contentEl = ref<HTMLElement>()

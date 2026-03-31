@@ -50,6 +50,8 @@ class StreamContext:
     compressed: bool = False
     # 最近一次计划（用于 step_update 事件去重）
     last_plan_step_count: int = 0
+    # <think> 块过滤状态（qwen3 等模型的推理内容跨 chunk）
+    in_think_block: bool = False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -204,7 +206,7 @@ class LLMStartHandler(EventHandler):
 
 
 class LLMStreamHandler(EventHandler):
-    """主推理节点 token 流：逐 token 发送增量内容"""
+    """主推理节点 token 流：逐 token 发送增量内容（自动过滤 <think> 推理块）"""
 
     _NODES: ClassVar[frozenset[str]] = frozenset({"call_model", "call_model_after_tool"})
 
@@ -213,8 +215,31 @@ class LLMStreamHandler(EventHandler):
 
     async def handle(self, event: dict, ctx: StreamContext) -> AsyncGenerator[str, None]:
         chunk = event["data"].get("chunk")
-        if chunk and chunk.content:
-            yield _sse({"content": chunk.content})
+        if not chunk or not chunk.content:
+            return
+        content: str = chunk.content
+        # 过滤 <think>...</think> 推理块（可能跨 chunk）
+        output_parts: list[str] = []
+        pos = 0
+        while pos < len(content):
+            if ctx.in_think_block:
+                end = content.find("</think>", pos)
+                if end == -1:
+                    pos = len(content)   # 整段都在 think 块里，丢弃
+                else:
+                    ctx.in_think_block = False
+                    pos = end + len("</think>")
+            else:
+                start = content.find("<think>", pos)
+                if start == -1:
+                    output_parts.append(content[pos:])
+                    break
+                output_parts.append(content[pos:start])
+                ctx.in_think_block = True
+                pos = start + len("<think>")
+        filtered = "".join(output_parts)
+        if filtered:
+            yield _sse({"content": filtered})
 
 
 class ToolStartHandler(EventHandler):

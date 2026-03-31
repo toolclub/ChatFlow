@@ -457,6 +457,12 @@ def _mark_step(plan: list, idx: int, status: str) -> list:
 
 # ── 节点 5：保存回复 ──────────────────────────────────────────────────────────
 
+def _strip_think_blocks(text: str) -> str:
+    """移除 <think>...</think> 推理块（qwen3 等模型的思考内容不应存入上下文）"""
+    import re
+    return re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
+
+
 async def save_response(state: GraphState) -> dict:
     """
     将本轮用户消息和 AI 最终回复追加到 ConversationStore 并持久化。
@@ -465,7 +471,7 @@ async def save_response(state: GraphState) -> dict:
     conv_id = state["conv_id"]
     client_id = state.get("client_id", "")
     user_msg = state["user_message"]
-    full_response = state.get("full_response", "")
+    full_response = _strip_think_blocks(state.get("full_response", ""))
 
     # 对话链路日志
     from logging_config import get_conv_logger
