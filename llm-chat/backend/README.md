@@ -232,6 +232,202 @@ flowchart LR
 
 ---
 
+### stream_response 完整数据流
+
+> 这是 `runner.py` 里最核心的函数，把 LangGraph 的事件流翻译成 SSE 字符串流发给浏览器。下面逐阶段拆解它的执行过程。
+
+#### 阶段一：启动（函数入口）
+
+```mermaid
+sequenceDiagram
+    participant FA as FastAPI
+    participant SR as stream_response()
+    participant Q  as asyncio.Queue
+    participant GA as Task A _graph_producer
+    participant HB as Task B _heartbeat
+
+    FA->>SR: 调用 stream_response(conv_id, message, model, ...)
+    SR->>SR: 构建 initial_state（GraphState 字典）
+    SR->>Q:  创建空队列
+    SR->>GA: asyncio.create_task(_graph_producer)<br/>立即放入事件循环，不等待
+    SR->>HB: asyncio.create_task(_heartbeat)<br/>立即放入事件循环，不等待
+    Note over GA,HB: 两个 Task 与主协程并发运行<br/>各自独立，通过 Queue 通信
+    SR->>SR: 进入 while True 主循环<br/>await queue.get() 挂起等待
+```
+
+此刻三条执行流同时存在于事件循环中，谁有数据谁先跑。
+
+---
+
+#### 阶段二：正常执行期间的数据流
+
+```mermaid
+flowchart TD
+    subgraph TaskA["Task A: _graph_producer（后台）"]
+        A1["graph.astream_events(initial_state,\n  version='v2',\n  config={'recursion_limit':60})"]
+        A2["每产生一个 LangGraph 事件"]
+        A3["await queue.put(('event', event))"]
+        A1 --> A2 --> A3 --> A2
+    end
+
+    subgraph TaskB["Task B: _heartbeat（后台）"]
+        B1["await asyncio.sleep(20)"]
+        B2["await queue.put(('ping', None))"]
+        B1 --> B2 --> B1
+    end
+
+    subgraph MAIN["主协程（while True 循环）"]
+        M1["kind, val = await queue.get()"]
+        M2{"kind 是什么?"}
+        M3["async for chunk in\n_dispatcher.dispatch(val, ctx)\n  yield chunk"]
+        M4["yield _sse({'ping':True})"]
+        M5["yield _sse({'error':str(val)})"]
+        M6["graph_done = True\nbreak"]
+        M1 --> M2
+        M2 -->|event| M3 --> M1
+        M2 -->|ping| M4 --> M1
+        M2 -->|error| M5 --> M1
+        M2 -->|done| M6
+    end
+
+    TaskA -->|put| Q[(asyncio.Queue\n无限缓冲)]
+    TaskB -->|put| Q
+    Q -->|get| MAIN
+
+    MAIN -->|"yield 'data:{...}\n\n'"| NGINX["nginx → 浏览器"]
+```
+
+**关键细节**：
+- `await queue.get()` 挂起时，事件循环切走执行 Task A / Task B
+- Task A 的 `await queue.put()` 完成后，事件循环切回主协程继续 `get()`
+- `yield chunk` 把 SSE 字符串交给 FastAPI 的 `StreamingResponse`，FastAPI 负责实际发送给 nginx
+
+---
+
+#### 阶段三：一个 LangGraph 事件如何变成 SSE 字符串
+
+```mermaid
+flowchart LR
+    EV["LangGraph 原始事件\n{\n  event: 'on_chat_model_stream',\n  name: 'ChatOllama',\n  metadata: {langgraph_node: 'call_model'},\n  data: {chunk: AIMessageChunk(content='你好')}\n}"]
+
+    EV --> DISP["EventDispatcher.dispatch(event, ctx)"]
+    DISP --> MATCH["按 event_type + node_name\n顺序匹配 Handler 列表\n命中 LLMStreamHandler"]
+    MATCH --> HANDLER["LLMStreamHandler.handle()\n1. 取 chunk.content = '你好'\n2. 状态机过滤 think 块\n3. filtered = '你好'"]
+    HANDLER --> SSE["yield _sse({'content':'你好'})\n↓\n'data: {\"content\":\"你好\"}\n\n'"]
+    SSE --> Q2["queue.put(('event', ...))\n↑ 这个字符串经过 queue\n最终 yield 给 FastAPI"]
+```
+
+---
+
+#### 阶段四：正常结束
+
+```mermaid
+sequenceDiagram
+    participant GA as Task A
+    participant Q  as Queue
+    participant M  as 主循环
+    participant FA as FastAPI
+
+    GA->>GA: graph.astream_events() 迭代完毕
+    GA->>Q:  put(("done", None))   ← finally 块保证一定执行
+    GA->>GA: Task A 自然结束
+
+    M->>Q:  await queue.get()
+    Q-->>M: ("done", None)
+    M->>M:  graph_done = True; break
+    Note over M: 退出 while True
+    M->>M:  finally: hb_task.cancel(), graph_task.cancel()
+    Note over M: graph_done=True
+    M->>FA: yield _sse({"done":True, "compressed":...})
+    FA->>FA: StreamingResponse 结束，关闭 HTTP 连接
+```
+
+**`graph_done` 标志的作用**：区分「正常结束」和「异常断开」。只有正常收到 `("done", None)` 才发 `{"done":true}` 给前端，客户端断开走 `CancelledError` 时 `graph_done=False`，不发。
+
+---
+
+#### 阶段五：异常——图执行报错
+
+```mermaid
+sequenceDiagram
+    participant GA as Task A
+    participant Q  as Queue
+    participant M  as 主循环
+    participant FE as 前端
+
+    GA->>GA: graph.astream_events() 抛出异常<br/>（如 GraphRecursionError）
+    GA->>GA: except Exception as exc: 捕获
+    GA->>Q:  put(("error", exc))
+    GA->>Q:  put(("done", None))   ← finally 块
+
+    M->>Q:  get() → ("error", exc)
+    M->>FE: yield _sse({"error":"Recursion limit..."})
+    Note over FE: 前端 onChunk 追加 ⚠️ 错误提示到消息末尾
+    M->>Q:  get() → ("done", None)
+    M->>M:  graph_done = True; break
+    M->>FE: yield _sse({"done":true})
+    Note over FE: loading 清除，用户看到错误提示
+```
+
+---
+
+#### 阶段六：异常——客户端主动断开
+
+```mermaid
+sequenceDiagram
+    participant FE as 前端（用户关闭页面）
+    participant FA as FastAPI
+    participant M  as 主循环
+    participant GA as Task A（正在跑图）
+    participant HB as Task B（心跳）
+
+    FE->>FA: TCP 连接断开
+    FA->>M:  向生成器 athrow(CancelledError)
+    M->>M:   await queue.get() 处被打断
+    M->>M:   except CancelledError:\n  graph_done = False
+
+    M->>GA:  graph_task.cancel()
+    M->>HB:  hb_task.cancel()  ← finally 块
+
+    GA->>GA: CancelledError 在 astream_events 内部传播
+    GA->>GA: except CancelledError: pass
+    GA->>GA: finally: queue.put(("done", None))\n[无人消费，随 Queue GC 回收]
+
+    Note over M: graph_done=False\n不执行 yield done\n生成器退出
+    Note over FA: StreamingResponse 感知到生成器退出\n连接关闭处理完毕
+```
+
+---
+
+#### 状态机总览
+
+```mermaid
+stateDiagram-v2
+    [*] --> 启动: FastAPI 调用 stream_response()
+
+    启动 --> 运行中: create_task×2\n进入 while True
+
+    state 运行中 {
+        [*] --> 等待: await queue.get()
+        等待 --> 处理事件: kind=event
+        等待 --> 发心跳: kind=ping
+        等待 --> 发错误: kind=error
+        等待 --> 准备结束: kind=done
+        处理事件 --> 等待: yield SSE chunk
+        发心跳 --> 等待: yield ping
+        发错误 --> 等待: yield error SSE
+        准备结束 --> [*]: graph_done=True, break
+    }
+
+    运行中 --> 正常结束: graph_done=True\nfinally cancel tasks
+    运行中 --> 异常断开: CancelledError\ngraph_done=False\nfinally cancel tasks
+
+    正常结束 --> [*]: yield {"done":true}
+    异常断开 --> [*]: 不发 done，静默退出
+```
+
+---
+
 ## SSE 事件处理链
 
 ```mermaid
