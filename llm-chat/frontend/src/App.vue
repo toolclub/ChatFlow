@@ -77,6 +77,7 @@ const currentGoal = computed(() => {
         @send="chat.send($event)"
         @stop="chat.stopConversation()"
         @toggle-panel="panelOpen = !panelOpen"
+        @clarification-submit="chat.submitClarification($event)"
       />
 
       <!-- 右侧：认知面板 -->

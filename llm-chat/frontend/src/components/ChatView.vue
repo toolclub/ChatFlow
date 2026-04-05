@@ -5,6 +5,7 @@ import MessageItem from './MessageItem.vue'
 import InputBox from './InputBox.vue'
 import { Lightning, EditPen, DataAnalysis, Grid, TrendCharts, Check, Loading } from '@element-plus/icons-vue'
 import AgentStatusBubble from './AgentStatusBubble.vue'
+import ClarificationCard from './ClarificationCard.vue'
 
 const props = defineProps<{
   messages: Message[]
@@ -19,6 +20,7 @@ const emit = defineEmits<{
   send: [payload: SendPayload]
   stop: []
   togglePanel: []                 // 切换认知面板展开/折叠
+  clarificationSubmit: [answers: Record<string, string | string[]>]
 }>()
 
 const messagesContainer = ref<HTMLDivElement>()
@@ -243,6 +245,19 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
             :key="i"
             :message="msg"
           />
+          <!-- 澄清卡片：附加在最后一条 assistant 消息下方 -->
+          <template
+            v-if="messages.length > 0 && messages[messages.length-1].role === 'assistant'
+                  && messages[messages.length-1].clarification"
+          >
+            <div class="clarification-wrap">
+              <ClarificationCard
+                :data="messages[messages.length-1].clarification!"
+                :loading="loading"
+                @submit="emit('clarificationSubmit', $event)"
+              />
+            </div>
+          </template>
           <!-- 阶段状态气泡（替换旧的三点打字指示器） -->
           <div
             v-if="loading && messages.length > 0 && messages[messages.length-1].role === 'assistant' && !messages[messages.length-1].content"
@@ -484,18 +499,23 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   padding: 20px 0 12px;
 }
 .messages-inner {
-  max-width: 740px;
+  max-width: 1100px;
   margin: 0 auto;
-  padding: 0 24px;
+  padding: 0 32px;
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 .bottom-input {
-  padding: 0 20px 16px;
-  max-width: 780px;
+  padding: 0 32px 16px;
+  max-width: 1100px;
   margin: 0 auto;
   width: 100%;
+}
+
+/* ── 澄清卡片容器 ── */
+.clarification-wrap {
+  padding: 4px 0 8px 40px;  /* 与 assistant 消息对齐（头像宽度） */
 }
 
 /* ── 状态气泡容器 ── */

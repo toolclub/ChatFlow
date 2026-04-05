@@ -8,10 +8,10 @@
   4. 调用摘要模型生成新摘要（工具调用记录替换为 [old tools call]）
   5. 更新 conv.mid_term_summary + mid_term_cursor
   6. 将已压缩消息中的工具调用记录替换为 [old tools call] 占位符并持久化
+
+已迁移：使用原生 openai LLMClient，不再依赖 langchain_openai。
 """
 import logging
-
-from langchain_core.messages import HumanMessage, SystemMessage
 
 from config import LONGTERM_MEMORY_ENABLED, SUMMARY_SYSTEM_PROMPT
 from llm.chat import get_summary_llm
@@ -24,7 +24,7 @@ _TOOL_SUMMARY_MARKER = "\n\n【工具调用记录】"
 
 
 def _strip_tool_summary(content: str) -> str:
-    """将工具调用记录段落替换为 [old tools call] 占位符"""
+    """将工具调用记录段落替换为 [old tools call] 占位符。"""
     idx = content.find(_TOOL_SUMMARY_MARKER)
     if idx >= 0:
         return content[:idx] + "\n\n[old tools call]"
@@ -46,7 +46,7 @@ async def maybe_compress(conv_id: str) -> bool:
     if not to_summarise:
         return False
 
-    # 先写入长期记忆
+    # 先写入长期记忆（Qdrant）
     if LONGTERM_MEMORY_ENABLED:
         from rag.ingestor import batch_store_pairs
         await batch_store_pairs(conv_id, to_summarise, conv.mid_term_cursor)
@@ -63,18 +63,20 @@ async def maybe_compress(conv_id: str) -> bool:
         + "请将以上内容更新为一段完整的中文摘要，保留关键信息、用户偏好、重要结论。"
     )
 
+    # 使用原生 OpenAI LLMClient（替代旧版 langchain ChatOpenAI.ainvoke）
     llm = get_summary_llm()
-    resp = await llm.ainvoke([
-        SystemMessage(content=SUMMARY_SYSTEM_PROMPT),
-        HumanMessage(content=prompt_content),
-    ])
-    new_summary = resp.content.strip()
+    messages = [
+        {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
+        {"role": "user", "content": prompt_content},
+    ]
+    completion = await llm.ainvoke(messages)
+    new_summary = (completion.choices[0].message.content or "").strip()
 
     conv.mid_term_summary = new_summary
     conv.mid_term_cursor = new_cursor
     await memory_store.save(conv)
 
-    # 将已压缩消息中的工具调用段落更新为占位符（减少后续上下文窗口的噪音）
+    # 将已压缩消息中的工具调用段落更新为占位符（减少后续上下文窗口噪音）
     for msg in to_summarise:
         if msg.role == "assistant" and _TOOL_SUMMARY_MARKER in msg.content:
             new_content = _strip_tool_summary(msg.content)

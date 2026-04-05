@@ -45,6 +45,14 @@ class Settings(BaseSettings):
     chat_model: str
     summary_model: str
     embedding_model: str
+    # 视觉模型：专门处理含图片的请求，可指向不同提供商（如本地 Ollama）
+    # 留空则回退到 ROUTE_MODEL_MAP["chat"]
+    vision_model: str = ""
+    # 视觉模型的独立接口地址，默认复用 LLM_BASE_URL
+    # 示例（Ollama 本地）：http://host.docker.internal:11434/v1
+    vision_base_url: str = ""
+    # 视觉模型的独立 API Key，默认复用 API_KEY
+    vision_api_key: str = ""
 
     # ── 路由 Agent ────────────────────────────────────────────────────────────
     router_enabled: bool
@@ -108,7 +116,19 @@ class Settings(BaseSettings):
         "调用工具时，搜索关键词不要加年份（如2024、2025），直接用核心关键词搜索，让搜索引擎返回最新结果。\n"
         "\n"
         "调用工具后，基于工具返回的真实内容作答，不要凭猜测补充工具未返回的信息。\n"
-        "对于通用原理、编程概念、数学、翻译、写作等你有把握的问题，直接回答即可。"
+        "对于通用原理、编程概念、数学、翻译、写作等你有把握的问题，直接回答即可。\n"
+        "重要：如果当前没有可用工具，不要说『我来帮你搜索』或『让我查一下』，"
+        "这会误导用户。要么直接用已有知识回答，要么使用澄清协议请用户补充信息。\n"
+        "\n"
+        "【澄清协议】当你确实无法判断用户意图、必须得到更多信息才能正确回答时，"
+        "整条消息只输出以下格式，不加任何其他文字：\n"
+        '[NEED_CLARIFICATION]{"question":"一句话说明需要了解什么",'
+        '"items":['
+        '{"id":"唯一字段名","type":"single_choice","label":"问题描述","options":["选项1","选项2","选项3"]},'
+        '{"id":"note","type":"text","label":"其他补充（可选）","placeholder":"请输入..."}'
+        ']}[/NEED_CLARIFICATION]\n'
+        "type 只能是 single_choice（单选）/ multi_choice（多选）/ text（文本）。最多 4 个 items。\n"
+        "注意：能直接回答就直接回答；只有真正歧义、无法猜测时才使用此格式。"
     )
     summary_system_prompt: str = (
         "你是一个专业的摘要助手。你的任务是把对话历史压缩成简洁的摘要。"
@@ -144,6 +164,10 @@ API_BASE_URL              = settings.api_base_url
 CHAT_MODEL                = settings.chat_model
 SUMMARY_MODEL             = settings.summary_model
 EMBEDDING_MODEL           = settings.embedding_model
+VISION_MODEL              = settings.vision_model
+# 视觉接口：未配置时回退到主 LLM 接口
+VISION_BASE_URL           = settings.vision_base_url or settings.llm_base_url
+VISION_API_KEY            = settings.vision_api_key or settings.api_key
 
 ROUTER_ENABLED            = settings.router_enabled
 ROUTER_MODEL              = settings.router_model

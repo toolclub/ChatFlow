@@ -1,5 +1,5 @@
 import { ref, reactive, computed } from 'vue'
-import type { Message, StepRecord, ConversationInfo, SendPayload, AgentStatus, CognitiveState, TraceEntry, PlanStep } from '../types'
+import type { ClarificationData, Message, StepRecord, ConversationInfo, SendPayload, AgentStatus, CognitiveState, TraceEntry, PlanStep } from '../types'
 import { makeEmptyCognitiveState } from '../types'
 import * as api from '../api'
 
@@ -316,6 +316,21 @@ export function useChat() {
           if (step) step.thinking += thinking
           else msg().thinking = (msg().thinking ?? '') + thinking
         },
+        // onClarification
+        (data: ClarificationData) => {
+          // 替换整个消息对象（而非仅新增属性），确保 Vue 响应式系统检测到变化
+          // 同时清空流式输出的原始 [NEED_CLARIFICATION] 标记文字
+          s.messages[assistantIdx] = {
+            ...s.messages[assistantIdx],
+            content: '',
+            clarification: data,
+          }
+          // 等待用户交互，结束 loading 状态
+          s.loading = false
+          s.abortController = null
+          s.agentStatus = { ...s.agentStatus, state: 'idle' }
+          s.cognitive.isActive = false
+        },
       )
     } catch (err: any) {
       if (err?.name === 'AbortError') return
@@ -324,6 +339,47 @@ export function useChat() {
       s.abortController = null
       s.agentStatus = { state: 'idle', model: '' }
       s.cognitive.isActive = false
+    }
+  }
+
+  /**
+   * 用户提交澄清卡片后，将答案格式化为自然语言，作为新消息发送。
+   * 同时清除当前 assistant 消息上的 clarification 数据（卡片已提交）。
+   */
+  async function submitClarification(answers: Record<string, string | string[]>) {
+    if (!currentConvId.value) return
+    const s = convStates[currentConvId.value]
+    if (!s) return
+
+    // 取出触发澄清的那条 assistant 消息，清除其 clarification 字段
+    const lastMsg = s.messages[s.messages.length - 1]
+    if (lastMsg?.role === 'assistant' && lastMsg.clarification) {
+      const { items } = lastMsg.clarification
+      lastMsg.clarification = undefined
+
+      // 找到触发本次澄清的原始用户消息（assistantIdx-1）
+      // 将原始意图与补充答案合并，确保路由模型能正确识别任务类型
+      const originalUserMsg = s.messages[s.messages.length - 2]
+      const originalIntent = originalUserMsg?.role === 'user'
+        ? originalUserMsg.content
+        : ''
+
+      // 格式化用户答案
+      const lines: string[] = []
+      items.forEach(item => {
+        const val = answers[item.id]
+        if (!val || (Array.isArray(val) && val.length === 0)) return
+        const display = Array.isArray(val) ? val.join('、') : String(val)
+        if (display.trim()) lines.push(`${item.label}：${display}`)
+      })
+
+      // 组合：原始意图 + 补充说明，路由器能看到原始任务
+      const supplement = lines.join('，')
+      const formatted = originalIntent
+        ? `${originalIntent}${supplement ? `\n\n补充说明：${supplement}` : ''}`
+        : (supplement || '继续')
+
+      await send({ text: formatted, images: [] })
     }
   }
 
@@ -361,6 +417,6 @@ export function useChat() {
     conversations, currentConvId, messages, loading, agentStatus, cognitive, activeConvIds,
     loadConversations, selectConversation, restoreFromHash,
     newConversation, removeConversation,
-    send, cancelStream, stopConversation, applyModifiedPlan,
+    send, cancelStream, stopConversation, applyModifiedPlan, submitClarification,
   }
 }

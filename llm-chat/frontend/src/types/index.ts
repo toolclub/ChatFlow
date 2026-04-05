@@ -37,6 +37,21 @@ export interface StepRecord {
   content: string
 }
 
+// ── 澄清问询卡片 ──────────────────────────────────────────────────────────────
+
+export interface ClarificationItem {
+  id: string
+  type: 'single_choice' | 'multi_choice' | 'text'
+  label: string
+  options?: string[]       // single_choice / multi_choice 有此字段
+  placeholder?: string     // text 有此字段
+}
+
+export interface ClarificationData {
+  question: string
+  items: ClarificationItem[]
+}
+
 export interface Message {
   role: 'user' | 'assistant'
   content: string
@@ -47,6 +62,7 @@ export interface Message {
   toolCalls?: ToolCallRecord[]
   workflowPlan?: PlanStep[]
   workflowGoal?: string
+  clarification?: ClarificationData   // 模型需要澄清时附带的交互卡片数据
 }
 
 export interface ConversationInfo {

@@ -1,4 +1,4 @@
-import type { PlanStep, ToolHistoryEvent } from '../types'
+import type { ClarificationData, PlanStep, ToolHistoryEvent } from '../types'
 
 const API_BASE = ''
 
@@ -89,6 +89,7 @@ export async function sendMessage(
   onStopped: () => void,
   signal?: AbortSignal,
   onThinking?: (text: string) => void,
+  onClarification?: (data: ClarificationData) => void,
 ) {
   const body: Record<string, unknown> = {
     conversation_id: conversationId,
@@ -96,7 +97,7 @@ export async function sendMessage(
     model,
   }
   if (images.length > 0) {
-    body.images = images.map(img => img.replace(/^data:image\/[a-z]+;base64,/, ''))
+    body.images = images
   }
 
   const res = await fetch(`${API_BASE}/api/chat`, {
@@ -147,7 +148,8 @@ export async function sendMessage(
         if (!line.startsWith('data: ')) continue
         try {
           const data = JSON.parse(line.slice(6))
-          if (data.thinking)       onThinking?.(data.thinking)
+          if (data.thinking)        onThinking?.(data.thinking)
+          if (data.clarification)  onClarification?.(data.clarification)
           if (data.content)        onChunk(data.content)
           if (data.tool_call)      onToolCall(data.tool_call.name, data.tool_call.input)
           if (data.tool_result)    onToolResult(data.tool_result.name, data.tool_result)

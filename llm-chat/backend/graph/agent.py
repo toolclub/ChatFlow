@@ -10,7 +10,10 @@ LangGraph Agent 图构建与全局单例管理
     cache_routing?
       ├── save_response     ← Cache HIT：跳过 LLM 全流程，直接保存
       │
-      └── route_model       ← Cache MISS：进入正常流程
+      └── vision_node       ← Cache MISS：视觉理解（有图片时生成描述，无图片时透传）
+            │
+            ▼
+          route_model       ← 路由决策（利用 vision_description 更精准选择模型）
             │
             ▼
           retrieve_context  ← 检索 RAG + 组装历史消息
@@ -44,7 +47,7 @@ LangGraph Agent 图构建与全局单例管理
                              END
 
 无计划时（chat/code 路由）：
-    semantic_cache_check → (miss) → route_model → retrieve_context → planner →
+    semantic_cache_check → vision_node → (miss) → route_model → retrieve_context → planner →
     call_model → (无工具) → save_response → compress_memory → END
 """
 import logging
@@ -55,17 +58,23 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from config import CHAT_MODEL, ROUTER_ENABLED
-from graph.edges import cache_routing, should_continue, should_continue_after_tool, reflector_routing
+from graph.edges import (
+    cache_routing,
+    reflector_routing,
+    should_continue,
+    should_continue_after_tool,
+)
 from graph.nodes import (
-    compress_memory,
-    make_call_model,
-    make_call_model_after_tool,
-    make_planner,
-    make_reflector,
-    make_retrieve_context,
-    route_model,
-    save_response,
-    semantic_cache_check,
+    CallModelAfterToolNode,
+    CallModelNode,
+    CompressNode,
+    PlannerNode,
+    ReflectorNode,
+    RetrieveContextNode,
+    RouteNode,
+    SaveResponseNode,
+    SemanticCacheNode,
+    VisionNode,
 )
 from graph.state import GraphState
 
@@ -76,27 +85,40 @@ _tools: list[BaseTool] = []
 
 
 def build_graph(tools: list[BaseTool], model: str = CHAT_MODEL) -> Any:
+    """
+    构建并编译 LangGraph 图。
+
+    所有节点通过 NodeClass().execute 注册，确保 LangGraph 接收的是可调用函数。
+    节点依赖（tools / tool_names）通过构造函数注入，不依赖全局变量。
+    """
     tool_names = [t.name for t in tools]
 
-    retrieve_fn = make_retrieve_context(tool_names)
-    planner_fn = make_planner()
-    call_model_fn = make_call_model(tools)
-    call_model_tool_fn = make_call_model_after_tool(tools)
-    reflector_fn = make_reflector()
+    # ── 实例化各节点（注入依赖） ──────────────────────────────────────────────
+    cache_node             = SemanticCacheNode()
+    vision_node            = VisionNode()
+    route_node             = RouteNode()
+    retrieve_node          = RetrieveContextNode(tool_names)
+    planner_node           = PlannerNode()
+    call_model_node        = CallModelNode(tools)
+    call_model_tool_node   = CallModelAfterToolNode(tools)
+    reflector_node         = ReflectorNode()
+    save_response_node     = SaveResponseNode()
+    compress_node          = CompressNode()
 
-    graph = StateGraph(GraphState)
+    graph = StateGraph(GraphState) # type: ignore[arg-type]
 
-    # ── 注册节点 ────────────────────────────────────────────────────────────
-    graph.add_node("semantic_cache_check", semantic_cache_check)
-    graph.add_node("retrieve_context", retrieve_fn)
-    graph.add_node("planner", planner_fn)
-    graph.add_node("call_model", call_model_fn)
-    graph.add_node("call_model_after_tool", call_model_tool_fn)
-    graph.add_node("reflector", reflector_fn)
-    graph.add_node("save_response", save_response)
-    graph.add_node("compress_memory", compress_memory)
+    # ── 注册节点（第二个参数为可调用函数） ──────────────────── ──────────────
+    graph.add_node("semantic_cache_check",   cache_node.execute) # type: ignore[arg-type]
+    graph.add_node("vision_node",            vision_node.execute) # type: ignore[arg-type]
+    graph.add_node("retrieve_context",       retrieve_node.execute) # type: ignore[arg-type]
+    graph.add_node("planner",                planner_node.execute) # type: ignore[arg-type]
+    graph.add_node("call_model",             call_model_node.execute) # type: ignore[arg-type]
+    graph.add_node("call_model_after_tool",  call_model_tool_node.execute) # type: ignore[arg-type]
+    graph.add_node("reflector",              reflector_node.execute) # type: ignore[arg-type]
+    graph.add_node("save_response",          save_response_node.execute) # type: ignore[arg-type]
+    graph.add_node("compress_memory",        compress_node.execute) # type: ignore[arg-type]
 
-    # ── 工具节点 ────────────────────────────────────────────────────────────
+    # ── 工具节点（LangGraph 内置，依赖 LangChain 消息格式） ──────────────────
     if tools:
         tool_node = ToolNode(tools)
         graph.add_node("tools", tool_node)
@@ -118,7 +140,7 @@ def build_graph(tools: list[BaseTool], model: str = CHAT_MODEL) -> Any:
             {"tools": "tools", "reflector": "reflector", "save_response": "save_response"},
         )
     else:
-        # 无工具：call_model → reflector 或 save_response
+        # 无工具模式：call_model 直接到 reflector 或 save_response
         graph.add_conditional_edges(
             "call_model",
             should_continue,
@@ -133,29 +155,33 @@ def build_graph(tools: list[BaseTool], model: str = CHAT_MODEL) -> Any:
     )
 
     # ── 线性边 ─────────────────────────────────────────────────────────────
-    graph.add_edge("retrieve_context", "planner")
-    graph.add_edge("planner", "call_model")
-    graph.add_edge("save_response", "compress_memory")
-    graph.add_edge("compress_memory", END)
+    graph.add_edge("retrieve_context",  "planner")
+    graph.add_edge("planner",           "call_model")
+    graph.add_edge("save_response",     "compress_memory")
+    graph.add_edge("compress_memory",   END)
 
     # ── 入口：semantic_cache_check 始终是第一个节点 ──────────────────────────
     graph.add_edge(START, "semantic_cache_check")
 
-    # cache_routing：命中 → save_response；未命中 → 第一个实际处理节点
+    # ── cache_routing：命中 → save_response；未命中 → vision_node ────────────
     if ROUTER_ENABLED:
-        graph.add_node("route_model", route_model)
+        graph.add_node("route_model", route_node.execute) # type: ignore[arg-type]
         graph.add_conditional_edges(
             "semantic_cache_check",
             cache_routing,
-            {"save_response": "save_response", "after_cache": "route_model"},
+            {"save_response": "save_response", "after_cache": "vision_node"},
         )
-        graph.add_edge("route_model", "retrieve_context")
+        # vision_node → route_model → retrieve_context（带路由的标准路径）
+        graph.add_edge("vision_node",   "route_model")
+        graph.add_edge("route_model",   "retrieve_context")
     else:
+        # 无路由模式：vision_node → retrieve_context（直接跳过路由）
         graph.add_conditional_edges(
             "semantic_cache_check",
             cache_routing,
-            {"save_response": "save_response", "after_cache": "retrieve_context"},
+            {"save_response": "save_response", "after_cache": "vision_node"},
         )
+        graph.add_edge("vision_node", "retrieve_context")
 
     return graph.compile()
 
@@ -165,6 +191,10 @@ def init(tools: list[BaseTool], model: str = CHAT_MODEL) -> None:
     global _tools
     _tools = tools
     _graph_cache["default"] = build_graph(tools, model)
+    logger.info(
+        "Agent 图初始化完成 | tools=%d | router_enabled=%s",
+        len(tools), ROUTER_ENABLED,
+    )
 
 
 def get_graph(model: str = CHAT_MODEL) -> Any:

@@ -19,7 +19,7 @@ import logging
 import asyncio
 from datetime import date
 
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage
 from langchain_core.tools import BaseTool
 
 from config import (
@@ -30,6 +30,9 @@ from config import (
     SEMANTIC_CACHE_NAMESPACE_MODE,
     SEMANTIC_CACHE_SEARCH_TTL_HOURS,
     DEFAULT_SYSTEM_PROMPT,
+    VISION_MODEL,
+    VISION_BASE_URL,
+    VISION_API_KEY,
 )
 from llm.chat import get_chat_llm
 from graph.state import GraphState, PlanStep
@@ -45,6 +48,83 @@ from memory.compressor import maybe_compress
 from memory.context_builder import build_messages
 
 logger = logging.getLogger("graph.nodes")
+
+
+# ── 工具函数 ──────────────────────────────────────────────────────────────────
+
+def _to_openai_messages(messages) -> list[dict]:
+    """
+    将 LangChain BaseMessage 列表转为 OpenAI SDK 原生格式。
+    HumanMessage.content 若已是 list（多模态），直接透传给 SDK，不经 LangChain 序列化。
+    AIMessage 中的 tool_calls 同步转换为 OpenAI function calling 格式，
+    确保 call_model_after_tool 在含图片场景下能正确重放工具调用历史。
+    """
+    role_map = {
+        "SystemMessage":   "system",
+        "HumanMessage":    "user",
+        "AIMessage":       "assistant",
+        "ToolMessage":     "tool",
+        "FunctionMessage": "function",
+    }
+    result = []
+    for msg in messages:
+        role = role_map.get(type(msg).__name__, "user")
+        entry: dict = {"role": role, "content": msg.content}
+        if role == "tool":
+            entry["tool_call_id"] = getattr(msg, "tool_call_id", "")
+        if role == "assistant":
+            lc_tool_calls = getattr(msg, "tool_calls", None) or []
+            if lc_tool_calls:
+                openai_tool_calls = []
+                for tc in lc_tool_calls:
+                    if isinstance(tc, dict):
+                        tc_id   = tc.get("id", "")
+                        tc_name = tc.get("name", "")
+                        tc_args = tc.get("args", {})
+                    else:
+                        tc_id   = getattr(tc, "id", "")
+                        tc_name = getattr(tc, "name", "")
+                        tc_args = getattr(tc, "args", {})
+                    openai_tool_calls.append({
+                        "id": tc_id,
+                        "type": "function",
+                        "function": {
+                            "name": tc_name,
+                            "arguments": json.dumps(tc_args, ensure_ascii=False),
+                        },
+                    })
+                entry["tool_calls"] = openai_tool_calls
+                # OpenAI 规范：有 tool_calls 时 content 须为 None 或空字符串
+                if not entry["content"]:
+                    entry["content"] = None
+        result.append(entry)
+    return result
+
+
+def _tools_to_openai_schema(tools: list) -> list[dict]:
+    """
+    将 LangChain BaseTool 列表转为 OpenAI tools 参数格式。
+    用于含图片时直接调用 OpenAI SDK（绕过 LangChain bind_tools 序列化）。
+    """
+    result = []
+    for tool in tools:
+        # LangChain BaseTool 提供 args_schema（Pydantic model）
+        schema = getattr(tool, "args_schema", None)
+        if schema is not None:
+            parameters = schema.model_json_schema() if hasattr(schema, "model_json_schema") else schema.schema()
+            # 移除 pydantic 生成的 title 字段，保持简洁
+            parameters.pop("title", None)
+        else:
+            parameters = {"type": "object", "properties": {}}
+        result.append({
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": getattr(tool, "description", ""),
+                "parameters": parameters,
+            },
+        })
+    return result
 
 
 # ── 节点 -1：语义缓存检查（图的第一个节点） ──────────────────────────────────
@@ -115,57 +195,52 @@ async def semantic_cache_check(state: GraphState) -> CacheHitNodeOutput:
 
 # ── 节点 0：路由模型选择 ──────────────────────────────────────────────────────
 
-ROUTE_PROMPT = """你是一个意图分类器。根据用户消息，输出以下四个标签之一，不要输出任何其他内容：
+ROUTE_PROMPT = """你是一个智能路由器。分析用户消息（和附带图片说明），选择最合适的处理方式，输出以下标签之一：
 
-- chat         （普通聊天、解释通用概念、翻译、写作、数学、逻辑推理、创意建议、日常对话
-                 ── 模型凭已有知识能准确回答的问题）
+- chat         直接回答，无需联网或工具：
+                 日常对话、解释概念、翻译、写作、数学、逻辑推理、分析图片内容
 
-- code         （纯代码任务：根据明确需求直接编写/调试/重构代码，不需要先查询外部资料）
+- code         纯代码任务，需求明确、无需查资料：
+                 编写/调试/重构/解释代码，依据图片内容直接生成代码
 
-- search       （需要先联网查询再回答，但最终不是写代码：
-                 1. 实时/最新信息：新闻、股价、天气、近期事件、最新版本
-                 2. 具体事实核查：某技术/产品哪年出现、哪个公司提出、具体规格参数
-                 3. 对近 3 年新技术/协议/框架没有把握的知识性问题）
+- search       需联网查询，不涉及写代码：
+                 实时/最新信息（新闻、股价、天气、版本号）、具体事实核查、
+                 查询图片中出现的商品/地点/人物/文字的详细信息
 
-- search_code  （需要先联网查询资料，再基于查询结果写代码：
-                 例如：查官方文档/仓库/示例后写 demo、根据最新 API 写代码、
-                 参考某框架的用法实现功能）
+- search_code  需先查资料再写代码：
+                 查官方文档/API 后写代码、根据图片内容查资料再实现功能
 
 【判断原则】
-- 明确要求"查官方/查文档/查仓库/参考官方"再写代码 → search_code
-- 只是写代码，需求明确不需要查资料 → code
-- 只是查信息，不需要写代码 → search
-- 当不确定是 search 还是 search_code 时，优先选 search_code
+- 图片纯分析（描述/解读/OCR/情感）→ chat
+- 图片内容需要联网核实或延伸查询 → search
+- 根据图片直接写代码且需求明确 → code
+- 根据图片写代码但需先查资料 → search_code
+- 明确要求查官方/文档后写代码 → search_code
+- 只写代码需求明确不查资料 → code
+- 只查信息不写代码 → search
+- 不确定 search 还是 search_code → 优先 search_code
 
 只输出标签本身，例如：chat"""
 
+
 async def route_model(state: GraphState) -> RouteNodeOutput:
     user_msg = state["user_message"]
-
-    # 含图片的请求直接走 chat 路由：模型可视觉直接分析图片，
-    # 无需联网/规划；走 search 路由会触发 planner，导致模型尝试用工具"下载"图片。
-    if state.get("images"):
-        route        = "chat"
-        answer_model = ROUTE_MODEL_MAP.get("chat", state["model"])
-        from logging_config import get_conv_logger
-        get_conv_logger(state.get("client_id", ""), state.get("conv_id", "")).info(
-            "路由决策 | route=chat(图片强制) | answer_model=%s | user_msg=%.60s",
-            answer_model, user_msg,
-        )
-        return {
-            "route":        route,
-            "answer_model": answer_model,
-            "tool_model":   answer_model,
-        }
+    has_images = bool(state.get("images"))
 
     llm = get_chat_llm(model=ROUTER_MODEL, temperature=0.0)
 
+    # 有图片时在路由提示中注入图片上下文，帮助模型基于意图做出正确路由
+    if has_images:
+        n = len(state["images"])
+        routing_input = f"[用户附带了 {n} 张图片]\n用户消息：{user_msg}"
+    else:
+        routing_input = f"用户消息：{user_msg}"
+
     resp = await llm.ainvoke([
-        HumanMessage(content=f"{ROUTE_PROMPT}\n\n用户消息：{user_msg}")
+        HumanMessage(content=f"{ROUTE_PROMPT}\n\n{routing_input}")
     ])
 
     raw = resp.content.strip().lower()
-    # 在整个响应中查找路由关键词（兼容模型输出非单词格式的情况）
     # search_code 必须在 search 之前检查，避免被 search 部分匹配
     route = "chat"
     for candidate in ("search_code", "search", "code", "chat"):
@@ -173,20 +248,28 @@ async def route_model(state: GraphState) -> RouteNodeOutput:
             route = candidate
             break
 
-    answer_model = ROUTE_MODEL_MAP.get(route, state["model"])
-
-    needs_tools = route in ("search", "search_code")
-    tool_model = SEARCH_MODEL if needs_tools else answer_model
+    # ── 模型选择 ────────────────────────────────────────────────────────────
+    if has_images:
+        # 有图片时：整条链路都需要视觉能力
+        #   - tool_model：初始 call_model 需要理解图片内容才能决定调用哪些工具
+        #   - answer_model：综合工具结果 + 图片时同样需要视觉
+        vision = VISION_MODEL or ROUTE_MODEL_MAP.get("chat", state["model"])
+        tool_model   = vision
+        answer_model = vision
+    else:
+        answer_model = ROUTE_MODEL_MAP.get(route, state["model"])
+        needs_tools  = route in ("search", "search_code")
+        tool_model   = SEARCH_MODEL if needs_tools else answer_model
 
     from logging_config import get_conv_logger
     get_conv_logger(state.get("client_id", ""), state.get("conv_id", "")).info(
-        "路由决策 | route=%s | tool_model=%s | answer_model=%s | user_msg=%.60s",
-        route, tool_model, answer_model, user_msg,
+        "路由决策 | route=%s | has_images=%s | tool_model=%s | answer_model=%s | user_msg=%.60s",
+        route, has_images, tool_model, answer_model, user_msg,
     )
 
     return {
-        "route": route,
-        "tool_model": tool_model,
+        "route":        route,
+        "tool_model":   tool_model,
         "answer_model": answer_model,
     }
 
@@ -232,10 +315,14 @@ def make_retrieve_context(tool_names: list[str]):
         # 构建用户消息：有图片时使用多模态格式
         images = state.get("images", [])
         if images:
-            multimodal_content: list = [
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}}
-                for img in images
-            ]
+            multimodal_content: list = []
+            for img in images:
+                url = img if img.startswith("data:") else f"data:image/jpeg;base64,{img}"
+                logger.info(
+                    "retrieve_context 图片URL | conv=%s | prefix=%.40s | len=%d",
+                    conv_id, url[:40], len(url),
+                )
+                multimodal_content.append({"type": "image_url", "image_url": {"url": url}})
             if user_msg:
                 multimodal_content.append({"type": "text", "text": user_msg})
             history_messages.append(HumanMessage(content=multimodal_content))
@@ -288,13 +375,72 @@ def make_planner():
             }
 
         user_msg = state["user_message"]
+        images = state.get("images", [])
+
+        # ── 有图片时：先用视觉模型把图"翻译"成文字，再交给规划模型 ────────────
+        # 视觉模型（Ollama 本地）只在 VISION_BASE_URL 上存在，不能用 get_chat_llm。
+        # 规划模型（主接口）不需要看图，只需要读文字描述即可制定步骤。
+        image_description = ""
+        if images:
+            try:
+                from openai import AsyncOpenAI
+                vision_model = VISION_MODEL
+                if vision_model:
+                    vision_client = AsyncOpenAI(base_url=VISION_BASE_URL, api_key=VISION_API_KEY)
+                    vision_content: list = []
+                    for img in images:
+                        url = img if img.startswith("data:") else f"data:image/jpeg;base64,{img}"
+                        vision_content.append({"type": "image_url", "image_url": {"url": url}})
+                    vision_content.append({
+                        "type": "text",
+                        "text": (
+                            "请仔细观察图片，用中文详细描述你看到的内容，"
+                            "重点描述：错误信息、代码片段、界面异常、文字内容、关键数据等。"
+                            "描述要具体，方便后续推理分析。"
+                        ),
+                    })
+                    vision_resp = await asyncio.wait_for(
+                        vision_client.chat.completions.create(
+                            model=vision_model,
+                            messages=[{"role": "user", "content": vision_content}],
+                            temperature=0.1,
+                        ),
+                        timeout=60,
+                    )
+                    image_description = vision_resp.choices[0].message.content or ""
+                    logger.info(
+                        "Planner 视觉预处理完成 | vision_model=%s | desc_len=%d | preview='%.200s'",
+                        vision_model, len(image_description), image_description,
+                    )
+            except Exception as exc:
+                logger.warning("Planner 视觉预处理失败，退化为纯文字规划 | error=%s", exc)
+
+        # 规划模型：用主接口上存在的模型
         model = state.get("tool_model") or state["model"]
+        if model == (VISION_MODEL or "") or not model:
+            model = SEARCH_MODEL or state["model"]
 
         # streaming=False + 重试：MiniMax 等厂商偶发返回空 content
         llm = get_chat_llm(model=model, temperature=0.1)
+
+        # 组装规划输入：有图片时把视觉描述嵌入，让规划模型知道图里有什么
+        if images:
+            if image_description:
+                planning_msg = (
+                    f"[图片内容分析]\n{image_description}\n\n"
+                    f"[用户请求]\n{user_msg}"
+                )
+            else:
+                planning_msg = (
+                    f"[用户附带了 {len(images)} 张图片，内容无法解析]\n"
+                    f"用户请求：{user_msg}"
+                )
+        else:
+            planning_msg = user_msg
+
         messages = [
             SystemMessage(content=PLANNER_SYSTEM),
-            HumanMessage(content=user_msg),
+            HumanMessage(content=planning_msg),
         ]
 
         # ── 层1：重试拿到非空 content ──────────────────────────────────────────
@@ -459,6 +605,81 @@ def make_call_model(tools: list[BaseTool]):
                 else:
                     messages[-1] = HumanMessage(content=str(last_content) + step_ctx)
 
+        # ── 含图片时绕过 LangChain，直接用 OpenAI SDK 发送多模态请求 ──────────────
+        # LangChain ChatOpenAI 在序列化 HumanMessage list content 时存在兼容性问题，
+        # 导致图片内容未被正确传递。OpenAI SDK 原生支持 list content，直接传入即可。
+        # 无论是否需要工具（use_tools），含图片的请求统一走此分支：
+        #   - 无工具：直接生成回复
+        #   - 有工具：透传 tools schema，并将 SDK 返回的 tool_calls 转回 LangChain 格式
+        if state.get("images"):
+            from openai import AsyncOpenAI
+
+            vision_model = VISION_MODEL or model
+            openai_messages = _to_openai_messages(messages)
+            client = AsyncOpenAI(base_url=VISION_BASE_URL, api_key=VISION_API_KEY)
+
+            create_kwargs: dict = dict(
+                model=vision_model,
+                messages=openai_messages,
+                temperature=temperature,
+            )
+            if use_tools and tools:
+                create_kwargs["tools"] = _tools_to_openai_schema(tools)
+
+            logger.info(
+                "call_model (vision/direct) 请求发出 | conv=%s | model=%s | vision_model=%s"
+                " | use_tools=%s | msgs=%d",
+                conv_id, model, vision_model, use_tools, len(openai_messages),
+            )
+            try:
+                oai_resp = await asyncio.wait_for(
+                    client.chat.completions.create(**create_kwargs),
+                    timeout=180,
+                )
+            except asyncio.TimeoutError:
+                logger.error("call_model (vision) 超时 | conv=%s | model=%s", conv_id, model)
+                raise
+            except Exception as exc:
+                logger.error("call_model (vision) 异常 | conv=%s | model=%s | error=%s",
+                             conv_id, model, exc, exc_info=True)
+                raise
+
+            oai_msg = oai_resp.choices[0].message
+            content  = oai_msg.content or ""
+            oai_tool_calls = oai_msg.tool_calls or []
+
+            if oai_tool_calls:
+                # 将 OpenAI tool_calls 转回 LangChain AIMessage 格式，让 should_continue 正常路由
+                lc_tool_calls = []
+                for tc in oai_tool_calls:
+                    try:
+                        args = json.loads(tc.function.arguments)
+                    except Exception:
+                        args = {"_raw": tc.function.arguments}
+                    lc_tool_calls.append({
+                        "id":   tc.id,
+                        "name": tc.function.name,
+                        "args": args,
+                        "type": "tool_call",
+                    })
+                    logger.info(
+                        "call_model (vision) tool_call | conv=%s | name=%s | args=%.200s",
+                        conv_id, tc.function.name, tc.function.arguments,
+                    )
+                ai_msg = AIMessage(content=content, tool_calls=lc_tool_calls)
+                logger.info(
+                    "call_model (vision/direct) 完成(tool_calls) | conv=%s | model=%s"
+                    " | tool_calls=%d | content_len=%d",
+                    conv_id, model, len(lc_tool_calls), len(content),
+                )
+                return {"messages": [ai_msg], "full_response": content}
+
+            logger.info(
+                "call_model (vision/direct) 完成 | conv=%s | model=%s | content_len=%d | preview='%.100s'",
+                conv_id, model, len(content), content,
+            )
+            return {"messages": [AIMessage(content=content)], "full_response": content}
+
         try:
             logger.info("call_model LLM请求发出 | conv=%s | model=%s", conv_id, model)
             response = await asyncio.wait_for(
@@ -534,6 +755,59 @@ def make_call_model_after_tool(tools: list[BaseTool]):
             current_idx + 1 if plan else "-", len(plan) if plan else "-",
             len(messages),
         )
+
+        # ── 含图片时同样绕过 LangChain，直接用 OpenAI SDK ──────────────────────
+        # call_model_after_tool 的 messages 列表中含有多模态 HumanMessage（原始截图），
+        # LangChain 同样无法正确序列化，须走 OpenAI SDK 原生路径。
+        # 此节点只生成最终回复，无需再绑定工具（boundary 注入已限制工具调用）。
+        if state.get("images"):
+            from openai import AsyncOpenAI
+
+            vision_model = VISION_MODEL or model
+            openai_messages = _to_openai_messages(messages)
+            client = AsyncOpenAI(base_url=VISION_BASE_URL, api_key=VISION_API_KEY)
+            logger.info(
+                "call_model_after_tool (vision/direct) 请求发出 | conv=%s | model=%s | msgs=%d",
+                conv_id, vision_model, len(openai_messages),
+            )
+            try:
+                oai_resp = await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=vision_model,
+                        messages=openai_messages,
+                        temperature=temperature,
+                    ),
+                    timeout=180,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "call_model_after_tool (vision) 超时 | conv=%s | model=%s", conv_id, model
+                )
+                raise
+            except Exception as exc:
+                err_str = str(exc)
+                if "1027" in err_str or "sensitive" in err_str.lower():
+                    logger.warning("call_model_after_tool (vision) 触发内容审核 | conv=%s", conv_id)
+                    return {
+                        "messages": [],
+                        "full_response": "抱歉，该内容触发了模型安全审核，无法生成回复。请换个方式描述问题。",
+                    }
+                logger.error(
+                    "call_model_after_tool (vision) 异常 | conv=%s | model=%s | error=%s",
+                    conv_id, model, exc, exc_info=True,
+                )
+                raise
+
+            full_content = oai_resp.choices[0].message.content or ""
+            logger.info(
+                "call_model_after_tool (vision/direct) 完成 | conv=%s | model=%s"
+                " | content_len=%d | preview='%.100s'",
+                conv_id, vision_model, len(full_content), full_content,
+            )
+            return {
+                "messages": [AIMessage(content=full_content)],
+                "full_response": full_content,
+            }
 
         try:
             logger.info(
@@ -764,17 +1038,28 @@ def _mark_step(plan: list, idx: int, status: str) -> list:
 async def _describe_images_for_storage(images: list[str], model: str) -> str:
     """
     用视觉 LLM 生成图片内容的简短描述，用于替代存储/记忆中的原始 base64 数据。
+    同样使用 OpenAI SDK 直接调用，避免 LangChain 序列化问题。
     失败时静默降级，返回通用占位文本。
     """
     try:
-        llm = get_chat_llm(model=model, temperature=0.1)
+        from openai import AsyncOpenAI
+
+        vision_model = VISION_MODEL or model
         content: list = [
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}}
+            {"type": "image_url", "image_url": {
+                "url": img if img.startswith("data:") else f"data:image/jpeg;base64,{img}"
+            }}
             for img in images
         ]
         content.append({"type": "text", "text": "请简短描述图片的主要内容，不超过50个字，直接描述，不要解释。"})
-        resp = await llm.ainvoke([HumanMessage(content=content)])
-        return resp.content.strip() if isinstance(resp.content, str) else "图片内容"
+
+        client = AsyncOpenAI(base_url=VISION_BASE_URL, api_key=VISION_API_KEY)
+        resp = await client.chat.completions.create(
+            model=vision_model,
+            messages=[{"role": "user", "content": content}],
+            temperature=0.1,
+        )
+        return (resp.choices[0].message.content or "").strip() or "图片内容"
     except Exception as exc:
         logger.warning("图片描述生成失败: %s", exc)
         return "图片内容"
