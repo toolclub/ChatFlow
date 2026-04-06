@@ -102,6 +102,7 @@ class LLMClient:
         messages: list[ChatCompletionMessageParam],
         temperature: float | None = None,
         timeout: float = 180.0,
+        extra_body: dict | None = None,
     ) -> AsyncGenerator[str, None]:
         """
         流式调用 LLM，逐 token yield 内容增量。
@@ -124,21 +125,31 @@ class LLMClient:
             self.model, len(messages), temp,
         )
 
+        create_kwargs: dict = {
+            "model":       self.model,
+            "messages":    messages,
+            "temperature": temp,
+            "stream":      True,
+            "timeout":     timeout,
+        }
+        if extra_body:
+            create_kwargs["extra_body"] = extra_body
+
         # 显式标注类型：stream=True 时返回 AsyncStream，类型系统无法自动收窄
         stream: AsyncStream[ChatCompletionChunk] = await self._client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=temp,
-            stream=True,
-            timeout=timeout,
+            **create_kwargs
         )
 
         async for chunk in stream:
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
+            # 普通内容 token
             if delta.content:
                 yield delta.content
+            # 智谱/DeepSeek 等模型的推理 token（thinking_content / reasoning_content）
+            elif hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                yield "\x00THINK\x00" + delta.reasoning_content
 
     def __repr__(self) -> str:
         return f"LLMClient(model={self.model!r}, temperature={self.temperature})"

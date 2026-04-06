@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue'
 import type { CognitiveState, PlanStep, ToolHistoryEvent } from '../types'
-import { Edit, Loading, SuccessFilled, CircleCloseFilled, Plus, Delete } from '@element-plus/icons-vue'
+import { Delete } from '@element-plus/icons-vue'
+import PlanFlowCanvas from './PlanFlowCanvas.vue'
 
 const props = defineProps<{
   cognitive: CognitiveState
@@ -33,76 +34,12 @@ function resetLocalPlan() {
   isDirty.value = false
 }
 
-// ── Drag-and-drop reordering ──────────────────────────────────────────────────
-const dragSrcIdx  = ref(-1)   // which node is being dragged
-const dragOverIdx = ref(-1)   // which node the cursor is over (drop target)
-
-function canDrag(i: number) {
-  return !props.loading && localPlan.value[i]?.status !== 'running'
-}
-
-function onDragStart(i: number, e: DragEvent) {
-  if (!canDrag(i)) { e.preventDefault(); return }
-  dragSrcIdx.value = i
-  if (e.dataTransfer) {
-    e.dataTransfer.effectAllowed = 'move'
-    e.dataTransfer.setData('text/plain', String(i))
-  }
-}
-
-function onDragOver(i: number, e: DragEvent) {
-  if (dragSrcIdx.value === -1) return
-  e.preventDefault()
-  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
-  if (i !== dragSrcIdx.value) dragOverIdx.value = i
-}
-
-function onDragLeave(i: number) {
-  if (dragOverIdx.value === i) dragOverIdx.value = -1
-}
-
-function onDrop(i: number, e: DragEvent) {
-  e.preventDefault()
-  const src = dragSrcIdx.value
-  if (src === -1 || src === i) { onDragEnd(); return }
-
-  const updated = [...localPlan.value]
-  const [moved] = updated.splice(src, 1)
-  updated.splice(i, 0, moved)
-  localPlan.value = updated
-  isDirty.value = true
-  onDragEnd()
-}
-
-function onDragEnd() {
-  dragSrcIdx.value  = -1
-  dragOverIdx.value = -1
-}
-
 // ── Edit dialog ───────────────────────────────────────────────────────────────
 const editDialogVisible = ref(false)
 const editingIndex = ref(-1)
 const editData = ref({ title: '', description: '' })
 const insertMode = ref(false)
 
-function onNodeClick(i: number) {
-  if (props.loading) return
-  if (dragSrcIdx.value !== -1) return   // was a drag, not a click
-  const step = localPlan.value[i]
-  if (!step || step.status === 'running') return
-  editingIndex.value = i
-  editData.value = { title: step.title, description: step.description }
-  insertMode.value = false
-  editDialogVisible.value = true
-}
-
-function onInsertBetween(afterIndex: number) {
-  if (props.loading) return
-  editingIndex.value = afterIndex
-  editData.value = { title: '', description: '' }
-  insertMode.value = true
-  editDialogVisible.value = true
-}
 
 function saveEdit() {
   if (!editData.value.title.trim()) return
@@ -139,6 +76,36 @@ function onReexecute() {
   isDirty.value = false
 }
 
+// ── Resizable trace section ───────────────────────────────────────────────────
+const traceHeight = ref(160)
+let traceResizing = false
+let resizeStartY = 0
+let resizeStartH = 0
+
+function onResizeStart(e: MouseEvent) {
+  traceResizing = true
+  resizeStartY = e.clientY
+  resizeStartH = traceHeight.value
+  document.body.style.cursor = 'ns-resize'
+  document.body.style.userSelect = 'none'
+  document.addEventListener('mousemove', onResizeMove)
+  document.addEventListener('mouseup', onResizeEnd)
+}
+
+function onResizeMove(e: MouseEvent) {
+  if (!traceResizing) return
+  const delta = resizeStartY - e.clientY
+  traceHeight.value = Math.max(120, Math.min(500, resizeStartH + delta))
+}
+
+function onResizeEnd() {
+  traceResizing = false
+  document.body.style.cursor = ''
+  document.body.style.userSelect = ''
+  document.removeEventListener('mousemove', onResizeMove)
+  document.removeEventListener('mouseup', onResizeEnd)
+}
+
 // ── Trace log ─────────────────────────────────────────────────────────────────
 const traceLogEl = ref<HTMLDivElement>()
 watch(
@@ -150,22 +117,6 @@ watch(
 )
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function statusColor(status: PlanStep['status']): string {
-  switch (status) {
-    case 'running': return '#8b5cf6'
-    case 'done':    return '#22c55e'
-    case 'failed':  return '#ef4444'
-    default:        return '#d1d5db'
-  }
-}
-function statusBg(status: PlanStep['status']): string {
-  switch (status) {
-    case 'running': return 'rgba(139,92,246,0.05)'
-    case 'done':    return 'rgba(34,197,94,0.04)'
-    case 'failed':  return 'rgba(239,68,68,0.04)'
-    default:        return '#ffffff'
-  }
-}
 function traceIcon(type: string) {
   switch (type) {
     case 'tool_call':   return '🔧'
@@ -249,102 +200,16 @@ const showLiveTrace = computed(() => props.loading || props.cognitive.traceLog.l
       <div v-for="n in 3" :key="n" class="skel-node" :style="`opacity:${1-(n-1)*0.25}`" />
     </div>
 
-    <!-- Workflow nodes -->
-    <div v-else class="nodes-scroll">
-      <div class="nodes-wrap">
-
-        <!-- Insert before first node -->
-        <div class="connector-row connector-row--top" @click.stop="onInsertBetween(-1)">
-          <div class="conn-track">
-            <div class="conn-insert conn-insert--top">
-              <el-icon style="font-size:8px"><Plus /></el-icon>
-            </div>
-          </div>
-        </div>
-
-        <template v-for="(step, i) in localPlan" :key="step.id">
-
-          <!-- ── Node wrapper (drag target) ── -->
-          <div
-            class="node-item"
-            :class="{
-              'node-item--drag-src':  dragSrcIdx === i,
-              'node-item--drag-over': dragOverIdx === i && dragSrcIdx !== i,
-            }"
-            :draggable="canDrag(i)"
-            @dragstart="onDragStart(i, $event)"
-            @dragover="onDragOver(i, $event)"
-            @dragleave="onDragLeave(i)"
-            @drop="onDrop(i, $event)"
-            @dragend="onDragEnd"
-          >
-            <!-- Node card -->
-            <div
-              class="wf-node"
-              :class="{
-                'wf-node--clickable': !loading && step.status !== 'running',
-                'wf-node--running':   step.status === 'running',
-                'wf-node--done':      step.status === 'done',
-                'wf-node--failed':    step.status === 'failed',
-              }"
-              :style="{ '--accent': statusColor(step.status), background: statusBg(step.status) }"
-              @click="onNodeClick(i)"
-            >
-              <!-- Drag handle (6-dot grip) -->
-              <div
-                v-if="canDrag(i)"
-                class="drag-handle"
-                title="拖拽排序"
-                @mousedown.stop
-              >
-                <svg width="8" height="12" viewBox="0 0 8 12" fill="currentColor">
-                  <circle cx="2" cy="2" r="1.2"/><circle cx="6" cy="2" r="1.2"/>
-                  <circle cx="2" cy="6" r="1.2"/><circle cx="6" cy="6" r="1.2"/>
-                  <circle cx="2" cy="10" r="1.2"/><circle cx="6" cy="10" r="1.2"/>
-                </svg>
-              </div>
-
-              <!-- Left accent -->
-              <div class="node-accent"></div>
-
-              <!-- Status icon -->
-              <div class="node-icon">
-                <el-icon v-if="step.status === 'running'" style="font-size:11px;color:#8b5cf6;animation:node-spin 1s linear infinite"><Loading /></el-icon>
-                <el-icon v-else-if="step.status === 'done'" style="font-size:13px;color:#22c55e"><SuccessFilled /></el-icon>
-                <el-icon v-else-if="step.status === 'failed'" style="font-size:13px;color:#ef4444"><CircleCloseFilled /></el-icon>
-                <span v-else class="node-num">{{ i + 1 }}</span>
-              </div>
-
-              <!-- Content -->
-              <div class="node-body">
-                <div class="node-title">{{ step.title }}</div>
-                <div v-if="step.description" class="node-desc">{{ step.description }}</div>
-              </div>
-
-              <!-- Edit hint -->
-              <el-icon v-if="!loading && step.status !== 'running'" class="node-edit-hint"><Edit /></el-icon>
-            </div>
-          </div>
-
-          <!-- Connector + insert between -->
-          <div v-if="i < localPlan.length - 1" class="connector-row" @click.stop="onInsertBetween(i)">
-            <div class="conn-track">
-              <div class="conn-line"></div>
-              <div class="conn-insert">
-                <el-icon style="font-size:8px"><Plus /></el-icon>
-              </div>
-            </div>
-          </div>
-
-        </template>
-
-        <!-- Add at end -->
-        <div class="add-end-btn" @click="onInsertBetween(localPlan.length - 1)">
-          <el-icon style="font-size:11px"><Plus /></el-icon>
-          添加步骤
-        </div>
-
-      </div>
+    <!-- ── AntV X6 流程图画布 ── -->
+    <div v-else class="flow-canvas-section">
+      <PlanFlowCanvas
+        :plan="localPlan"
+        :loading="loading"
+        @reorder="(p) => { localPlan = p; isDirty = true }"
+        @edit-node="(step, idx) => { editingIndex = idx; editData = { title: step.title, description: step.description }; insertMode = false; editDialogVisible = true }"
+        @add-node="(afterIdx) => { editingIndex = afterIdx; editData = { title: '', description: '' }; insertMode = true; editDialogVisible = true }"
+        @delete-node="(idx) => { if (localPlan.length > 1) { localPlan = localPlan.filter((_, i) => i !== idx); isDirty = true } }"
+      />
 
       <!-- Dirty banner -->
       <transition name="banner">
@@ -377,7 +242,11 @@ const showLiveTrace = computed(() => props.loading || props.cognitive.traceLog.l
     </transition>
 
     <!-- 底部面板：实时追踪日志 或 历史工具调用 -->
-    <div class="trace-section">
+    <div class="trace-section" :style="{ height: traceHeight + 'px' }">
+      <!-- 拖拽调整手柄 -->
+      <div class="trace-resize-handle" @mousedown.prevent="onResizeStart">
+        <div class="trace-resize-bar"></div>
+      </div>
       <div class="trace-hd">
         <span v-if="showLiveTrace">追踪日志</span>
         <span v-else-if="cognitive.historyEvents.length > 0">工具调用历史</span>
@@ -455,8 +324,10 @@ const showLiveTrace = computed(() => props.loading || props.cognitive.traceLog.l
   height: 100%;
   display: flex;
   flex-direction: column;
-  background: var(--cf-bg, #f8f9fb);
-  border-left: 1px solid var(--cf-border-soft, #e5e7eb);
+  background: #ffffff;
+  border-radius: var(--cf-radius-lg, 16px);
+  border: 1px solid var(--cf-border-soft, #EBEEF5);
+  box-shadow: var(--cf-shadow-sm, 0 4px 16px rgba(0,0,0,0.08));
   overflow: hidden;
 }
 
@@ -465,9 +336,11 @@ const showLiveTrace = computed(() => props.loading || props.cognitive.traceLog.l
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 12px;
-  background: rgba(243,244,248,0.95);
-  border-bottom: 1px solid #e5e7eb;
+  padding: 9px 12px;
+  background: rgba(250,250,252,0.92);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-bottom: 1px solid #e8eaf2;
   flex-shrink: 0;
 }
 .hd-left { display: flex; align-items: center; gap: 6px; }
@@ -511,161 +384,15 @@ const showLiveTrace = computed(() => props.loading || props.cognitive.traceLog.l
   background-size: 200% 100%; animation: sk 1.4s infinite;
 }
 
-/* Scroll area */
-.nodes-scroll {
-  flex: 1; overflow-y: auto;
-  display: flex; flex-direction: column; min-height: 0;
-}
-.nodes-wrap { padding: 6px 8px 6px; display: flex; flex-direction: column; }
-
-/* ── Node item (drag wrapper) ── */
-.node-item {
-  display: flex; flex-direction: column;
-  position: relative;
-  transition: opacity 0.15s;
-}
-
-/* Drag source: fade out */
-.node-item--drag-src { opacity: 0.35; }
-.node-item--drag-src .wf-node { border-style: dashed !important; }
-
-/* Drop target: blue top-line indicator */
-.node-item--drag-over::before {
-  content: '';
-  display: block;
-  height: 2px;
-  background: #6366f1;
-  border-radius: 1px;
-  margin-bottom: 2px;
-  animation: drop-pulse 0.7s ease-in-out infinite alternate;
-}
-@keyframes drop-pulse {
-  from { opacity: 0.7; }
-  to   { opacity: 1; box-shadow: 0 0 6px rgba(99,102,241,0.5); }
-}
-
-/* ── Compact AntV-style node card ── */
-.wf-node {
-  display: flex; align-items: center; gap: 7px;
-  padding: 5px 7px 5px 0;
-  border-radius: 6px;
-  border: 1px solid #e5e7eb;
-  background: #fff;
-  cursor: default;
-  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
-  position: relative; user-select: none; overflow: hidden;
-}
-
-/* Drag handle (6-dot grip icon) */
-.drag-handle {
-  width: 16px;
-  height: 100%;
+/* ── AntV X6 画布容器 ── */
+.flow-canvas-section {
+  flex: 1;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  color: #d1d5db;
-  cursor: grab;
-  opacity: 0;
-  transition: opacity 0.12s, color 0.12s;
-  padding-left: 4px;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
 }
-.wf-node:hover .drag-handle,
-.node-item[draggable="true"]:hover .drag-handle {
-  opacity: 1;
-}
-.drag-handle:hover { color: #6366f1; }
-.drag-handle:active { cursor: grabbing; }
-
-/* Left accent bar */
-.node-accent {
-  width: 3px; align-self: stretch; flex-shrink: 0;
-  background: var(--accent, #e5e7eb);
-  transition: background 0.2s;
-}
-
-.wf-node--clickable { cursor: pointer; }
-.wf-node--clickable:hover {
-  border-color: #c4b5fd;
-  box-shadow: 0 1px 6px rgba(99,102,241,0.08);
-}
-.wf-node--clickable:hover .node-edit-hint { opacity: 1 !important; }
-.wf-node--running { animation: node-pulse 2s ease-in-out infinite; }
-
-/* Done: green */
-.wf-node--done { border-color: #bbf7d0 !important; background: rgba(34,197,94,0.06) !important; }
-.wf-node--done .node-icon { border-color: #86efac; background: #f0fdf4; }
-
-/* Failed: red */
-.wf-node--failed { border-color: #fecaca !important; background: rgba(239,68,68,0.04) !important; }
-
-/* Node icon */
-.node-icon {
-  width: 20px; height: 20px; border-radius: 50%;
-  border: 1.5px solid #e5e7eb; background: #f9fafb;
-  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-}
-.node-num { font-size: 9.5px; font-weight: 700; color: #6b7280; }
-
-/* Content */
-.node-body { flex: 1; min-width: 0; }
-.node-title {
-  font-size: 12px; font-weight: 500; color: #111827; line-height: 1.3;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.node-desc {
-  font-size: 10.5px; color: #6b7280; line-height: 1.35; margin-top: 1px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-
-/* Edit hint */
-.node-edit-hint {
-  font-size: 11px; color: #a78bfa; opacity: 0;
-  transition: opacity 0.12s; flex-shrink: 0; margin-right: 4px;
-}
-
-/* ── Connector ── */
-.connector-row {
-  display: flex; justify-content: center;
-  height: 10px; cursor: pointer; position: relative;
-}
-.connector-row--top { height: 14px; margin-bottom: 2px; }
-.conn-track {
-  display: flex; flex-direction: column; align-items: center;
-  position: relative; height: 100%;
-  padding-left: 28px;
-}
-.conn-line {
-  width: 1.5px; height: 100%; background: #e5e7eb;
-  border-radius: 1px; transition: background 0.15s;
-}
-.conn-insert {
-  position: absolute; top: 50%; left: 20px;
-  transform: translateY(-50%);
-  width: 14px; height: 14px; border-radius: 50%;
-  background: #fff; border: 1.5px dashed #d1d5db;
-  display: flex; align-items: center; justify-content: center;
-  color: #9ca3af; opacity: 0;
-  transition: opacity 0.12s, border-color 0.12s;
-}
-.conn-insert--top {
-  position: static; transform: none; margin: auto; opacity: 0.35;
-}
-.connector-row--top:hover .conn-insert--top {
-  opacity: 1; border-color: #a5b4fc; color: #6366f1;
-}
-.connector-row:hover .conn-insert { opacity: 1; border-color: #a5b4fc; color: #6366f1; }
-.connector-row:hover .conn-line { background: #c4b5fd; }
-
-/* Add at end */
-.add-end-btn {
-  display: flex; align-items: center; gap: 4px;
-  padding: 5px 8px; border: 1.5px dashed #e5e7eb;
-  border-radius: 6px; background: transparent;
-  color: #9ca3af; font-size: 11.5px; cursor: pointer;
-  transition: all 0.12s; margin-top: 6px;
-}
-.add-end-btn:hover { border-color: #a5b4fc; color: #6366f1; background: rgba(99,102,241,0.03); }
 
 /* ── Dirty banner ── */
 .dirty-banner {
@@ -708,10 +435,37 @@ const showLiveTrace = computed(() => props.loading || props.cognitive.traceLog.l
 
 /* Trace */
 .trace-section {
-  flex-shrink: 0; height: 132px;
-  display: flex; flex-direction: column; border-top: 1px solid #e5e7eb;
+  flex-shrink: 0;
+  display: flex; flex-direction: column;
+  border-top: 1px solid #e5e7eb;
+  min-height: 120px;
+  max-height: 500px;
+  overflow: hidden;
 }
-.trace-hd { font-size: 10px; font-weight: 600; color: #9ca3af; padding: 5px 12px 2px; text-transform: uppercase; letter-spacing: 0.06em; }
+/* 拖拽调整手柄 */
+.trace-resize-handle {
+  height: 10px;
+  cursor: ns-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: transparent;
+  transition: background 0.15s;
+}
+.trace-resize-handle:hover { background: rgba(99,102,241,0.04); }
+.trace-resize-bar {
+  width: 36px;
+  height: 3px;
+  background: #e2e5f0;
+  border-radius: 99px;
+  transition: background 0.2s, width 0.2s;
+}
+.trace-resize-handle:hover .trace-resize-bar {
+  background: #6366f1;
+  width: 48px;
+}
+.trace-hd { font-size: 10px; font-weight: 600; color: #9ca3af; padding: 2px 12px 3px; text-transform: uppercase; letter-spacing: 0.06em; }
 .trace-body { flex: 1; overflow-y: auto; padding: 0 8px 6px; }
 .trace-empty { font-size: 11px; color: #d1d5db; text-align: center; padding: 12px 0; }
 .trace-row { display: flex; align-items: flex-start; gap: 4px; padding: 1.5px 3px; border-radius: 3px; }

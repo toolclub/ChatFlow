@@ -108,15 +108,20 @@ class RouteNode(BaseNode):
                 break
 
         # ── 模型选择 ────────────────────────────────────────────────────────
-        # 有图片：整条链路都需要视觉能力，tool_model 和 answer_model 均使用视觉模型
-        if has_images:
-            vision = VISION_MODEL or ROUTE_MODEL_MAP.get("chat", state["model"])
-            tool_model   = vision
-            answer_model = vision
-        else:
-            answer_model = ROUTE_MODEL_MAP.get(route, state["model"])
-            needs_tools  = route in ("search", "search_code")
-            tool_model   = SEARCH_MODEL if needs_tools else answer_model
+        # VisionNode 已在上游完成图片分析并写入 vision_description。
+        # 若描述非空，说明图片已被预处理为文字，下游无需视觉能力，
+        # 直接用路由决策的主模型（MiniMax 等推理模型）即可。
+        # 仅当 VisionNode 降级失败（vision_desc 为空）且有原始图片时，
+        # 才回退到视觉模型，保证降级安全。
+        answer_model = ROUTE_MODEL_MAP.get(route, state["model"])
+        needs_tools  = route in ("search", "search_code")
+        tool_model   = SEARCH_MODEL if needs_tools else answer_model
+
+        if has_images and not vision_desc:
+            # VisionNode 降级：描述为空，回退视觉模型直接处理原始图片
+            fallback = VISION_MODEL or ROUTE_MODEL_MAP.get("chat", state["model"])
+            tool_model   = fallback
+            answer_model = fallback
 
         get_conv_logger(state.get("client_id", ""), state.get("conv_id", "")).info(
             "路由决策 | route=%s | has_images=%s | vision_desc_len=%d "

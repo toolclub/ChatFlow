@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from typing import Optional
 
 import numpy as np
@@ -28,6 +29,12 @@ from llm.embeddings import embed_text
 logger = logging.getLogger("cache.redis")
 
 _KEY_PREFIX = "cache:"
+
+# RediSearch TAG 字段中需要转义的特殊字符
+_TAG_SPECIAL = re.compile(r'([,.<>{}"\'`:;!@#$%^&*()\-+=~|\\])')
+
+# 连续失败超过此次数后触发自动修复
+_HEAL_THRESHOLD = 3
 
 
 class RedisCacheBackend(SemanticCache):
@@ -53,6 +60,7 @@ class RedisCacheBackend(SemanticCache):
         self._vector_dim = vector_dim
         self._threshold  = threshold
         self._client: Optional[Redis] = None
+        self._error_count = 0   # 连续失败计数，超过阈值触发自动修复
 
     # ── 内部工具 ───────────────────────────────────────────────────────────────
 
@@ -70,6 +78,15 @@ class RedisCacheBackend(SemanticCache):
         return f"{_KEY_PREFIX}{namespace}:{md5}"
 
     @staticmethod
+    def _escape_tag(value: str) -> str:
+        """
+        转义 RediSearch TAG 查询中的特殊字符。
+        RediSearch 要求 TAG filter 里的特殊字符（如 : - . 等）必须用反斜杠转义，
+        否则会抛出 "Syntax error at offset N near X"。
+        """
+        return _TAG_SPECIAL.sub(r'\\\1', value)
+
+    @staticmethod
     async def _vectorize(text: str) -> bytes:
         """向量化并 L2-normalize，返回 FLOAT32 bytes。"""
         vec = np.array(await embed_text(text), dtype=np.float32)
@@ -77,6 +94,24 @@ class RedisCacheBackend(SemanticCache):
         if norm > 0:
             vec = vec / norm
         return vec.tobytes()
+
+    async def _try_heal(self) -> None:
+        """
+        自动修复：删除损坏/不兼容的索引并重建。
+        适用场景：索引 schema 不匹配、向量维度变更、索引内部损坏等。
+        仅删除索引定义，不删除原始 Hash 数据（delete_docs=False）。
+        """
+        try:
+            client = self._get_client()
+            try:
+                await client.ft(self._index_name).dropindex(delete_docs=False)
+                logger.warning("Cache heal: 已删除损坏索引 '%s'，准备重建", self._index_name)
+            except Exception as drop_err:
+                logger.warning("Cache heal: 删除索引失败（忽略）: %s", drop_err)
+            await self.init()
+            logger.info("Cache heal: 索引 '%s' 重建完成", self._index_name)
+        except Exception as exc:
+            logger.error("Cache heal 失败，缓存将暂时不可用: %s", exc)
 
     # ── SemanticCache 接口实现 ─────────────────────────────────────────────────
 
@@ -117,8 +152,9 @@ class RedisCacheBackend(SemanticCache):
         """KNN 查询 + TAG 预过滤，未命中或低于阈值返回 None。"""
         try:
             q_vec = await self._vectorize(question)
-            # TAG 预过滤 + KNN（namespace 仅含 0-9a-f 或 "global"，无需转义）
-            raw_query = f"(@namespace:{{{namespace}}})=>[KNN 1 @embedding $vec AS score]"
+            # TAG 预过滤 + KNN；namespace 中的特殊字符（: - 等）必须转义
+            escaped_ns = self._escape_tag(namespace)
+            raw_query = f"(@namespace:{{{escaped_ns}}})=>[KNN 1 @embedding $vec AS score]"
             query = (
                 Query(raw_query)
                 .sort_by("score")
@@ -128,6 +164,9 @@ class RedisCacheBackend(SemanticCache):
             result = await self._get_client().ft(self._index_name).search(
                 query, query_params={"vec": q_vec}
             )
+            # 成功：重置连续失败计数
+            self._error_count = 0
+
             if result.total == 0:
                 return None
 
@@ -154,7 +193,15 @@ class RedisCacheBackend(SemanticCache):
                 namespace=namespace,
             )
         except Exception as exc:
-            logger.error("Cache lookup 失败: %s", exc)
+            self._error_count += 1
+            logger.error(
+                "Cache lookup 失败 (%d/%d): %s",
+                self._error_count, _HEAL_THRESHOLD, exc,
+            )
+            if self._error_count >= _HEAL_THRESHOLD:
+                logger.warning("Cache: 连续失败 %d 次，触发自动修复", self._error_count)
+                self._error_count = 0
+                await self._try_heal()
             return None
 
     async def store(
@@ -185,7 +232,15 @@ class RedisCacheBackend(SemanticCache):
                 namespace, f"{ttl_seconds}s" if ttl_seconds else "永不过期", question,
             )
         except Exception as exc:
-            logger.error("Cache store 失败: %s", exc)
+            self._error_count += 1
+            logger.error(
+                "Cache store 失败 (%d/%d): %s",
+                self._error_count, _HEAL_THRESHOLD, exc,
+            )
+            if self._error_count >= _HEAL_THRESHOLD:
+                logger.warning("Cache: 连续失败 %d 次，触发自动修复", self._error_count)
+                self._error_count = 0
+                await self._try_heal()
 
     async def clear(self, namespace: Optional[str] = None) -> None:
         """用 SCAN 逐批删除匹配的 key，避免大规模操作阻塞 Redis。"""

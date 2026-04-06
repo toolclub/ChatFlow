@@ -50,23 +50,31 @@ class LLMStreamHandler(EventHandler):
     """
     主推理节点 token 流：逐 token 发送增量内容，<think> 推理块以 thinking 事件推送。
 
-    监听节点内通过 adispatch_custom_event("llm_token", ...) 派发的自定义事件，
+    监听节点内通过 adispatch_custom_event("llm_token", ...) 或
+    adispatch_custom_event("llm_thinking", ...) 派发的自定义事件，
     对应 LangGraph astream_events 的 on_custom_event 类型。
 
-    <think> 块可能跨 chunk，ctx.in_think_block 跨 chunk 维持状态。
+    llm_thinking：推理模型（GLM-4.6V 等）的 thinking token，直接以 thinking 事件推送。
+    llm_token：普通内容 token，<think> 块可能跨 chunk，ctx.in_think_block 跨 chunk 维持状态。
     """
 
     def matches(self, event_type: str, node_name: str, event_name: str) -> bool:
-        # 监听 adispatch_custom_event 触发的 on_custom_event，名称为 llm_token
         return (
             event_type == "on_custom_event"
-            and event_name == "llm_token"
+            and event_name in ("llm_token", "llm_thinking")
             and node_name in _LLM_NODES
         )
 
     async def handle(self, event: dict, ctx: StreamContext) -> AsyncGenerator[str, None]:
         data = event.get("data", {})
         if not isinstance(data, dict):
+            return
+
+        # llm_thinking：推理模型的 thinking token（如 GLM-4.6V reasoning_content），直接推送
+        if event.get("name") == "llm_thinking":
+            thinking = data.get("content", "")
+            if thinking:
+                yield sse({"thinking": thinking})
             return
 
         content = data.get("content", "")

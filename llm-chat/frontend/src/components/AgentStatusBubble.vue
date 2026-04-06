@@ -17,6 +17,11 @@ interface PhaseConfig {
 }
 
 const PHASE: Record<string, PhaseConfig> = {
+  vision_analyze: {
+    label: '图像解析',
+    desc:  '正在解析图像内容，理解视觉信息...',
+    color: '#0891b2', bg: 'rgba(8,145,178,0.08)', pulse: '#22d3ee',
+  },
   routing:    {
     label: '分析意图',
     desc:  '识别问题类型，匹配最优策略',
@@ -124,13 +129,14 @@ const planSteps = computed(() => props.cognitive.plan)
 .status-bubble {
   display: flex;
   align-items: stretch;
-  background: #ffffff;
-  border: 1px solid #e5e7eb;
+  background: var(--cf-bg, #F5F7FA);
+  border: 1px solid var(--cf-border, #DCDFE6);
   border-radius: 12px;
-  box-shadow: 0 2px 10px rgba(0,0,0,0.06);
+  box-shadow: 0 2px 10px rgba(0,0,0,0.05);
   overflow: hidden;
-  margin: 4px 0 8px;
-  max-width: 480px;
+  margin: 2px 0 6px;
+  max-width: 520px;
+  width: fit-content;
 }
 
 .accent-bar {

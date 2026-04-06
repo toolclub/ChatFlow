@@ -79,14 +79,34 @@ class RetrieveContextNode(BaseNode):
         # ── 组装历史消息 ────────────────────────────────────────────────────
         history_messages = build_messages(conv, long_term, forget_mode, self._tool_names)
 
-        # ── 构建用户消息（有图片时使用多模态格式）──────────────────────────
-        images = state.get("images", [])
-        if images:
+        # ── 构建用户消息 ────────────────────────────────────────────────────
+        # 优先使用 VisionNode 产出的文字描述（vision_description）。
+        # 图片已由 VisionNode 预处理：主推理模型只需接收文字即可，
+        # 无需视觉能力，也不会因携带大 base64 导致超时/断连。
+        #
+        # 降级逻辑：vision_description 为空（VisionNode 失败）且有原始图片时，
+        # 回退到多模态消息格式，由路由决策的视觉模型直接处理。
+        images            = state.get("images", [])
+        vision_description = state.get("vision_description", "")
+
+        if vision_description:
+            # 主路径：将图片描述注入为文字上下文，主模型做推理
+            if user_msg:
+                combined = f"[图片内容]\n{vision_description}\n\n{user_msg}"
+            else:
+                combined = vision_description
+            history_messages.append(HumanMessage(content=combined))
+            logger.info(
+                "retrieve_context 注入图片描述 | conv=%s | desc_len=%d",
+                conv_id, len(vision_description),
+            )
+        elif images:
+            # 降级路径：VisionNode 未能生成描述，传递原始图片（需视觉模型处理）
             multimodal_content: list = []
             for img in images:
                 url = img if img.startswith("data:") else f"data:image/jpeg;base64,{img}"
                 logger.info(
-                    "retrieve_context 图片URL | conv=%s | prefix=%.40s | len=%d",
+                    "retrieve_context 降级图片URL | conv=%s | prefix=%.40s | len=%d",
                     conv_id, url[:40], len(url),
                 )
                 multimodal_content.append({"type": "image_url", "image_url": {"url": url}})

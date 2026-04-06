@@ -122,6 +122,9 @@ class CallModelAfterToolNode(BaseNode):
             messages = [SystemMessage(content=messages[0].content + boundary)] + messages[1:]
         return messages
 
+    # 视觉调用超时（秒）：GLM-4.6V 推理模式较慢
+    _VISION_TIMEOUT = 300.0
+
     async def _vision_path(
         self,
         state: GraphState,
@@ -130,7 +133,7 @@ class CallModelAfterToolNode(BaseNode):
         temperature: float,
         conv_id: str,
     ) -> dict:
-        """含图片时走视觉路径，此节点只生成最终回复，不绑定工具。"""
+        """含图片时走视觉路径，流式输出最终回复（不绑定工具）。"""
         vision_model = VISION_MODEL or model
         vision_llm   = get_vision_llm(model=vision_model, temperature=temperature)
         oai_messages = self._to_openai_messages(messages)
@@ -140,13 +143,34 @@ class CallModelAfterToolNode(BaseNode):
             conv_id, vision_model, len(oai_messages),
         )
 
+        content_parts: list[str] = []
+        thinking_parts: list[str] = []
+        token_count = 0
+        _THINK_PREFIX = "\x00THINK\x00"
+
         try:
-            completion = await vision_llm.ainvoke(oai_messages, timeout=180.0)
+            async for delta in vision_llm.astream(
+                oai_messages, temperature=temperature, timeout=self._VISION_TIMEOUT
+            ):
+                token_count += 1
+                if delta.startswith(_THINK_PREFIX):
+                    thinking_text = delta[len(_THINK_PREFIX):]
+                    thinking_parts.append(thinking_text)
+                    await adispatch_custom_event(
+                        "llm_thinking", {"content": thinking_text, "node": "call_model_after_tool"}
+                    )
+                else:
+                    content_parts.append(delta)
+                    await adispatch_custom_event(
+                        "llm_token", {"content": delta, "node": "call_model_after_tool"}
+                    )
         except asyncio.TimeoutError:
-            logger.error("call_model_after_tool (vision) 超时 | conv=%s", conv_id)
+            logger.error(
+                "call_model_after_tool (vision) 超时 %.0fs | conv=%s | model=%s",
+                self._VISION_TIMEOUT, conv_id, vision_model,
+            )
             raise
         except Exception as exc:
-            # 内容审核降级
             if self._is_audit_error(exc):
                 logger.warning("call_model_after_tool (vision) 触发内容审核 | conv=%s", conv_id)
                 return self._audit_fallback()
@@ -156,12 +180,16 @@ class CallModelAfterToolNode(BaseNode):
             )
             raise
 
-        full_content = completion.choices[0].message.content or ""
+        full_content = "".join(content_parts)
+        full_thinking = "".join(thinking_parts)
         logger.info(
-            "call_model_after_tool (vision) 完成 | conv=%s | content_len=%d | preview='%.100s'",
-            conv_id, len(full_content), full_content,
+            "call_model_after_tool (vision) 流式完成 | conv=%s | tokens=%d | content_len=%d | thinking_len=%d",
+            conv_id, token_count, len(full_content), len(full_thinking),
         )
-        return {"messages": [AIMessage(content=full_content)], "full_response": full_content}
+        result: dict = {"messages": [AIMessage(content=full_content)], "full_response": full_content}
+        if full_thinking:
+            result["full_thinking"] = full_thinking
+        return result
 
     async def _llm_path(
         self,

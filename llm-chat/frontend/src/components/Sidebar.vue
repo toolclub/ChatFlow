@@ -43,26 +43,24 @@ function doDelete(id: string) {
     <!-- Logo -->
     <div class="sidebar-logo">
       <div class="logo-icon">
-        <!-- 星光 sparkle — ChatGPT 同款极简风 -->
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-          <path d="M12 3C12 3 13 8.5 17 10C13 11.5 12 17 12 17C12 17 11 11.5 7 10C11 8.5 12 3 12 3Z" fill="#111827"/>
-          <path d="M19 3C19 3 19.5 5.5 21.5 6.5C19.5 7.5 19 10 19 10C19 10 18.5 7.5 16.5 6.5C18.5 5.5 19 3 19 3Z" fill="#111827" opacity="0.35"/>
+        <!-- 与 favicon 一致：白底 + 主星 + 副星 -->
+        <svg width="20" height="20" viewBox="0 0 32 32" fill="none">
+          <path d="M16 4C16 4 17.5 11 23 14C17.5 17 16 24 16 24C16 24 14.5 17 9 14C14.5 11 16 4 16 4Z" fill="#111827"/>
+          <path d="M25 7C25 7 25.6 9.8 27.5 10.7C25.6 11.6 25 14.4 25 14.4C25 14.4 24.4 11.6 22.5 10.7C24.4 9.8 25 7 25 7Z" fill="#111827" opacity="0.5"/>
         </svg>
       </div>
       <span class="logo-text">ChatFlow</span>
-      <span class="logo-badge">AI</span>
+      <span class="logo-version">AI</span>
     </div>
 
     <!-- 新对话按钮 -->
     <div class="sidebar-actions">
-      <el-button
-        type="primary"
-        class="new-chat-btn"
-        @click="emit('newChat')"
-        :icon="Plus"
-      >
+      <button class="new-chat-btn" @click="emit('newChat')">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+          <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
         新对话
-      </el-button>
+      </button>
     </div>
 
     <!-- 搜索 -->
@@ -136,66 +134,78 @@ function doDelete(id: string) {
   background: var(--cf-sidebar);
   display: flex;
   flex-direction: column;
-  height: 100vh;
-  border-right: 1px solid var(--cf-border);
+  height: 100%;           /* 跟随 .app padding 后的可用高度 */
+  border-radius: var(--cf-radius-lg);
+  border: 1px solid var(--cf-border-soft);
+  box-shadow: var(--cf-shadow-sm);
+  overflow: hidden;
 }
 
 /* ── Logo ── */
 .sidebar-logo {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 16px 14px 13px;
+  gap: 10px;
+  padding: 18px 16px 15px;
   border-bottom: 1px solid var(--cf-border-soft);
 }
 .logo-icon {
-  width: 32px; height: 32px;
-  border-radius: 9px;
-  background: linear-gradient(135deg, #6366f1 0%, #818cf8 100%);
-  box-shadow: 0 2px 8px rgba(99,102,241,0.30);
+  width: 36px; height: 36px;
+  border-radius: 10px;
+  background: #ffffff;
+  border: 1.5px solid #e4e4e7;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.08), inset 0 1px 0 rgba(255,255,255,0.9);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
 }
-.logo-icon svg path { fill: #fff; }
 .logo-text {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 700;
   color: var(--cf-text-1);
-  letter-spacing: -0.4px;
+  letter-spacing: -0.3px;
+  flex: 1;
 }
-.logo-badge {
-  margin-left: auto;
-  font-size: 9px;
+.logo-version {
+  font-size: 10px;
   font-weight: 700;
-  letter-spacing: 1px;
-  background: linear-gradient(135deg, #6366f1, #818cf8);
-  color: #fff;
+  letter-spacing: 0.5px;
+  color: var(--cf-indigo);
+  background: rgba(107,158,255,0.1);
+  border: 1px solid rgba(107,158,255,0.25);
   padding: 2px 7px;
-  border-radius: 5px;
+  border-radius: 6px;
+  margin-left: auto;
 }
 
 /* ── 新对话 ── */
-.sidebar-actions { padding: 12px 10px 6px; }
+.sidebar-actions { padding: 14px 12px 6px; }
 .new-chat-btn {
-  width: 100% !important;
-  font-weight: 500 !important;
-  font-size: 13px !important;
-  border-radius: var(--cf-radius-sm) !important;
-  background: var(--cf-indigo) !important;
-  border-color: var(--cf-indigo) !important;
-  color: #fff !important;
-  box-shadow: 0 2px 8px rgba(99,102,241,0.25) !important;
-  transition: all 0.18s !important;
-  height: 34px !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  width: 100%;
+  height: 36px;
+  background: linear-gradient(135deg, rgba(107,158,255,0.08), rgba(99,102,241,0.08));
+  border: 1px solid rgba(107,158,255,0.3);
+  border-radius: var(--cf-radius-sm);
+  color: var(--cf-indigo);
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.34,1.56,0.64,1);
+  letter-spacing: 0.1px;
 }
 .new-chat-btn:hover {
-  background: var(--cf-indigo-d) !important;
-  border-color: var(--cf-indigo-d) !important;
-  box-shadow: 0 4px 14px rgba(99,102,241,0.35) !important;
+  background: linear-gradient(135deg, rgba(107,158,255,0.15), rgba(99,102,241,0.12));
+  border-color: var(--cf-indigo);
   transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(107,158,255,0.25);
 }
+.new-chat-btn:active { transform: translateY(0); }
 
 /* ── 搜索 ── */
 .sidebar-search { padding: 6px 10px 8px; }
@@ -263,9 +273,10 @@ function doDelete(id: string) {
   color: var(--cf-text-1);
 }
 .conv-item.active {
-  background: var(--cf-active);
+  background: linear-gradient(135deg, rgba(107,158,255,0.12), rgba(99,102,241,0.08));
   color: var(--cf-indigo);
   font-weight: 500;
+  border: 1px solid rgba(107,158,255,0.2);
 }
 .conv-item.active .conv-icon { color: var(--cf-indigo); opacity: 1; }
 .conv-icon { font-size: 13px; flex-shrink: 0; opacity: 0.45; }
@@ -308,29 +319,30 @@ function doDelete(id: string) {
 
 /* ── Footer ── */
 .sidebar-footer {
-  padding: 10px;
+  padding: 12px;
   border-top: 1px solid var(--cf-border-soft);
 }
 .model-status {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 7px 11px;
+  gap: 8px;
+  padding: 9px 13px;
   background: linear-gradient(135deg, #f0fdf4, #dcfce7);
   border: 1px solid #bbf7d0;
   border-radius: var(--cf-radius-sm);
+  box-shadow: var(--cf-shadow-xs);
 }
 .status-dot {
   width: 7px; height: 7px;
   border-radius: 50%;
-  background: #22c55e;
+  background: var(--cf-green);
   flex-shrink: 0;
   animation: pulse-green 2s ease-in-out infinite;
 }
 @keyframes pulse-green {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(34,197,94,0.4); }
-  50%       { box-shadow: 0 0 0 5px rgba(34,197,94,0); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(103,194,58,0.4); }
+  50%       { box-shadow: 0 0 0 5px rgba(103,194,58,0); }
 }
-.status-text { font-size: 11px; color: #16a34a; font-weight: 500; flex: 1; }
-.status-icon { font-size: 12px; color: #16a34a; opacity: 0.55; }
+.status-text { font-size: 11.5px; color: #15803d; font-weight: 500; flex: 1; }
+.status-icon { font-size: 12px; color: #15803d; opacity: 0.55; }
 </style>

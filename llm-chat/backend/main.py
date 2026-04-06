@@ -220,6 +220,19 @@ async def chat(req: ChatRequest, request: Request):
       data: {"stopped": true}           ← 用户主动停止
     """
     client_id = request.headers.get("X-Client-ID", "")
+
+    # ── 入口日志（确认请求已到达 Python 层，可排查 nginx/网络层丢包） ─────────
+    img_bytes = sum(len(img) for img in req.images)
+    logger.info(
+        "POST /api/chat | conv=%s | client=%s | model=%s | msg_len=%d"
+        " | images=%d | img_total_kb=%.1f",
+        req.conversation_id,
+        client_id[:8] if client_id else "-",
+        req.model or CHAT_MODEL,
+        len(req.message),
+        len(req.images),
+        img_bytes / 1024,
+    )
     conv = memory_store.get(req.conversation_id)
     if not conv:
         conv = await memory_store.create(req.conversation_id, client_id=client_id)

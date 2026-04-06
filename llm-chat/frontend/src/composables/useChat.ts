@@ -234,7 +234,8 @@ export function useChat() {
         },
         // onStatus
         (status, model) => {
-          if (status === 'routing')        s.agentStatus = { state: 'routing', model: s.agentStatus.model }
+          if (status === 'vision_analyze') s.agentStatus = { state: 'vision_analyze', model: '' }
+          else if (status === 'routing')   s.agentStatus = { state: 'routing', model: s.agentStatus.model }
           else if (status === 'planning')  s.agentStatus = { ...s.agentStatus, state: 'planning' }
           else if (status === 'thinking' && model) s.agentStatus = { ...s.agentStatus, state: 'thinking', model }
           else if (status === 'saving')    s.agentStatus = { ...s.agentStatus, state: 'saving' }

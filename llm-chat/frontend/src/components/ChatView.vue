@@ -4,7 +4,6 @@ import type { Message, SendPayload, AgentStatus, CognitiveState } from '../types
 import MessageItem from './MessageItem.vue'
 import InputBox from './InputBox.vue'
 import { Lightning, EditPen, DataAnalysis, Grid, TrendCharts, Check, Loading } from '@element-plus/icons-vue'
-import AgentStatusBubble from './AgentStatusBubble.vue'
 import ClarificationCard from './ClarificationCard.vue'
 
 const props = defineProps<{
@@ -14,6 +13,7 @@ const props = defineProps<{
   cognitive: CognitiveState
   hasCognitiveContent?: boolean
   panelOpen?: boolean
+  convTitle?: string        // 当前对话标题（第一条用户消息 / 后端生成摘要）
 }>()
 
 const emit = defineEmits<{
@@ -115,27 +115,41 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
     <!-- 顶部 header -->
     <div class="chat-header">
       <div class="header-left">
-        <!-- Sparkle AI 图标（与 Logo / Avatar 统一） -->
-        <svg class="header-logo-icon" width="16" height="16" viewBox="0 0 24 24" fill="none">
-          <path d="M12 3C12 3 13.2 8.8 18 11C13.2 13.2 12 19 12 19C12 19 10.8 13.2 6 11C10.8 8.8 12 3 12 3Z" fill="#374151"/>
-          <path d="M19.5 4C19.5 4 20.1 6.6 22 7.5C20.1 8.4 19.5 11 19.5 11C19.5 11 18.9 8.4 17 7.5C18.9 6.6 19.5 4 19.5 4Z" fill="#374151" opacity="0.4"/>
-        </svg>
-        <span class="header-title">AI 对话</span>
+        <!-- 品牌图标：白底 + 双星，与 favicon 一致 -->
+        <div class="header-brand-icon">
+          <svg width="16" height="16" viewBox="0 0 32 32" fill="none">
+            <path d="M16 4C16 4 17.5 11 23 14C17.5 17 16 24 16 24C16 24 14.5 17 9 14C14.5 11 16 4 16 4Z" fill="#111827"/>
+            <path d="M25 7C25 7 25.6 9.8 27.5 10.7C25.6 11.6 25 14.4 25 14.4C25 14.4 24.4 11.6 22.5 10.7C24.4 9.8 25 7 25 7Z" fill="#111827" opacity="0.5"/>
+          </svg>
+        </div>
+
+        <!-- 标题区 -->
+        <div class="header-title-block">
+          <span class="header-app-name">ChatFlow</span>
+          <template v-if="convTitle">
+            <span class="header-title-sep">/</span>
+            <span class="header-conv-title">{{ convTitle }}</span>
+          </template>
+          <template v-else>
+            <span class="header-title-sep">/</span>
+            <span class="header-conv-title header-conv-title--placeholder">新对话</span>
+          </template>
+        </div>
       </div>
       <div class="header-right">
         <!-- 认知面板切换按钮（有历史内容时显示） -->
-        <el-tooltip v-if="hasCognitiveContent" :content="panelOpen ? '折叠认知面板' : '展开认知面板'" placement="bottom">
-          <el-button
-            text size="small"
-            :type="panelOpen ? 'primary' : 'default'"
-            style="padding:4px 7px;font-size:13px;"
-            @click="emit('togglePanel')"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style="opacity:0.8">
-              <path d="M12 3C12 3 13.2 8.8 18 11C13.2 13.2 12 19 12 19C12 19 10.8 13.2 6 11C10.8 8.8 12 3 12 3Z"/>
-            </svg>
-          </el-button>
-        </el-tooltip>
+        <button
+          v-if="hasCognitiveContent"
+          class="ghost-btn"
+          :class="{ 'ghost-btn--active': panelOpen }"
+          :title="panelOpen ? '折叠认知面板' : '展开认知面板'"
+          @click="emit('togglePanel')"
+        >
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 3C12 3 13.2 8.8 18 11C13.2 13.2 12 19 12 19C12 19 10.8 13.2 6 11C10.8 8.8 12 3 12 3Z"/>
+          </svg>
+          <span>{{ panelOpen ? '收起' : '计划' }}</span>
+        </button>
 
         <!-- 统一状态标签（单元素 transition，避免闪烁） -->
         <transition name="tag-swap" mode="out-in">
@@ -173,11 +187,14 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
             v-else
             :key="agentStatus.state"
             type="info" effect="plain" round :closable="false" class="s-tag"
-            :style="agentStatus.state === 'planning' ? 'color:#8b5cf6;border-color:#c4b5fd' : ''"
+            :style="agentStatus.state === 'planning'       ? 'color:#8b5cf6;border-color:#c4b5fd'
+                  : agentStatus.state === 'vision_analyze' ? 'color:#0ea5e9;border-color:#7dd3fc'
+                  : ''"
           >
             <el-icon class="s-spin" style="margin-right:4px"><Loading /></el-icon>
-            {{ agentStatus.state === 'routing' ? '分析中'
-             : agentStatus.state === 'planning' ? '规划中'
+            {{ agentStatus.state === 'routing'        ? '分析中'
+             : agentStatus.state === 'planning'       ? '规划中'
+             : agentStatus.state === 'vision_analyze' ? '图像解析中'
              : '推理中' }}
           </el-tag>
         </transition>
@@ -204,11 +221,10 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
     <div v-if="messages.length === 0" class="empty-view">
       <div class="hero">
         <div class="hero-icon-wrap">
-          <!-- 大号 Sparkle — 干净科技感 -->
-          <svg width="34" height="34" viewBox="0 0 48 48" fill="none">
-            <path d="M24 4C24 4 26.5 17 36 22C26.5 27 24 40 24 40C24 40 21.5 27 12 22C21.5 17 24 4 24 4Z" fill="#111827"/>
-            <path d="M39 6C39 6 40.2 12 44 14C40.2 16 39 22 39 22C39 22 37.8 16 34 14C37.8 12 39 6 39 6Z" fill="#111827" opacity="0.3"/>
-            <path d="M10 34C10 34 10.8 37.5 13 39C10.8 40.5 10 44 10 44C10 44 9.2 40.5 7 39C9.2 37.5 10 34 10 34Z" fill="#111827" opacity="0.25"/>
+          <!-- 与 favicon 一致：主星 + 副星（白底黑星） -->
+          <svg width="38" height="38" viewBox="0 0 32 32" fill="none">
+            <path d="M16 3C16 3 17.6 11 23.5 14C17.6 17 16 25 16 25C16 25 14.4 17 8.5 14C14.4 11 16 3 16 3Z" fill="#111827"/>
+            <path d="M25.5 6C25.5 6 26.2 9.2 28.3 10.2C26.2 11.2 25.5 14.4 25.5 14.4C25.5 14.4 24.8 11.2 22.7 10.2C24.8 9.2 25.5 6 25.5 6Z" fill="#111827" opacity="0.5"/>
           </svg>
         </div>
         <h1 class="hero-title">我能为你做什么？</h1>
@@ -244,6 +260,9 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
             v-for="(msg, i) in messages"
             :key="i"
             :message="msg"
+            :is-last-loading="loading && i === messages.length - 1 && msg.role === 'assistant'"
+            :agent-status="(loading && i === messages.length - 1 && msg.role === 'assistant') ? agentStatus : undefined"
+            :cognitive="(loading && i === messages.length - 1 && msg.role === 'assistant') ? cognitive : undefined"
           />
           <!-- 澄清卡片：附加在最后一条 assistant 消息下方 -->
           <template
@@ -258,14 +277,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
               />
             </div>
           </template>
-          <!-- 阶段状态气泡（替换旧的三点打字指示器） -->
-          <div
-            v-if="loading && messages.length > 0 && messages[messages.length-1].role === 'assistant' && !messages[messages.length-1].content"
-            class="status-bubble-wrap"
-          >
-            <div class="assistant-avatar-dot"></div>
-            <AgentStatusBubble :status="agentStatus" :cognitive="cognitive" />
-          </div>
+          <!-- 状态气泡已移入 MessageItem 内联渲染，与头像对齐 -->
         </div>
       </div>
 
@@ -284,8 +296,13 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   display: flex;
   flex-direction: column;
   min-width: 0;
-  background: var(--cf-bg);
+  background: #ffffff;
   position: relative;
+  border-radius: var(--cf-radius-lg);
+  overflow: hidden;
+  border: 1px solid var(--cf-border-soft);
+  box-shadow: var(--cf-shadow-sm);
+  height: 100%;
 }
 
 /* 顶部进度条 */
@@ -303,7 +320,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   border-radius: 0 !important;
 }
 :deep(.gen-progress .el-progress-bar__inner) {
-  background: linear-gradient(90deg, #6366f1, #a5b4fc, #6366f1) !important;
+  background: linear-gradient(90deg, #6B9EFF, #6366f1, #6B9EFF) !important;
   background-size: 200% !important;
   border-radius: 0 !important;
   animation: shimmer 1.5s linear infinite !important;
@@ -318,31 +335,73 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 11px 20px;
-  background: rgba(250,250,252,0.85);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border-bottom: 1px solid var(--cf-border-soft);
+  padding: 0 24px;
+  height: 56px;
+  background: #ffffff;
+  border-bottom: 1px solid var(--cf-border);
   flex-shrink: 0;
   z-index: 10;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.04);
 }
 .header-left {
   display: flex;
   align-items: center;
-  gap: 8px;
-  color: var(--cf-text-2);
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
 }
-.header-logo-icon { flex-shrink: 0; opacity: 0.75; }
-.header-title {
+.header-brand-icon {
+  width: 30px; height: 30px;
+  border-radius: 8px;
+  background: #ffffff;
+  border: 1.5px solid #e4e4e7;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.header-title-block {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  overflow: hidden;
+}
+.header-app-name {
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 700;
   color: var(--cf-text-1);
-  letter-spacing: -0.2px;
+  letter-spacing: -0.3px;
+  flex-shrink: 0;
+}
+.header-title-sep {
+  font-size: 13px;
+  color: var(--cf-text-4);
+  font-weight: 300;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.header-conv-title {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--cf-text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  letter-spacing: -0.1px;
+}
+.header-conv-title--placeholder {
+  color: var(--cf-text-4);
+  font-weight: 400;
 }
 .header-right {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 /* ── 状态标签 ── */
@@ -399,6 +458,37 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   transform: translateY(-1px);
 }
 
+/* ── Ghost 按钮 ── */
+.ghost-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  background: transparent;
+  border: 1px solid var(--cf-border);
+  border-radius: var(--cf-radius-sm);
+  color: var(--cf-indigo);
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.2s ease-out;
+  letter-spacing: 0.1px;
+}
+.ghost-btn:hover {
+  background: rgba(107,158,255,0.1);
+  border-color: var(--cf-indigo);
+  transform: translateY(-1px);
+  box-shadow: var(--cf-shadow-xs);
+}
+.ghost-btn:active { transform: translateY(0); }
+.ghost-btn--active {
+  background: rgba(107,158,255,0.1);
+  border-color: var(--cf-indigo);
+  color: var(--cf-indigo);
+}
+.ghost-btn--active:hover { background: rgba(107,158,255,0.15); }
+
 /* ── 空状态 ── */
 .empty-view {
   flex: 1;
@@ -418,22 +508,21 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
 }
 .hero-icon-wrap {
   width: 72px; height: 72px;
-  border-radius: 22px;
-  background: linear-gradient(145deg, #ffffff 0%, #f5f3ff 100%);
-  border: 1.5px solid #e0deff;
+  border-radius: 20px;
+  background: #ffffff;
+  border: 1.5px solid #e4e4e7;
   display: flex;
   align-items: center;
   justify-content: center;
   margin-bottom: 2px;
-  box-shadow: 0 4px 20px rgba(99,102,241,0.12), 0 1px 4px rgba(0,0,0,0.06);
+  box-shadow: 0 4px 20px rgba(0,0,0,0.08), 0 1px 4px rgba(0,0,0,0.05);
 }
 .hero-title {
   font-size: 30px;
   font-weight: 800;
-  color: var(--cf-text-1);
   letter-spacing: -0.8px;
   line-height: 1.2;
-  background: linear-gradient(135deg, #0f172a 0%, #334155 100%);
+  background: linear-gradient(135deg, #111827 0%, #6B9EFF 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -470,11 +559,11 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   box-shadow: var(--cf-shadow-xs);
 }
 .sug-card:hover {
-  background: var(--cf-active);
-  border-color: #c4b5fd;
+  background: rgba(107,158,255,0.08);
+  border-color: var(--cf-indigo);
   color: var(--cf-indigo);
   transform: translateY(-3px) scale(1.02);
-  box-shadow: 0 6px 20px rgba(99,102,241,0.18);
+  box-shadow: 0 6px 20px rgba(107,158,255,0.18);
 }
 .sug-icon { font-size: 14px; }
 .sug-label { font-weight: 500; }
@@ -497,6 +586,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   flex: 1;
   overflow-y: auto;
   padding: 20px 0 12px;
+  background: #ffffff;
 }
 .messages-inner {
   max-width: 1100px;
@@ -518,21 +608,6 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   padding: 4px 0 8px 40px;  /* 与 assistant 消息对齐（头像宽度） */
 }
 
-/* ── 状态气泡容器 ── */
-.status-bubble-wrap {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 4px 0;
-}
-.assistant-avatar-dot {
-  width: 30px; height: 30px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, #6366f1, #a5b4fc);
-  flex-shrink: 0;
-  margin-top: 2px;
-  box-shadow: 0 2px 8px rgba(99,102,241,0.28);
-}
 
 /* ── 标签切换过渡 ── */
 .tag-swap-enter-active,

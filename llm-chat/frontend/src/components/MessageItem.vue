@@ -2,9 +2,11 @@
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import { Marked } from 'marked'
 import hljs from 'highlight.js/lib/common'
-import type { Message, ToolCallRecord, StepRecord } from '../types'
+import type { Message, ToolCallRecord, StepRecord, AgentStatus, CognitiveState } from '../types'
+import { makeEmptyCognitiveState } from '../types'
 import { CopyDocument, Check, Search, Clock, Cpu, Document, ArrowDown, Loading, Close } from '@element-plus/icons-vue'
 import CodePreview from './CodePreview.vue'
+import AgentStatusBubble from './AgentStatusBubble.vue'
 
 const PREVIEWABLE = new Set(['html','svg','css','javascript','js','typescript','ts','vue','jsx','tsx','react'])
 
@@ -120,7 +122,14 @@ markedInstance.use({
 })
 
 // ─── Props ───
-const props = defineProps<{ message: Message }>()
+const props = defineProps<{
+  message: Message
+  isLastLoading?: boolean
+  agentStatus?: AgentStatus
+  cognitive?: CognitiveState
+}>()
+
+const emptyCognitive = makeEmptyCognitiveState()
 
 // ─── 统一渲染段落：多步模式每步一段，普通模式一段 ───────────────────────────
 interface Section {
@@ -294,15 +303,23 @@ const hasContent = computed(() => {
 
     <!-- AI 消息 -->
     <template v-else>
-      <div class="ai-avatar">
-        <svg width="17" height="17" viewBox="0 0 24 24" fill="none">
-          <path d="M12 3C12 3 13.2 8.8 18 11C13.2 13.2 12 19 12 19C12 19 10.8 13.2 6 11C10.8 8.8 12 3 12 3Z" fill="#111827"/>
-          <path d="M19.5 4C19.5 4 20.1 6.6 22 7.5C20.1 8.4 19.5 11 19.5 11C19.5 11 18.9 8.4 17 7.5C18.9 6.6 19.5 4 19.5 4Z" fill="#111827" opacity="0.4"/>
+      <div class="ai-avatar" :class="{ 'ai-avatar--breathing': isLastLoading }">
+        <!-- 与 favicon / logo 一致：主星 + 副星 -->
+        <svg width="17" height="17" viewBox="0 0 32 32" fill="none">
+          <path d="M16 4C16 4 17.5 11 23 14C17.5 17 16 24 16 24C16 24 14.5 17 9 14C14.5 11 16 4 16 4Z" fill="#111827"/>
+          <path d="M25 7C25 7 25.6 9.8 27.5 10.7C25.6 11.6 25 14.4 25 14.4C25 14.4 24.4 11.6 22.5 10.7C24.4 9.8 25 7 25 7Z" fill="#111827" opacity="0.5"/>
         </svg>
       </div>
 
       <!-- ai-content-wrap 挂载代码块点击委托 -->
       <div class="ai-content-wrap" ref="contentWrapEl">
+
+        <!-- ── 加载中且尚无内容：内联状态气泡（与头像同行，保持对齐） ── -->
+        <AgentStatusBubble
+          v-if="isLastLoading && !message.content && !message.thinking && agentStatus && agentStatus.state !== 'idle'"
+          :status="agentStatus"
+          :cognitive="cognitive ?? emptyCognitive"
+        />
 
         <!-- ── 统一渲染段落（步骤或普通消息） ── -->
         <div
@@ -428,11 +445,26 @@ const hasContent = computed(() => {
             </div>
           </div>
 
-          <!-- 推理过程（可折叠） -->
+          <!-- 推理过程（可折叠白卡） -->
           <div v-if="sec.thinking" class="think-block">
             <button class="think-toggle" @click="toggleThink(si)">
-              <el-icon class="think-icon" :class="{ expanded: isThinkExpanded(si) }"><ArrowDown /></el-icon>
-              <span>推理过程</span>
+              <span class="think-hd-left">
+                <!-- 旋转星星图标（内容生成中）或静态图标（已完成） -->
+                <svg v-if="!sec.content" class="think-spin-icon" width="13" height="13" viewBox="0 0 24 24" fill="none">
+                  <path d="M12 3C12 3 13.2 8.8 18 11C13.2 13.2 12 19 12 19C12 19 10.8 13.2 6 11C10.8 8.8 12 3 12 3Z" fill="#7c3aed"/>
+                  <path d="M19.5 4C19.5 4 20.1 6.6 22 7.5C20.1 8.4 19.5 11 19.5 11C19.5 11 18.9 8.4 17 7.5C18.9 6.6 19.5 4 19.5 4Z" fill="#7c3aed" opacity="0.4"/>
+                </svg>
+                <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none">
+                  <path d="M12 3C12 3 13.2 8.8 18 11C13.2 13.2 12 19 12 19C12 19 10.8 13.2 6 11C10.8 8.8 12 3 12 3Z" fill="#7c3aed" opacity="0.6"/>
+                </svg>
+                <span class="think-title">{{ sec.content ? '推理过程' : '思考中...' }}</span>
+              </span>
+              <span class="think-hd-right">
+                <span class="think-len">{{ sec.thinking.length > 50 ? (sec.thinking.length / 1000).toFixed(1) + 'k 字' : '' }}</span>
+                <svg class="think-chevron" :class="{ expanded: isThinkExpanded(si) }" width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+                </svg>
+              </span>
             </button>
             <Transition name="think-slide">
               <div v-if="isThinkExpanded(si)" class="think-body">{{ sec.thinking }}</div>
@@ -617,15 +649,36 @@ const hasContent = computed(() => {
 .msg.assistant { flex-direction: row; }
 .ai-avatar {
   width: 34px; height: 34px;
-  border-radius: 50%;
-  background: #f9fafb;
-  border: 1.5px solid #e5e7eb;
+  border-radius: 10px;          /* 改为圆角方形，与 logo/favicon 风格统一 */
+  background: #ffffff;
+  border: 1.5px solid #e4e4e7;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
   margin-top: 2px;
   box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+  transition: box-shadow 0.3s, border-color 0.3s;
+}
+.msg.assistant:hover .ai-avatar {
+  border-color: #d1d5db;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.10);
+}
+/* 呼吸动画 — 思考/加载中 */
+.ai-avatar--breathing {
+  animation: ai-breathe 1.5s ease-in-out infinite !important;
+  border-color: #6B9EFF !important;
+  background: #f0f6ff !important;
+}
+@keyframes ai-breathe {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(107,158,255,0.3), 0 1px 4px rgba(0,0,0,0.07);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgba(107,158,255,0), 0 1px 4px rgba(107,158,255,0.15);
+    transform: scale(1.04);
+  }
 }
 .ai-content-wrap {
   flex: 1;
@@ -697,7 +750,28 @@ const hasContent = computed(() => {
   background: var(--cf-card);
   box-shadow: var(--cf-shadow-xs);
 }
-.tool-block-sources { border-color: var(--cf-border-soft); box-shadow: none; background: transparent; border: none; }
+/* 胶囊悬浮提示风格（搜索/读取工具） */
+.tool-block-sources {
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+.tool-block-sources .tool-header-flat {
+  background: #fff;
+  border: 1px solid #e0e7ff;
+  border-left: 3px solid #a5b4fc;
+  border-radius: 10px;
+  padding: 6px 12px 6px 10px;
+  box-shadow: 0 1px 6px rgba(99,102,241,0.06);
+  transition: box-shadow 0.2s, border-color 0.2s, transform 0.2s ease-out;
+  gap: 7px;
+}
+.tool-block-sources .tool-header-flat:hover {
+  border-color: #c4b5fd;
+  border-left-color: #6366f1;
+  box-shadow: 0 3px 12px rgba(99,102,241,0.12);
+  transform: translateY(-1px);
+}
 .tool-header {
   display: flex; align-items: center; gap: 7px;
   padding: 9px 14px;
@@ -888,47 +962,68 @@ const hasContent = computed(() => {
 
 /* ── 推理过程块 ── */
 .think-block {
-  border: 1px solid #e9d5ff;
-  border-radius: 8px;
+  border: 1px solid #ede9fe;
+  border-radius: 12px;
   overflow: hidden;
-  background: #faf5ff;
-  margin-bottom: 6px;
+  background: #fff;
+  margin-bottom: 8px;
+  box-shadow: 0 1px 6px rgba(124,58,237,0.06);
 }
 .think-toggle {
   display: flex;
   align-items: center;
-  gap: 5px;
+  justify-content: space-between;
   width: 100%;
-  padding: 7px 12px;
+  padding: 8px 13px;
   background: none;
   border: none;
   cursor: pointer;
-  font-size: 12px;
+  font-size: 12.5px;
+  font-family: inherit;
   color: #7c3aed;
-  font-weight: 600;
   text-align: left;
   user-select: none;
+  transition: background 0.15s;
 }
-.think-toggle:hover { background: #f3e8ff; }
-.think-icon {
-  font-size: 11px;
-  transition: transform 0.2s;
-  transform: rotate(-90deg);
+.think-toggle:hover { background: rgba(139,92,246,0.04); }
+.think-hd-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
-.think-icon.expanded { transform: rotate(0deg); }
+.think-hd-right {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #a78bfa;
+}
+.think-title { font-weight: 600; letter-spacing: 0.1px; }
+.think-len { font-size: 10.5px; color: #c4b5fd; font-weight: 400; }
+.think-spin-icon { animation: think-rotate 1.8s linear infinite; transform-origin: center; flex-shrink: 0; }
+@keyframes think-rotate { to { transform: rotate(360deg); } }
+.think-chevron {
+  transition: transform 0.22s cubic-bezier(0.4,0,0.2,1);
+  transform: rotate(0deg);
+  flex-shrink: 0;
+}
+.think-chevron.expanded { transform: rotate(180deg); }
 .think-body {
-  padding: 8px 12px 10px;
+  padding: 10px 14px 12px;
   font-size: 12px;
   color: #6b7280;
-  line-height: 1.6;
+  line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-word;
-  border-top: 1px solid #e9d5ff;
+  border-top: 1px solid #f3e8ff;
   max-height: 320px;
   overflow-y: auto;
+  background: #faf7ff;
+  font-family: 'Fira Code', 'Cascadia Code', Consolas, monospace;
 }
 .think-slide-enter-active,
-.think-slide-leave-active { transition: all 0.2s ease; overflow: hidden; }
+.think-slide-leave-active { transition: all 0.22s cubic-bezier(0.4,0,0.2,1); overflow: hidden; }
 .think-slide-enter-from,
-.think-slide-leave-to { max-height: 0 !important; opacity: 0; padding-top: 0; padding-bottom: 0; }
+.think-slide-leave-to { max-height: 0 !important; opacity: 0; }
+.think-slide-enter-to,
+.think-slide-leave-from { max-height: 320px; opacity: 1; }
 </style>

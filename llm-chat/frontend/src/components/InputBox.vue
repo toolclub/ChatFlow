@@ -39,12 +39,48 @@ function autoResize() {
   el.style.height = Math.min(el.scrollHeight, 200) + 'px'
 }
 
-function addImageFile(file: File) {
+/**
+ * 将图片压缩到指定最大边长和 JPEG 质量，防止大图片超出 nginx/后端 body 限制。
+ * 原图 ≤ 目标尺寸时仅做格式转换（统一为 JPEG），不放大。
+ */
+function compressImage(dataUrl: string, maxPx = 1280, quality = 0.82): Promise<string> {
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.onload = () => {
+      let { width, height } = img
+      if (width > maxPx || height > maxPx) {
+        if (width >= height) {
+          height = Math.round(height * maxPx / width)
+          width = maxPx
+        } else {
+          width = Math.round(width * maxPx / height)
+          height = maxPx
+        }
+      }
+      const canvas = document.createElement('canvas')
+      canvas.width = width
+      canvas.height = height
+      canvas.getContext('2d')!.drawImage(img, 0, 0, width, height)
+      resolve(canvas.toDataURL('image/jpeg', quality))
+    }
+    img.onerror = () => resolve(dataUrl)   // 降级：压缩失败时返回原图
+    img.src = dataUrl
+  })
+}
+
+async function addImageFile(file: File) {
   if (!file.type.startsWith('image/')) return
   const reader = new FileReader()
-  reader.onload = ev => {
-    const url = ev.target?.result as string
-    if (url) pendingImages.value.push(url)
+  reader.onload = async ev => {
+    const raw = ev.target?.result as string
+    if (!raw) return
+    const compressed = await compressImage(raw)
+    // 开发期可在控制台看到压缩比
+    if (import.meta.env.DEV) {
+      const ratio = Math.round((1 - compressed.length / raw.length) * 100)
+      console.debug(`[InputBox] 图片压缩: ${Math.round(raw.length/1024)}KB → ${Math.round(compressed.length/1024)}KB (压缩率 ${ratio}%)`)
+    }
+    pendingImages.value.push(compressed)
   }
   reader.readAsDataURL(file)
 }

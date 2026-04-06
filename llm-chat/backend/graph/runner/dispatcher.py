@@ -33,6 +33,8 @@ from graph.runner.handlers import (
     SaveResponseEndHandler,
     ToolEndHandler,
     ToolStartHandler,
+    VisionStartHandler,
+    VisionStreamHandler,
 )
 
 # ── Handler 注册顺序即优先级 ─────────────────────────────────────────────────
@@ -42,6 +44,8 @@ from graph.runner.handlers import (
 #   - 非流式路径（有工具调用）：LLMStreamHandler 不触发，EndHandler 从 full_response 补发
 _HANDLERS: list[EventHandler] = [
     ClarificationHandler(),          # 澄清问询事件（on_custom_event）—— 优先处理
+    VisionStartHandler(),            # 视觉分析开始（on_custom_event vision_analyze）→ 状态标签
+    VisionStreamHandler(),           # 视觉分析 token 流（on_custom_event vision_token）→ thinking
     CacheHitEndHandler(),
     RouteStartHandler(),
     RouteEndHandler(),

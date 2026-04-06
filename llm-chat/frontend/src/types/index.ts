@@ -85,7 +85,7 @@ export interface SendPayload {
 }
 
 export interface AgentStatus {
-  state: 'idle' | 'routing' | 'planning' | 'thinking' | 'tool' | 'reflecting' | 'saving' | 'done'
+  state: 'idle' | 'vision_analyze' | 'routing' | 'planning' | 'thinking' | 'tool' | 'reflecting' | 'saving' | 'done'
   model: string
   tool?: string
   intent?: string

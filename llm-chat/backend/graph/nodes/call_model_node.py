@@ -105,10 +105,18 @@ class CallModelNode(BaseNode):
                     messages[-1] = HumanMessage(content=str(last_content) + step_ctx)
 
         # ── 路径选择 ────────────────────────────────────────────────────────
-        if state.get("images"):
+        # VisionNode 已在上游完成图片分析，vision_description 写入 state。
+        # retrieve_context 将描述注入为文字消息，主模型无需视觉能力。
+        # 仅在 VisionNode 降级（描述为空）且原始图片仍在 state 时，
+        # 才回退 vision_path 让视觉模型直接处理图片。
+        vision_desc = state.get("vision_description", "")
+        if state.get("images") and not vision_desc:
             return await self._vision_path(state, messages, use_tools, tools_schema, conv_id)
         else:
             return await self._llm_path(state, messages, model, temperature, use_tools, tools_schema, conv_id)
+
+    # 视觉调用超时（秒）：GLM-4.6V 推理模式较慢，给足 5 分钟
+    _VISION_TIMEOUT = 300.0
 
     async def _vision_path(
         self,
@@ -121,8 +129,9 @@ class CallModelNode(BaseNode):
         """
         含图片时走视觉路径：使用 VISION_BASE_URL + VISION_MODEL。
 
-        LangChain ChatOpenAI 在序列化多模态 HumanMessage 时存在兼容性问题，
-        原生 AsyncOpenAI SDK 支持 list content，直接传入即可。
+        - 无工具时：流式输出（同主 LLM 路径），逐 token 推送给前端
+        - 有工具时：非流式，确保 function_calling JSON 完整
+        - 超时：300s（GLM-4.6V 推理模式耗时较长）
         """
         temperature  = state["temperature"]
         vision_model = VISION_MODEL or state.get("tool_model") or state["model"]
@@ -135,19 +144,33 @@ class CallModelNode(BaseNode):
         )
 
         try:
-            completion = await vision_llm.ainvoke(
-                oai_messages,
-                tools=tools_schema,
-                timeout=180.0,
-            )
+            if use_tools:
+                # 工具调用须非流式，拿到完整 JSON
+                completion = await vision_llm.ainvoke(
+                    oai_messages,
+                    tools=tools_schema,
+                    timeout=self._VISION_TIMEOUT,
+                )
+                return self._build_response(completion, conv_id, "vision")
+            else:
+                # 无工具时流式，逐 token 推送前端（与主 LLM 路径一致）
+                return await self._stream_tokens(
+                    vision_llm, oai_messages, temperature, conv_id,
+                    node="call_model_vision",
+                    timeout=self._VISION_TIMEOUT,
+                )
         except asyncio.TimeoutError:
-            logger.error("call_model (vision) 超时 | conv=%s", conv_id)
+            logger.error(
+                "call_model (vision) 超时 %.0fs | conv=%s | model=%s",
+                self._VISION_TIMEOUT, conv_id, vision_model,
+            )
             raise
         except Exception as exc:
-            logger.error("call_model (vision) 异常 | conv=%s | error=%s", conv_id, exc, exc_info=True)
+            logger.error(
+                "call_model (vision) 异常 | conv=%s | model=%s | error=%s",
+                conv_id, vision_model, exc, exc_info=True,
+            )
             raise
-
-        return self._build_response(completion, conv_id, "vision")
 
     async def _llm_path(
         self,
@@ -189,29 +212,51 @@ class CallModelNode(BaseNode):
             raise
 
     @staticmethod
-    async def _stream_tokens(llm, oai_messages: list, temperature: float, conv_id: str, node: str) -> dict:
+    async def _stream_tokens(
+        llm,
+        oai_messages: list,
+        temperature: float,
+        conv_id: str,
+        node: str,
+        timeout: float = 180.0,
+    ) -> dict:
         """
-        流式 LLM 调用：逐 token yield，通过 adispatch_custom_event 发出 llm_token 事件。
+        流式 LLM 调用：逐 token yield，通过 adispatch_custom_event 发出事件。
 
         LLMStreamHandler 在 astream_events 中监听这些事件，实时推送给前端。
         节点返回时 full_response 包含完整内容，CallModelEndHandler 因
         ctx.*_streamed=True 而跳过重复发送。
+
+        支持推理模型（GLM/DeepSeek-R1 等）的 thinking token：
+          - "\x00THINK\x00" 前缀的 delta 作为 thinking 事件分发
+          - 普通 delta 作为 llm_token 事件分发
         """
         content_parts: list[str] = []
+        thinking_parts: list[str] = []
         token_count = 0
+        _THINK_PREFIX = "\x00THINK\x00"
 
-        async for delta in llm.astream(oai_messages, temperature=temperature):
-            content_parts.append(delta)
+        async for delta in llm.astream(oai_messages, temperature=temperature, timeout=timeout):
             token_count += 1
-            # 通知 LangGraph astream_events 管道，触发 on_custom_event → LLMStreamHandler
-            await adispatch_custom_event("llm_token", {"content": delta, "node": node})
+            if delta.startswith(_THINK_PREFIX):
+                # 推理 token
+                thinking_text = delta[len(_THINK_PREFIX):]
+                thinking_parts.append(thinking_text)
+                await adispatch_custom_event("llm_thinking", {"content": thinking_text, "node": node})
+            else:
+                content_parts.append(delta)
+                await adispatch_custom_event("llm_token", {"content": delta, "node": node})
 
         full_content = "".join(content_parts)
+        full_thinking = "".join(thinking_parts)
         logger.info(
-            "call_model 流式完成 | conv=%s | node=%s | tokens=%d | content_len=%d",
-            conv_id, node, token_count, len(full_content),
+            "call_model 流式完成 | conv=%s | node=%s | tokens=%d | content_len=%d | thinking_len=%d",
+            conv_id, node, token_count, len(full_content), len(full_thinking),
         )
-        return {"messages": [AIMessage(content=full_content)], "full_response": full_content}
+        result: dict = {"messages": [AIMessage(content=full_content)], "full_response": full_content}
+        if full_thinking:
+            result["full_thinking"] = full_thinking
+        return result
 
     def _build_response(self, completion, conv_id: str, path: str) -> dict:
         """
