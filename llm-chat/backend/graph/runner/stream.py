@@ -16,7 +16,7 @@ import asyncio
 import logging
 from typing import AsyncGenerator
 
-from graph.agent import get_graph
+from graph.agent import get_graph, get_simple_graph
 from graph.runner.context import StreamContext
 from graph.runner.dispatcher import dispatcher
 from graph.runner.utils import sse
@@ -32,9 +32,13 @@ async def stream_response(
     temperature: float = 0.7,
     client_id: str = "",
     images: list[str] | None = None,
+    agent_mode: bool = True,
 ) -> AsyncGenerator[str, None]:
     """
     驱动 LangGraph 图执行，将事件流翻译为 FastAPI SSE 字符串流。
+
+    agent_mode=True  → 完整图（planner + reflector + router，适合复杂任务）
+    agent_mode=False → 简单图（直接对话 + 工具，适合普通问答）
 
     设计要点：
       - 图执行在独立 Task 中运行，主循环通过 asyncio.Queue 接收事件
@@ -42,8 +46,11 @@ async def stream_response(
       - recursion_limit=120：支持最多约 28 个计划步骤（每步 4 节点 + 固定开销 5）
       - 图 Task 取消时（客户端断开）主循环捕获 CancelledError 并退出，不发 done
     """
-    graph = get_graph(model)
+    graph = get_graph(model) if agent_mode else get_simple_graph(model)
     ctx   = StreamContext(active_model=model)
+
+    # 简单图跳过 route_model LLM 调用，直接设 route="chat" 使用默认模型
+    initial_route = "" if agent_mode else "chat"
 
     initial_state: GraphState = {
         "conv_id":           conv_id,
@@ -57,7 +64,7 @@ async def stream_response(
         "forget_mode":       False,
         "full_response":     "",
         "compressed":        False,
-        "route":             "",
+        "route":             initial_route,
         "tool_model":        model,
         "answer_model":      model,
         # 语义缓存初始值

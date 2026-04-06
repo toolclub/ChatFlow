@@ -12,6 +12,7 @@ class ChatRequest(BaseModel):
     model: Optional[str] = None       # 不传则用默认对话模型
     temperature: float = 0.7
     images: list[str] = []            # base64 编码的图片列表（已去除 data: 前缀）
+    agent_mode: bool = True           # True=完整 Agent 图；False=简单直接对话图
 
 
 class CreateConversationRequest(BaseModel):

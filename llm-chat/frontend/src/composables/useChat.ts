@@ -142,7 +142,7 @@ export function useChat() {
     if (id) await selectConversation(id)
   }
 
-  async function send({ text, images }: SendPayload) {
+  async function send({ text, images, agentMode }: SendPayload) {
     if (!text.trim() && images.length === 0) return
     if (!currentConvId.value) {
       const data = await api.createConversation(text.slice(0, 30) || '图片对话')
@@ -185,7 +185,7 @@ export function useChat() {
 
     try {
       await api.sendMessage(
-        convId, text, '', images,
+        convId, text, '', images, agentMode,
         // onChunk
         (chunk) => {
           const step = activeStep()
@@ -391,7 +391,7 @@ export function useChat() {
         ? `${originalIntent}${supplement ? `\n\n补充说明：${supplement}` : ''}${planContext}`
         : (supplement || '继续')
 
-      await send({ text: formatted, images: [] })
+      await send({ text: formatted, images: [], agentMode: true })
     }
   }
 
@@ -422,7 +422,7 @@ export function useChat() {
     s.cognitive.plan = resetPlan
     s.cognitive.currentStepIndex = 0
 
-    await send({ text: backendMessage, images: [] })
+    await send({ text: backendMessage, images: [], agentMode: true })
   }
 
   return {

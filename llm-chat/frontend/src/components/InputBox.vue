@@ -15,11 +15,27 @@ const pendingImages = ref<string[]>([])
 const fileInputRef = ref<HTMLInputElement>()
 const textareaRef = ref<HTMLTextAreaElement>()
 
+// ── Agent 模式开关 ──────────────────────────────────────────────────────────
+const agentMode = ref(true)
+const tipVisible = ref(false)
+const tipText = ref('')
+let tipTimer: ReturnType<typeof setTimeout> | null = null
+
+function toggleAgent() {
+  agentMode.value = !agentMode.value
+  tipText.value = agentMode.value
+    ? '⚡ 已切换为 Agent 模式 · 支持规划、搜索、多步推理'
+    : '💬 已切换为普通对话 · 更快速、更直接'
+  tipVisible.value = true
+  if (tipTimer) clearTimeout(tipTimer)
+  tipTimer = setTimeout(() => { tipVisible.value = false }, 1800)
+}
+
 const canSend = () => (input.value.trim() || pendingImages.value.length > 0) && !props.loading
 
 function handleSend() {
   if (!canSend()) return
-  emit('send', { text: input.value, images: [...pendingImages.value] })
+  emit('send', { text: input.value, images: [...pendingImages.value], agentMode: agentMode.value })
   input.value = ''
   pendingImages.value = []
   if (textareaRef.value) textareaRef.value.style.height = 'auto'
@@ -155,6 +171,27 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
               <el-icon><Picture /></el-icon>
             </button>
           </el-tooltip>
+
+          <!-- Agent 模式切换按钮 -->
+          <button
+            class="agent-toggle"
+            :class="{ active: agentMode }"
+            @click="toggleAgent"
+            :disabled="loading"
+            :title="agentMode ? '当前：Agent 模式（点击切换）' : '当前：普通对话（点击切换）'"
+          >
+            <span class="agent-icon">
+              <!-- 闪电 = Agent，气泡 = Chat -->
+              <svg v-if="agentMode" width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+              </svg>
+              <svg v-else width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+              </svg>
+            </span>
+            <span class="agent-label">{{ agentMode ? 'Agent' : 'Chat' }}</span>
+          </button>
+
           <span v-if="pendingImages.length > 0" class="img-badge">
             {{ pendingImages.length }} 张图片
           </span>
@@ -178,9 +215,14 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
       </div>
     </div>
 
-    <div class="hint-row">
-      <span class="hint">ChatFlow · Agent</span>
-      <span class="hint-sep">·</span>
+    <!-- 切换模式提示条（内联，1.8s 后消失） -->
+    <Transition name="mode-tip">
+      <div v-if="tipVisible" class="mode-tip-bar">
+        {{ tipText }}
+      </div>
+    </Transition>
+
+    <div class="hint-row" v-if="!tipVisible">
       <span class="hint">Enter 发送 · Shift+Enter 换行</span>
     </div>
   </div>
@@ -352,6 +394,71 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
   to { transform: rotate(360deg); }
 }
 
+/* Agent 模式切换按钮 */
+.agent-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 9px;
+  border-radius: 13px;
+  border: 1.5px solid var(--cf-border);
+  background: var(--cf-hover);
+  color: var(--cf-text-4);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.18s;
+  white-space: nowrap;
+  letter-spacing: 0.1px;
+}
+.agent-toggle:hover:not(:disabled) {
+  border-color: #a78bfa;
+  color: #a78bfa;
+  background: rgba(167,139,250,0.08);
+}
+.agent-toggle.active {
+  background: linear-gradient(135deg, rgba(99,102,241,0.12) 0%, rgba(139,92,246,0.12) 100%);
+  border-color: #818cf8;
+  color: #a5b4fc;
+}
+.agent-toggle.active:hover:not(:disabled) {
+  background: linear-gradient(135deg, rgba(99,102,241,0.2) 0%, rgba(139,92,246,0.2) 100%);
+  border-color: #a78bfa;
+  color: #c4b5fd;
+}
+.agent-toggle:disabled { opacity: 0.4; cursor: not-allowed; }
+.agent-icon {
+  display: flex;
+  align-items: center;
+  line-height: 1;
+}
+.agent-label { line-height: 1; }
+
+/* 切换提示条 */
+.mode-tip-bar {
+  margin-top: 6px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  background: rgba(99,102,241,0.08);
+  border: 1px solid rgba(99,102,241,0.18);
+  color: #a5b4fc;
+  font-size: 11.5px;
+  text-align: center;
+  letter-spacing: 0.1px;
+}
+
+/* Vue Transition */
+.mode-tip-enter-active,
+.mode-tip-leave-active {
+  transition: opacity 0.25s, transform 0.25s;
+}
+.mode-tip-enter-from,
+.mode-tip-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
 /* 提示行 */
 .hint-row {
   display: flex;
@@ -363,10 +470,5 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
 .hint {
   font-size: 11px;
   color: var(--cf-text-5);
-}
-.hint-sep {
-  font-size: 11px;
-  color: var(--cf-text-5);
-  opacity: 0.5;
 }
 </style>

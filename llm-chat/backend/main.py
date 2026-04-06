@@ -254,6 +254,7 @@ async def chat(req: ChatRequest, request: Request):
                 temperature=req.temperature,
                 client_id=client_id,
                 images=req.images,
+                agent_mode=req.agent_mode,
             ):
                 if await request.is_disconnected() or stop_event.is_set():
                     yield "data: {\"stopped\": true}\n\n"

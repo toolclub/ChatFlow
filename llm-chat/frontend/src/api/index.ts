@@ -77,6 +77,7 @@ export async function sendMessage(
   message: string,
   model: string,
   images: string[],
+  agentMode: boolean,
   onChunk: (text: string) => void,
   onToolCall: (name: string, input: Record<string, unknown>) => void,
   onToolResult: (name: string, data: Record<string, unknown>) => void,
@@ -95,6 +96,7 @@ export async function sendMessage(
     conversation_id: conversationId,
     message,
     model,
+    agent_mode: agentMode,
   }
   if (images.length > 0) {
     body.images = images

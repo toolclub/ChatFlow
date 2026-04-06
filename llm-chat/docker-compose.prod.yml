@@ -1,0 +1,186 @@
+## ============================================================
+## ChatFlow — 生产环境 Docker Compose（单机高并发版）
+## 目标平台：Apple Mac Mini M4（ARM64），也可运行于 x86_64
+##
+## 使用方式：
+##   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+##
+## 与 docker-compose.yml（开发版）的主要差异：
+##   1. backend 使用 Gunicorn + UvicornWorker 多进程（可配置 GUNICORN_WORKERS）
+##   2. 内部服务（Postgres/Redis/Qdrant）不暴露宿主机端口（安全隔离）
+##   3. Redis 设置内存上限 + LRU 淘汰策略
+##   4. Postgres 调优（shared_buffers / work_mem / max_connections）
+##   5. Nginx 使用 keepalive upstream + 生产级 SSE 配置
+##   6. 所有服务设置资源限制，防止单服务拖垮整机
+## ============================================================
+
+services:
+
+  # ── Qdrant 向量数据库 ─────────────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:latest
+    pull_policy: missing
+    container_name: chatflow-qdrant-prod
+    restart: unless-stopped
+    # 生产环境不对外暴露端口，仅容器内部访问
+    expose:
+      - "6333"
+    volumes:
+      - ${QDRANT_DATA_DIR}:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/6333"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+
+  # ── PostgreSQL 关系型数据库 ───────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    pull_policy: missing
+    container_name: chatflow-postgres-prod
+    restart: unless-stopped
+    env_file:
+      - .env          # 密文 + 基础配置在 .env 里
+    expose:
+      - "5432"
+    volumes:
+      - ${POSTGRES_DATA_DIR}:/var/lib/postgresql/data
+    # 调优参数：适合 16GB 内存单机
+    command: >
+      postgres
+      -c shared_buffers=512MB
+      -c effective_cache_size=1536MB
+      -c work_mem=16MB
+      -c maintenance_work_mem=128MB
+      -c max_connections=200
+      -c wal_buffers=16MB
+      -c checkpoint_completion_target=0.9
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+
+  # ── Redis（含 RedisSearch，用于语义缓存）────────────────────────────────
+  redis:
+    image: redis/redis-stack:latest
+    pull_policy: missing
+    container_name: chatflow-redis-prod
+    restart: unless-stopped
+    expose:
+      - "6379"
+    volumes:
+      - ${REDIS_DATA_DIR}:/data
+    # redis-stack 必须用 REDIS_ARGS 传参，不能覆盖 command（会破坏内置 entrypoint）
+    environment:
+      REDIS_ARGS: >-
+        --maxmemory 1gb
+        --maxmemory-policy allkeys-lru
+        --tcp-keepalive 60
+        --tcp-backlog 511
+        --hz 20
+        --aof-use-rdb-preamble yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 1200M
+
+  # ── Python FastAPI 后端（Gunicorn 多进程）────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: chatflow-backend:${APP_VERSION}-prod
+    pull_policy: never
+    container_name: chatflow-backend-prod
+    restart: unless-stopped
+    env_file:
+      - .env          # 密文 + 基础配置在 .env 里
+    expose:
+      - "${BACKEND_PORT}"
+    volumes:
+      - ${BACKEND_LOG_HOST_DIR}:/var/log/chatflow
+      - ${SECRET_DIR:-/opt/secret}:/opt/secret:ro
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:${BACKEND_PORT}/api/tools || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    # 覆盖 Dockerfile CMD：使用 Gunicorn 多 worker 进程
+    # --timeout 300   = SSE 长连接最大等待（秒），需 > proxy_read_timeout
+    # --graceful-timeout 30 = 优雅停机等待
+    # --keep-alive 5  = worker 与 nginx 的 keepalive
+    command: >
+      gunicorn main:app
+      --workers ${GUNICORN_WORKERS:-4}
+      --worker-class uvicorn.workers.UvicornWorker
+      --bind 0.0.0.0:${BACKEND_PORT:-8000}
+      --timeout 0
+      --graceful-timeout 30
+      --keep-alive 75
+      --max-requests 2000
+      --max-requests-jitter 200
+      --log-level info
+      --access-logfile -
+      --error-logfile -
+    deploy:
+      resources:
+        limits:
+          cpus: '5.0'
+          memory: 4G
+
+  # ── Vue 前端（Nginx 静态服务 + SSE 优化反代）──────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: chatflow-frontend:${APP_VERSION}-prod
+    pull_policy: never
+    container_name: chatflow-frontend-prod
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      # 挂载生产版 nginx 配置（keepalive upstream + SSE 优化）
+      - ./frontend/nginx.prod.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+networks:
+  default:
+    name: chatflow-network-prod

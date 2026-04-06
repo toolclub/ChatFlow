@@ -67,7 +67,12 @@ class RedisCacheBackend(SemanticCache):
     def _get_client(self) -> Redis:
         if self._client is None:
             self._client = aioredis.from_url(
-                self._redis_url, decode_responses=False
+                self._redis_url,
+                decode_responses=False,
+                max_connections=50,      # 连接池上限，高并发时不阻塞
+                socket_keepalive=True,   # TCP keepalive，避免空闲断连
+                socket_connect_timeout=5,
+                retry_on_timeout=True,
             )
         return self._client
 

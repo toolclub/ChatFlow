@@ -82,6 +82,7 @@ export interface ConversationDetail {
 export interface SendPayload {
   text: string
   images: string[]
+  agentMode: boolean
 }
 
 export interface AgentStatus {

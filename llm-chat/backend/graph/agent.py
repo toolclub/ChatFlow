@@ -186,19 +186,102 @@ def build_graph(tools: list[BaseTool], model: str = CHAT_MODEL) -> Any:
     return graph.compile()
 
 
+def build_simple_graph(tools: list[BaseTool], model: str = CHAT_MODEL) -> Any:
+    """
+    构建简单对话图（无 planner / reflector / route_model LLM 调用）。
+
+    适用场景：直接问答、不需要多步规划的普通对话。
+
+    流程：
+        START → semantic_cache_check
+          ├── HIT  → save_response
+          └── MISS → vision_node → retrieve_context → call_model
+                       ├── tools → call_model_after_tool → save_response
+                       └── done → save_response → compress_memory → END
+
+    与完整图的差异：
+      - 没有 route_model（LLM 路由调用），初始 state 强制 route="chat"
+      - 没有 planner（无多步计划）
+      - 没有 reflector（无自我评估循环）
+      - should_continue 返回 "reflector" 时映射到 "save_response"，直接结束
+    """
+    tool_names = [t.name for t in tools]
+
+    cache_node           = SemanticCacheNode()
+    vision_node          = VisionNode()
+    retrieve_node        = RetrieveContextNode(tool_names)
+    call_model_node      = CallModelNode(tools)
+    call_model_tool_node = CallModelAfterToolNode(tools)
+    save_response_node   = SaveResponseNode()
+    compress_node        = CompressNode()
+
+    graph = StateGraph(GraphState)  # type: ignore[arg-type]
+
+    graph.add_node("semantic_cache_check",  cache_node.execute)           # type: ignore[arg-type]
+    graph.add_node("vision_node",           vision_node.execute)          # type: ignore[arg-type]
+    graph.add_node("retrieve_context",      retrieve_node.execute)        # type: ignore[arg-type]
+    graph.add_node("call_model",            call_model_node.execute)      # type: ignore[arg-type]
+    graph.add_node("call_model_after_tool", call_model_tool_node.execute) # type: ignore[arg-type]
+    graph.add_node("save_response",         save_response_node.execute)   # type: ignore[arg-type]
+    graph.add_node("compress_memory",       compress_node.execute)        # type: ignore[arg-type]
+
+    if tools:
+        tool_node = ToolNode(tools)
+        graph.add_node("tools", tool_node)
+        # "reflector" 映射到 "save_response"：简单图跳过自我评估，直接存储
+        graph.add_conditional_edges(
+            "call_model",
+            should_continue,
+            {"tools": "tools", "reflector": "save_response", "save_response": "save_response"},
+        )
+        graph.add_edge("tools", "call_model_after_tool")
+        graph.add_conditional_edges(
+            "call_model_after_tool",
+            should_continue_after_tool,
+            {"tools": "tools", "reflector": "save_response", "save_response": "save_response"},
+        )
+    else:
+        graph.add_conditional_edges(
+            "call_model",
+            should_continue,
+            {"reflector": "save_response", "save_response": "save_response"},
+        )
+
+    graph.add_edge(START, "semantic_cache_check")
+    graph.add_conditional_edges(
+        "semantic_cache_check",
+        cache_routing,
+        {"save_response": "save_response", "after_cache": "vision_node"},
+    )
+    graph.add_edge("vision_node",      "retrieve_context")
+    graph.add_edge("retrieve_context", "call_model")
+    graph.add_edge("save_response",    "compress_memory")
+    graph.add_edge("compress_memory",  END)
+
+    return graph.compile()
+
+
 def init(tools: list[BaseTool], model: str = CHAT_MODEL) -> None:
-    """应用启动时调用，编译并缓存图。"""
+    """应用启动时调用，编译并缓存两张图（完整 Agent 图 + 简单对话图）。"""
     global _tools
     _tools = tools
     _graph_cache["default"] = build_graph(tools, model)
+    _graph_cache["simple"]  = build_simple_graph(tools, model)
     logger.info(
-        "Agent 图初始化完成 | tools=%d | router_enabled=%s",
+        "Agent 图初始化完成 | tools=%d | router_enabled=%s | 简单图=已就绪",
         len(tools), ROUTER_ENABLED,
     )
 
 
 def get_graph(model: str = CHAT_MODEL) -> Any:
-    """返回已编译的图。路由模式下所有请求共用同一张图。"""
+    """返回完整 Agent 图（含 planner / reflector / router）。"""
     if "default" not in _graph_cache:
         raise RuntimeError("Agent 图未初始化，请先调用 graph.agent.init(tools)")
     return _graph_cache["default"]
+
+
+def get_simple_graph(model: str = CHAT_MODEL) -> Any:
+    """返回简单对话图（无 planner / reflector / router）。"""
+    if "simple" not in _graph_cache:
+        raise RuntimeError("Simple 图未初始化，请先调用 graph.agent.init(tools)")
+    return _graph_cache["simple"]
