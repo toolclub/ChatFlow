@@ -131,6 +131,8 @@ class ReflectorNode(BaseNode):
             {"role": "user",   "content": eval_prompt},
         ]
 
+        from logging_config import log_prompt
+        log_prompt(state.get("conv_id", ""), "reflector", model, messages_for_llm)
         try:
             completion = await llm.ainvoke(messages_for_llm)
             raw = (completion.choices[0].message.content or "").strip()
@@ -171,12 +173,18 @@ class ReflectorNode(BaseNode):
         updated_plan = self._mark_step(updated_plan, next_idx, "running")
         next_step    = updated_plan[next_idx]
 
+        is_next_last = next_idx >= total - 1
         step_msg = HumanMessage(
             content=(
                 f"步骤 {current_idx + 1} 已完成。\n\n"
                 f"**[执行步骤 {next_idx + 1}/{total}]: {next_step['title']}**\n"
                 f"具体任务：{next_step['description']}\n"
-                "请完成此步骤。若需要新信息则使用工具；若已有足够上下文，直接给出结论。"
+                + (
+                    "请基于所有已收集的信息，生成完整的最终回复。"
+                    if is_next_last else
+                    "请完成此步骤的任务：若需要新信息则使用工具搜索；"
+                    "否则给出本步骤的摘要结论（不要提前生成最终回复）。"
+                )
             )
         )
         return {
@@ -209,14 +217,20 @@ class ReflectorNode(BaseNode):
             updated_plan = self._mark_step(updated_plan, current_idx, "done")
             next_idx     = current_idx + 1
             if next_idx < total:
-                updated_plan = self._mark_step(updated_plan, next_idx, "running")
-                next_step    = updated_plan[next_idx]
-                step_msg     = HumanMessage(
+                updated_plan  = self._mark_step(updated_plan, next_idx, "running")
+                next_step     = updated_plan[next_idx]
+                is_next_last  = next_idx >= total - 1
+                step_msg      = HumanMessage(
                     content=(
                         f"步骤 {current_idx + 1} 已完成。\n\n"
                         f"**[执行步骤 {next_idx + 1}/{total}]: {next_step['title']}**\n"
                         f"具体任务：{next_step['description']}\n"
-                        "请完成此步骤。若需要新信息则使用工具；若已有足够上下文，直接给出结论。"
+                        + (
+                            "请基于所有已收集的信息，生成完整的最终回复。"
+                            if is_next_last else
+                            "请完成此步骤的任务：若需要新信息则使用工具搜索；"
+                            "否则给出本步骤的摘要结论（不要提前生成最终回复）。"
+                        )
                     )
                 )
                 result["messages"]           = [step_msg]

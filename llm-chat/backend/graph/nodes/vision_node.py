@@ -102,9 +102,9 @@ class VisionNode(BaseNode):
             vision_content.append({
                 "type": "text",
                 "text": (
-                    "请仔细观察图片，用中文详细描述你看到的内容。"
-                    "重点描述：错误信息、代码片段、界面异常、文字内容、关键数据等。"
-                    "描述要具体，方便后续推理分析。"
+                    "请用中文简要描述图片内容（150字以内）："
+                    "主题/核心元素、文字内容、色彩风格、用途或场景。"
+                    "直接描述事实，不要分析或评价。"
                 ),
             })
 
@@ -145,6 +145,10 @@ class VisionNode(BaseNode):
 
         # 推送分析块标题（让用户看到这是图像分析阶段）
         await adispatch_custom_event("vision_token", {"content": "📷 图像分析\n\n"})
+
+        vision_messages = [{"role": "user", "content": vision_content}]
+        from logging_config import log_prompt
+        log_prompt(conv_id, "vision_node", VISION_MODEL, vision_messages)
 
         stream = await client.chat.completions.create(
             model=VISION_MODEL,

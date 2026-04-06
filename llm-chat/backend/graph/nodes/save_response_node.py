@@ -79,6 +79,10 @@ class SaveResponseNode(BaseNode):
             user_msg,
         )
 
+        # ── 图片处理：生成存储用消息（优先用完整视觉描述，降级用短占位符） ────
+        # 提前到澄清检测之前，确保澄清时也能保存图片上下文到历史
+        user_msg_to_save = await self._build_user_msg_for_storage(state)
+
         # ── 澄清检测：同时检查原始（含 think 块）和去除后的文本 ──────────────
         # 原因：qwen3 等模型有时会把 [NEED_CLARIFICATION] 输出在 <think> 块内部，
         # 去除 think 块后标记消失。两者都检测，取先找到的结果。
@@ -95,16 +99,9 @@ class SaveResponseNode(BaseNode):
                 "澄清问询 | conv=%s | items=%d | question=%.80s",
                 conv_id, len(clar_data.get("items", [])), clar_data.get("question", ""),
             )
+            # 保存用户消息（含图片描述），下一轮才能从历史中恢复上下文
+            await memory_store.add_message(conv_id, "user", self._sanitize_for_db(user_msg_to_save))
             return {"needs_clarification": True}
-
-        # ── 图片处理：生成描述占位符 ─────────────────────────────────────────
-        if images:
-            model_for_desc   = state.get("answer_model") or state["model"]
-            img_desc         = await self._describe_images_for_storage(images, model_for_desc)
-            placeholder      = f"[用户上传了图片：图片内容大致为{img_desc}]"
-            user_msg_to_save = f"{user_msg}\n{placeholder}" if user_msg.strip() else placeholder
-        else:
-            user_msg_to_save = user_msg
 
         # ── 写入用户消息 ────────────────────────────────────────────────────
         await memory_store.add_message(conv_id, "user", self._sanitize_for_db(user_msg_to_save))
@@ -198,6 +195,35 @@ class SaveResponseNode(BaseNode):
             await cache.store(user_msg, full_response, namespace, ttl_seconds=ttl)
         except Exception as exc:
             logger.warning("写入语义缓存失败（不影响主流程）: %s", exc)
+
+    async def _build_user_msg_for_storage(self, state: GraphState) -> str:
+        """
+        构建用于持久化到 DB 的用户消息。
+
+        - 有图片且 VisionNode 已生成完整描述（vision_description）：
+            将完整描述附加到用户消息，保证下一轮（如澄清后）能从历史中恢复图片上下文。
+        - 有图片但 vision_description 为空（VisionNode 降级）：
+            调用视觉模型生成简短占位描述后附加。
+        - 无图片：直接返回用户消息原文。
+        """
+        user_msg = state["user_message"]
+        images   = state.get("images", [])
+
+        if not images:
+            return user_msg
+
+        vision_description = state.get("vision_description", "")
+        if vision_description:
+            # 有完整视觉分析时直接附加（足够详细，供下一轮上下文）
+            combined = f"{user_msg}\n[图片内容分析]\n{vision_description}" if user_msg.strip() else vision_description
+        else:
+            # 降级：生成简短占位描述
+            model_for_desc = state.get("answer_model") or state["model"]
+            img_desc       = await self._describe_images_for_storage(images, model_for_desc)
+            placeholder    = f"[用户上传了图片：图片内容大致为{img_desc}]"
+            combined       = f"{user_msg}\n{placeholder}" if user_msg.strip() else placeholder
+
+        return combined
 
     @staticmethod
     async def _describe_images_for_storage(images: list[str], model: str) -> str:
@@ -298,6 +324,7 @@ class SaveResponseNode(BaseNode):
           2. 只有开始标记：[NEED_CLARIFICATION]{...}
           3. JSON 内嵌在 think 块中，已由调用方传入原始文本
           4. 模型输出了多余文本，JSON 混在其中
+          5. 模型将 items 写成多个独立 JSON 对象（items 数组提前闭合）
 
         返回解析后的 dict（含 question + items），否则返回 None。
         """
@@ -316,16 +343,76 @@ class SaveResponseNode(BaseNode):
         if data:
             return data
 
-        # 容错：从候选文本中用正则提取第一个完整 JSON 对象
+        # 容错 1：从候选文本中用正则提取贪婪匹配的完整 JSON 对象
         json_match = re.search(r'\{[\s\S]*\}', raw_candidate)
         if json_match:
             data = cls._try_parse_json(json_match.group())
             if data:
                 return data
 
+        # 容错 2：模型把 items 写成多个独立顶层对象
+        # 例：{"question":"...", "items":[{item1}]},{item2},{item3}
+        data = cls._try_reassemble_fragmented_items(raw_candidate)
+        if data:
+            return data
+
         logger.warning(
             "澄清 JSON 解析失败，降级为普通回复 | raw=%.200s", raw_candidate
         )
+        return None
+
+    @staticmethod
+    def _try_reassemble_fragmented_items(raw: str) -> dict | None:
+        """
+        处理模型把 items 数组元素写成独立顶层对象的情况：
+          {"question":"...", "items":[{item1}]},{item2},{item3}
+        → {"question":"...", "items":[{item1},{item2},{item3}]}
+
+        策略：顺序扫描 raw 中所有合法 JSON 对象；
+              第一个含 question 的对象为主体，其余含 id 的对象追加进 items。
+        """
+        objects: list[dict] = []
+        i = 0
+        while i < len(raw):
+            if raw[i] != '{':
+                i += 1
+                continue
+            depth, j = 0, i
+            while j < len(raw):
+                if raw[j] == '{':
+                    depth += 1
+                elif raw[j] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            obj = json.loads(raw[i:j + 1])
+                            if isinstance(obj, dict):
+                                objects.append(obj)
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+                        i = j + 1
+                        break
+                j += 1
+            else:
+                break
+
+        if not objects:
+            return None
+
+        main = objects[0]
+        if not isinstance(main, dict) or "question" not in main:
+            return None
+
+        if not isinstance(main.get("items"), list):
+            main["items"] = []
+
+        # 额外的 item 对象追加进 items 数组
+        for extra in objects[1:]:
+            if isinstance(extra, dict) and "id" in extra:
+                main["items"].append(extra)
+
+        if main.get("question") and isinstance(main.get("items"), list) and main["items"]:
+            return main
         return None
 
     @staticmethod

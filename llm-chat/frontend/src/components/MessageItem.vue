@@ -161,7 +161,12 @@ function renderContent(raw: string): string {
   let content = raw.replace(/<think>[\s\S]*?<\/think>\n*/g, '')
   const thinkStart = content.indexOf('<think>')
   if (thinkStart !== -1) content = content.slice(0, thinkStart)
-  return markedInstance.parse(content.trim()) as string
+  const trimmed = content.trim()
+  // 模型直接输出裸 HTML 页面时（没有 markdown 代码块包裹），自动包裹为 html 代码块渲染
+  if (/^<!doctype\s+html/i.test(trimmed) || /^<html[\s>]/i.test(trimmed)) {
+    return buildCodeHtml({ text: trimmed, lang: 'html' })
+  }
+  return markedInstance.parse(trimmed) as string
 }
 
 // ─── 代码块事件委托（挂载在整个 ai-content-wrap 上） ────────────────────────
@@ -316,7 +321,7 @@ const hasContent = computed(() => {
 
         <!-- ── 加载中且尚无内容：内联状态气泡（与头像同行，保持对齐） ── -->
         <AgentStatusBubble
-          v-if="isLastLoading && !message.content && !message.thinking && agentStatus && agentStatus.state !== 'idle'"
+          v-if="isLastLoading && !message.content && agentStatus && agentStatus.state !== 'idle'"
           :status="agentStatus"
           :cognitive="cognitive ?? emptyCognitive"
         />

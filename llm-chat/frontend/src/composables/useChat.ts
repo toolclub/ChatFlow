@@ -376,8 +376,19 @@ export function useChat() {
 
       // 组合：原始意图 + 补充说明，路由器能看到原始任务
       const supplement = lines.join('，')
+
+      // 若上一轮已有执行计划，将其附加到消息中，供 planner 参考继续/调整
+      const activePlan = s.cognitive.plan
+      let planContext = ''
+      if (activePlan.length > 0) {
+        const planLines = activePlan
+          .map((step, i) => `${i + 1}. ${step.title}${step.description ? '：' + step.description : ''}`)
+          .join('\n')
+        planContext = `\n\n[原有执行计划]\n${planLines}\n请基于上述补充信息继续执行或调整计划。`
+      }
+
       const formatted = originalIntent
-        ? `${originalIntent}${supplement ? `\n\n补充说明：${supplement}` : ''}`
+        ? `${originalIntent}${supplement ? `\n\n补充说明：${supplement}` : ''}${planContext}`
         : (supplement || '继续')
 
       await send({ text: formatted, images: [] })

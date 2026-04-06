@@ -11,13 +11,27 @@ const emit = defineEmits<{
   submit: [answers: Record<string, string | string[]>]
 }>()
 
+// 兜底 text 项：模型未提供 text 类型时自动追加
+const FALLBACK_OTHER: ClarificationItem = {
+  id: '__other__',
+  type: 'text',
+  label: '其他补充（可选）',
+  placeholder: '如有其他需求或补充说明，请在此输入...',
+}
+
+// 始终保证有一个 text 类型的自由输入框
+const effectiveItems = computed<ClarificationItem[]>(() => {
+  const hasText = props.data.items.some(i => i.type === 'text')
+  return hasText ? props.data.items : [...props.data.items, FALLBACK_OTHER]
+})
+
 // 每个 item 的答案：single_choice → string，multi_choice → string[]，text → string
 const answers = ref<Record<string, string | string[]>>({})
 // "其他" 选项被选中时的补充文本框
 const otherText = ref<Record<string, string>>({})
 
-// 初始化答案
-props.data.items.forEach((item: ClarificationItem) => {
+// 初始化答案（含兜底项）
+effectiveItems.value.forEach((item: ClarificationItem) => {
   if (item.type === 'multi_choice') {
     answers.value[item.id] = []
   } else {
@@ -40,7 +54,7 @@ function selectedIsOther(itemId: string): boolean {
 
 // 检查必填项（选择题至少选一个；选了"其他"时补充文本框必须填写）
 const canSubmit = computed(() => {
-  return props.data.items.every((item: ClarificationItem) => {
+  return effectiveItems.value.every((item: ClarificationItem) => {
     if (item.type === 'text') return true  // 文本输入可选
     const val = answers.value[item.id]
     const hasVal = Array.isArray(val) ? val.length > 0 : !!val
@@ -70,7 +84,7 @@ function handleSubmit() {
   if (!canSubmit.value || props.loading) return
   // 合并"其他"的补充文本到答案中
   const merged: Record<string, string | string[]> = {}
-  props.data.items.forEach((item: ClarificationItem) => {
+  effectiveItems.value.forEach((item: ClarificationItem) => {
     const val = answers.value[item.id]
     if (item.type === 'single_choice' && typeof val === 'string' && isOtherOption(val)) {
       const extra = otherText.value[item.id]?.trim()
@@ -99,7 +113,7 @@ function handleSubmit() {
 
     <!-- 问题项列表 -->
     <div class="card-body">
-      <div v-for="item in data.items" :key="item.id" class="item-block">
+      <div v-for="item in effectiveItems" :key="item.id" class="item-block">
         <div class="item-label">{{ item.label }}</div>
 
         <!-- 单选 -->

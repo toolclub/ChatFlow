@@ -2,6 +2,7 @@
 CallModelNode：主 LLM 推理节点
 
 职责：
+  - 预检：确定性检测「网页/UI 生成」请求，若缺少风格信息直接生成澄清卡片，跳过 LLM 调用
   - 从 state 读取 tool_model 和 temperature，动态获取 LLM（已按 key 缓存）
   - 若有执行计划，在本地消息副本中注入当前步骤上下文
   - 将 state.messages 送入 LLM
@@ -16,7 +17,9 @@ CallModelNode：主 LLM 推理节点
   - 返回最终回复  → reflector（有计划） or save_response（无计划）
 """
 import asyncio
+import json
 import logging
+import re
 
 from langchain_core.callbacks.manager import adispatch_custom_event
 from langchain_core.messages import AIMessage, HumanMessage
@@ -27,6 +30,56 @@ from graph.state import GraphState
 from llm.chat import get_chat_llm, get_vision_llm
 
 logger = logging.getLogger("graph.nodes.call_model")
+
+# ── 网页生成澄清预检 ──────────────────────────────────────────────────────────
+# 匹配用户希望生成网页/UI 的关键词
+_WEBPAGE_KEYWORDS = re.compile(
+    r"(网页|页面|html|h5|落地页|官网|网站|ui\s*界面|前端界面|web\s*页)", re.IGNORECASE
+)
+# 已包含风格信息的关键词（说明用户已主动指定，不再追问）
+_STYLE_KEYWORDS = re.compile(
+    r"(风格|色调|主题色|配色|设计风格|简约|商务|科技感|严肃|活泼|补充说明|设计风格是|色调是)", re.IGNORECASE
+)
+
+
+def _needs_webpage_clarification(user_msg: str) -> bool:
+    """
+    判断是否需要网页澄清预检：
+      - 用户请求中含有生成网页/UI 的意图关键词
+      - 且尚未包含设计风格/色调等偏好信息（澄清后的第二轮已包含）
+    """
+    return bool(_WEBPAGE_KEYWORDS.search(user_msg)) and not bool(_STYLE_KEYWORDS.search(user_msg))
+
+
+_WEBPAGE_CLARIFICATION = {
+    "question": "我来帮你制作网页！先了解一下你的偏好",
+    "items": [
+        {
+            "id": "style",
+            "type": "single_choice",
+            "label": "设计风格",
+            "options": ["简约现代", "商务专业", "活泼创意", "严肃正式", "科技感"],
+        },
+        {
+            "id": "color",
+            "type": "single_choice",
+            "label": "主色调",
+            "options": ["蓝色系", "绿色系", "红色系", "深色系（暗色主题）", "跟随图片/主题"],
+        },
+        {
+            "id": "tech",
+            "type": "single_choice",
+            "label": "技术方案",
+            "options": ["纯 HTML/CSS/JS（单文件）", "加动画效果", "响应式（移动端适配）"],
+        },
+        {
+            "id": "note",
+            "type": "text",
+            "label": "其他要求（可选）",
+            "placeholder": "如需要哪些板块、特殊功能等…",
+        },
+    ],
+}
 
 
 class CallModelNode(BaseNode):
@@ -51,12 +104,38 @@ class CallModelNode(BaseNode):
         """
         核心推理逻辑：
 
+          0. 预检：网页/UI 生成且缺少风格信息 → 直接返回澄清卡片，跳过 LLM
           1. 确定是否启用工具（search/search_code 路由）
           2. 注入步骤上下文（有计划且首次调用时）
           3. 含图片 → 视觉路径（VISION_BASE_URL + VISION_MODEL）
           4. 无图片 → 主 LLM 路径（LLM_BASE_URL + tool_model）
           5. 将响应转回 LangChain AIMessage 格式（供 ToolNode/should_continue 使用）
         """
+        # ── 0. 网页澄清预检（确定性，不依赖 LLM 判断） ──────────────────────
+        # 仅在首轮调用（无计划步骤、未处于多步执行中）时触发，
+        # 避免澄清后的第二轮再次拦截。
+        plan        = state.get("plan", [])
+        step_iters  = state.get("step_iterations", 0)
+        cur_idx     = state.get("current_step_index", 0)
+        user_msg    = state.get("user_message", "")
+
+        # plan 为空说明：
+        #   - chat/code 路由（planner 直接跳过规划）
+        #   - search/search_code 路由且 planner_node 的澄清预检已返回空计划
+        # 有图片时 planner_node 不拦截（图片即风格参考），plan 非空，此处不会触发。
+        if not plan and step_iters == 0 and cur_idx == 0 and _needs_webpage_clarification(user_msg):
+            conv_id = state.get("conv_id", "")
+            logger.info(
+                "call_model 网页澄清预检命中，跳过 LLM | conv=%s | user_msg=%.60s",
+                conv_id, user_msg,
+            )
+            clar_json = json.dumps(_WEBPAGE_CLARIFICATION, ensure_ascii=False)
+            fake_response = f"[NEED_CLARIFICATION]{clar_json}[/NEED_CLARIFICATION]"
+            return {
+                "messages":     [AIMessage(content=fake_response)],
+                "full_response": fake_response,
+            }
+
         route       = state.get("route", "")
         model       = state.get("tool_model") or state["model"]
         temperature = state["temperature"]
@@ -66,13 +145,23 @@ class CallModelNode(BaseNode):
         use_tools    = bool(self._tools and (not route or route in ("search", "search_code")))
         tools_schema = self._tools_to_openai_schema(self._tools) if use_tools else None
 
+        # ── 多步计划末步强制流式（不绑工具） ───────────────────────────────
+        # 仅对"多步计划的最后一步"禁用工具：
+        #   - 多步时，末步任务是"生成产品"，前面各步已完成信息收集，
+        #     无需再搜索；禁工具 → 走 _stream_tokens 流式路径，逐 token 推送。
+        #   - 单步时不禁：单步需要先搜索再生成，工具调用后走
+        #     call_model_after_tool（已是流式），不能在此处断掉工具。
+        #     若单步禁工具，模型想调工具却没有 schema，会输出 [TOOL_CALL] 文本 artifact。
+        if use_tools and len(plan) > 1 and cur_idx >= len(plan) - 1:
+            use_tools = False
+            tools_schema = None
+
         # ── 消息列表（本地副本，避免修改 state） ────────────────────────────
         messages = list(state["messages"])
 
         # ── 首次执行时注入步骤上下文 ────────────────────────────────────────
-        plan       = state.get("plan", [])
-        current_idx = state.get("current_step_index", 0)
-        step_iters  = state.get("step_iterations", 0)
+        # plan / step_iters / cur_idx 已在预检阶段读取，此处复用
+        current_idx = cur_idx
 
         logger.info(
             "call_model 开始 | conv=%s | model=%s | use_tools=%s | "
@@ -142,6 +231,8 @@ class CallModelNode(BaseNode):
             "call_model (vision) 请求发出 | conv=%s | model=%s | use_tools=%s | msgs=%d",
             conv_id, vision_model, use_tools, len(oai_messages),
         )
+        from logging_config import log_prompt
+        log_prompt(conv_id, "call_model_vision", vision_model, oai_messages)
 
         try:
             if use_tools:
@@ -195,6 +286,8 @@ class CallModelNode(BaseNode):
             "call_model LLM 请求发出 | conv=%s | model=%s | use_tools=%s | msgs=%d",
             conv_id, model, use_tools, len(oai_messages),
         )
+        from logging_config import log_prompt
+        log_prompt(conv_id, "call_model", model, oai_messages)
 
         try:
             if use_tools:

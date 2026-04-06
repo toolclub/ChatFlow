@@ -97,6 +97,8 @@ class RouteNode(BaseNode):
 
         # ── 调用路由 LLM ────────────────────────────────────────────────────
         messages = [{"role": "user", "content": f"{_ROUTE_PROMPT}\n\n{routing_input}"}]
+        from logging_config import log_prompt
+        log_prompt(state.get("conv_id", ""), "route_model", ROUTER_MODEL, messages)
         completion = await llm.ainvoke(messages, timeout=30.0)
         raw = (completion.choices[0].message.content or "").strip().lower()
 
