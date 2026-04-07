@@ -192,5 +192,14 @@ export async function sendMessage(
     clearInterval(idleTimer)
   }
 
-  if (!streamDone) onStopped()
+  if (!streamDone) {
+    // 区分"用户主动 Stop"和"连接意外断开"：
+    //   signal.aborted → 用户点了停止按钮，走 onStopped（不显示 Continue）
+    //   其他情况      → 网络中断 / 服务端取消，走 onInterrupted（显示 Continue 按钮）
+    if (signal?.aborted) {
+      onStopped()
+    } else {
+      onInterrupted?.()
+    }
+  }
 }

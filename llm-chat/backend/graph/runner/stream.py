@@ -88,9 +88,12 @@ async def stream_response(
     # ── 后台任务：驱动图执行，把事件放入队列 ─────────────────────────────────
     queue: asyncio.Queue[tuple] = asyncio.Queue()
 
+    # 用可变容器在 _graph_producer 和外层主循环之间共享已累积的响应内容。
+    # 当客户端断开（CancelledError）时，外层可读取它并保存到 DB。
+    _partial: list[str] = [""]
+
     async def _graph_producer() -> None:
         event_count = 0
-        _accumulated_response = ""  # 追踪最近一次 LLM 节点输出的 full_response
         try:
             async for event in graph.astream_events(
                 initial_state,
@@ -101,13 +104,13 @@ async def stream_response(
                 etype = event.get("event", "")
                 ename = event.get("name", "")
                 enode = event.get("metadata", {}).get("langgraph_node", "")
-                # 追踪 LLM 节点输出，供异常时保存
+                # 追踪 LLM 节点输出，供中断时保存
                 if etype == "on_chain_end" and enode in ("call_model", "call_model_after_tool"):
                     output = event.get("data", {}).get("output", {})
                     if isinstance(output, dict):
                         fr = output.get("full_response", "")
                         if fr:
-                            _accumulated_response = fr
+                            _partial[0] = fr
                 # 只记录关键节点事件，避免日志爆炸
                 if etype in (
                     "on_chain_start", "on_chain_end",
@@ -120,10 +123,16 @@ async def stream_response(
                     )
                 await queue.put(("event", event))
         except asyncio.CancelledError:
+            # 客户端断开：用 shield 异步保存已积累的部分响应（不受取消影响）
             logger.info(
-                "图执行被取消（客户端断开） | conv=%s | events=%d",
-                conv_id, event_count,
+                "图执行被取消（客户端断开） | conv=%s | events=%d | partial_len=%d",
+                conv_id, event_count, len(_partial[0]),
             )
+            if _partial[0]:
+                try:
+                    await asyncio.shield(_save_partial_response(conv_id, user_message, _partial[0]))
+                except Exception as save_exc:
+                    logger.warning("保存断开前部分响应失败: %s", save_exc)
         except Exception as exc:
             logger.error(
                 "图执行失败 | conv=%s | events=%d | error=%s",
@@ -131,9 +140,9 @@ async def stream_response(
             )
             # 若已有部分响应（如 GraphRecursionError 中断），保存到 DB
             # 这样用户说"继续"时，模型能从历史中知道之前做到了哪里
-            can_continue = bool(_accumulated_response)
+            can_continue = bool(_partial[0])
             if can_continue:
-                await _save_partial_response(conv_id, user_message, _accumulated_response)
+                await _save_partial_response(conv_id, user_message, _partial[0])
             try:
                 await queue.put(("error", {"exc": exc, "can_continue": can_continue}))
             except Exception:

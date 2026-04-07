@@ -89,6 +89,10 @@ function buildCodeHtml(rawToken: any): string {
 }
 
 const markedInstance = new Marked({ gfm: true, breaks: false })
+
+// marked v13 breaking change：use({ renderer }) 钩子收到的是已渲染 HTML 字符串，
+// 不再是 token 对象，因此 code/html 用 renderer 钩子，
+// table 必须改用 extensions API 才能拿到 token 对象。
 markedInstance.use({
   renderer: {
     code(token: any): string {
@@ -109,8 +113,15 @@ markedInstance.use({
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
     },
+  }
+})
 
-    table(token: any): string {
+// table 用 extensions API 注入，extensions 的 renderer 收到 token 对象（v13 兼容）
+markedInstance.use({
+  extensions: [{
+    name: 'table',
+    level: 'block' as const,
+    renderer(token: any): string {
       const header = token.header ?? []
       const rows   = token.rows   ?? []
       const align  = token.align  ?? []
@@ -138,7 +149,7 @@ markedInstance.use({
 
       return `<div class="table-wrapper"><table><thead><tr>${thCells}</tr></thead><tbody>${bodyRows}</tbody></table></div>`
     },
-  }
+  }],
 })
 
 // ─── Props ───

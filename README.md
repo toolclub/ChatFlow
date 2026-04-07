@@ -346,25 +346,25 @@ sequenceDiagram
     F->>G: create_task(_graph_producer)
     F->>H: create_task(_heartbeat, 5s)
     
-    loop 图执行期间
-        G-->>Q: put("event", langchain_event)
-        H-->>Q: put("ping", None) 每5s
+    loop running
+        G-->>Q: put(event)
+        H-->>Q: put(ping)
         F->>Q: await queue.get()
-        F-->>N: data: {SSE}
-        N-->>B: 流式推送
+        F-->>N: SSE data
+        N-->>B: stream push
     end
 
-    alt 图执行成功
-        G-->>Q: put("done", None)
-        F-->>B: data: {"done":true}
-    else 图执行出错
-        G-->>Q: put("error", {exc, can_continue})
-        F-->>B: data: {"error":"...", "can_continue":true}
-        Note over B: 显示"继续"按钮
-    else 客户端断开
-        B-->>F: TCP 断开 → CancelledError
-        F->>G: graph_task.cancel()
-        F->>H: hb_task.cancel()
+    alt success
+        G-->>Q: put(done)
+        F-->>B: {"done": true}
+    else error
+        G-->>Q: put(error)
+        F-->>B: {"error": "...", "can_continue": true}
+        Note over B: show continue button
+    else disconnect
+        B-->>F: TCP disconnect
+        F->>G: cancel()
+        F->>H: cancel()
     end
 ```
 
