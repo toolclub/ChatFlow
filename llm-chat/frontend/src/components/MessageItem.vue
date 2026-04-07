@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { computed, ref, watch, onMounted, onUnmounted, nextTick, type Directive } from 'vue'
 import katex from 'katex'
 import 'katex/dist/katex.min.css'
 import { Marked } from 'marked'
@@ -9,12 +9,15 @@ import { makeEmptyCognitiveState } from '../types'
 import { CopyDocument, Check, Search, Clock, Cpu, Document, ArrowDown, Loading, Close } from '@element-plus/icons-vue'
 import CodePreview from './CodePreview.vue'
 import AgentStatusBubble from './AgentStatusBubble.vue'
+import FileArtifactCard from './FileArtifactCard.vue'
+import type { FileArtifact } from '../types'
+import { detectLanguage } from '../types'
 
 const PREVIEWABLE = new Set(['html','svg','css','javascript','js','typescript','ts','vue','jsx','tsx','react'])
 
 // ─── 工具元信息 ───
 const TOOL_META: Record<string, { label: string; icon: any; color: string }> = {
-  web_search:        { label: '搜索了网络',  icon: Search,   color: '#6366f1' },
+  web_search:        { label: '搜索了网络',  icon: Search,   color: '#00AEEC' },
   fetch_webpage:     { label: '阅读了网页',  icon: Document, color: '#0ea5e9' },
   get_current_time:  { label: '获取了时间',  icon: Clock,    color: '#0ea5e9' },
   calculator:        { label: '执行了计算',  icon: Cpu,      color: '#10b981' },
@@ -112,6 +115,18 @@ markedInstance.use({
       return buildCodeHtml(token)
     },
 
+    // 图片：支持 data URI（模型可能输出 inline SVG 预览图）和普通 URL
+    image(token: any): string {
+      const href: string = token.href ?? ''
+      const alt: string = token.text ?? token.title ?? ''
+      // data URI 图片：直接渲染（marked 默认可能无法正确处理超长 data URI）
+      if (href.startsWith('data:')) {
+        return `<img src="${href}" alt="${alt}" style="max-width:100%;border-radius:8px;margin:8px 0;" />`
+      }
+      // 普通 URL 图片
+      return `<img src="${href}" alt="${alt}" style="max-width:100%;border-radius:8px;margin:8px 0;" loading="lazy" />`
+    },
+
     // 拦截 marked 识别出的 HTML 块，防止原始 HTML 直接渲染到 DOM
     // 场景：模型输出 <!DOCTYPE html>... 不包裹代码围栏时，marked 会把它当 HTML 块直接透传
     html(token: any): string {
@@ -181,6 +196,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   regenerate: []
   editMessage: [payload: { index: number; content: string }]
+  selectFile: [file: FileArtifact]
 }>()
 
 const emptyCognitive = makeEmptyCognitiveState()
@@ -229,6 +245,18 @@ function renderContent(raw: string, streaming = false): string {
   // 防止 --- 被 marked 误解析为 setext h2 标题（在 --- 前插入空行）
   trimmed = trimmed.replace(/([^\n]+)\n(-{3,})(\n|$)/g, '$1\n\n$2$3')
 
+  // data URI 图片预处理：marked 无法正确解析含 http:// 和单引号的 data URI，
+  // 先提取为占位符，渲染后还原为 <img> 标签
+  const dataUriImages: { placeholder: string; alt: string; uri: string }[] = []
+  trimmed = trimmed.replace(
+    /!\[([^\]]*)\]\((data:image\/[^)]+)\)/g,
+    (_match, alt, uri) => {
+      const id = `__DATA_IMG_${dataUriImages.length}__`
+      dataUriImages.push({ placeholder: id, alt, uri })
+      return id
+    }
+  )
+
   // 流式大内容：激活 _skipHljs 标志，对本次 buildCodeHtml 调用生效
   _skipHljs = streaming && trimmed.length > _SKIP_HLJS_THRESHOLD
   try {
@@ -236,7 +264,15 @@ function renderContent(raw: string, streaming = false): string {
     if (/^<!doctype\s+html/i.test(trimmed) || /^<html[\s>]/i.test(trimmed)) {
       return buildCodeHtml({ text: trimmed, lang: 'html' })
     }
-    return markedInstance.parse(trimmed) as string
+    let result = markedInstance.parse(trimmed) as string
+    // 还原 data URI 图片占位符为 <img> 标签
+    for (const img of dataUriImages) {
+      result = result.replace(
+        img.placeholder,
+        `<img src="${img.uri}" alt="${img.alt}" style="max-width:100%;border-radius:8px;margin:8px 0;" />`
+      )
+    }
+    return result
   } finally {
     _skipHljs = false
   }
@@ -343,9 +379,20 @@ async function copy() {
 }
 
 // ─── 推理过程折叠（key = sectionIndex） ────────────────────────────────────
+// 用户未手动操作过时，正在思考（无 content）自动展开，有 content 后自动折叠
 const thinkExpanded = ref<Record<number, boolean>>({})
-function toggleThink(si: number) { thinkExpanded.value[si] = !thinkExpanded.value[si] }
-function isThinkExpanded(si: number) { return thinkExpanded.value[si] ?? false }
+const thinkManual   = ref<Record<number, boolean>>({})  // 用户是否手动操作过
+function toggleThink(si: number) {
+  thinkManual.value[si] = true
+  thinkExpanded.value[si] = !thinkExpanded.value[si]
+}
+function isThinkExpanded(si: number) {
+  // 用户手动操作过 → 尊重用户选择
+  if (thinkManual.value[si]) return thinkExpanded.value[si] ?? false
+  // 未手动操作：还在思考（无 content）时自动展开，有 content 后自动折叠
+  const sec = sections.value[si]
+  return sec ? !sec.content : false
+}
 
 // ─── 工具折叠（key = "sectionIndex-toolIndex"） ─────────────────────────────
 const collapsed = ref<Record<string, boolean>>({})
@@ -382,6 +429,60 @@ function getToolGroups(toolCalls: ToolCallRecord[]): ToolGroup[] {
 function toggleSandbox(si: number) { const k = `${si}-sbx`; collapsed.value[k] = !collapsed.value[k] }
 function isSandboxCollapsed(si: number) { return collapsed.value[`${si}-sbx`] ?? false }
 function isSandboxRunning(tools: SandboxGroupItem[]) { return tools.some(t => !t.tc.done) }
+
+// ─── 终端自动滚动指令：内容更新时跟随到底部，用户上滚则暂停 ─────────────────
+const vAutoScroll: Directive<HTMLElement> = {
+  mounted(el) {
+    let userScrolledUp = false
+    el.addEventListener('scroll', () => {
+      // 距底部 < 30px 视为"在底部"，恢复自动滚动
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30
+      userScrolledUp = !atBottom
+    }, { passive: true })
+    const observer = new MutationObserver(() => {
+      if (!userScrolledUp) {
+        el.scrollTop = el.scrollHeight
+      }
+    })
+    observer.observe(el, { childList: true, subtree: true, characterData: true })
+    ;(el as any).__autoScrollObs = observer
+  },
+  unmounted(el) {
+    (el as any).__autoScrollObs?.disconnect()
+  },
+}
+
+// ─── 文件产物：优先从 cognitive.artifacts（SSE实时推送），兜底从 tool calls 提取 ──
+const fileArtifacts = computed<FileArtifact[]>(() => {
+  if (props.message.role !== 'assistant') return []
+
+  // 来源1：cognitive.artifacts（后端 SSE file_artifact 事件推送，仅最后一条加载中的消息有）
+  if (props.cognitive?.artifacts?.length) {
+    return props.cognitive.artifacts
+  }
+
+  // 来源2：从 sandbox_write 工具调用的 input 中提取（历史消息回退方案）
+  const files: FileArtifact[] = []
+  const seen = new Set<string>()
+  const extractFrom = (toolCalls: ToolCallRecord[]) => {
+    for (const tc of toolCalls) {
+      if (tc.name === 'sandbox_write' && tc.done) {
+        const path = String((tc.input as any).path || '')
+        const content = String((tc.input as any).content || '')
+        if (path && content && !seen.has(path)) {
+          seen.add(path)
+          const name = path.split('/').pop() || path
+          files.push({ name, path, content, language: detectLanguage(path) })
+        }
+      }
+    }
+  }
+  if (props.message.steps?.length) {
+    for (const step of props.message.steps) extractFrom(step.toolCalls)
+  }
+  if (props.message.toolCalls?.length) extractFrom(props.message.toolCalls)
+  return files
+})
 
 // ─── 整条消息是否有可复制内容 ───────────────────────────────────────────────
 const hasContent = computed(() => {
@@ -474,10 +575,10 @@ function cancelEdit() { isEditing.value = false }
     <!-- AI 消息 -->
     <template v-else>
       <div class="ai-avatar" :class="{ 'ai-avatar--breathing': isLastLoading }">
-        <!-- 与 favicon / logo 一致：主星 + 副星 -->
+        <!-- Bilibili 风格星星图标 — 蓝粉双色 -->
         <svg width="17" height="17" viewBox="0 0 32 32" fill="none">
-          <path d="M16 4C16 4 17.5 11 23 14C17.5 17 16 24 16 24C16 24 14.5 17 9 14C14.5 11 16 4 16 4Z" fill="#111827"/>
-          <path d="M25 7C25 7 25.6 9.8 27.5 10.7C25.6 11.6 25 14.4 25 14.4C25 14.4 24.4 11.6 22.5 10.7C24.4 9.8 25 7 25 7Z" fill="#111827" opacity="0.5"/>
+          <path d="M16 4C16 4 17.5 11 23 14C17.5 17 16 24 16 24C16 24 14.5 17 9 14C14.5 11 16 4 16 4Z" fill="#00AEEC"/>
+          <path d="M25 7C25 7 25.6 9.8 27.5 10.7C25.6 11.6 25 14.4 25 14.4C25 14.4 24.4 11.6 22.5 10.7C24.4 9.8 25 7 25 7Z" fill="#FB7299" opacity="0.6"/>
         </svg>
       </div>
 
@@ -525,10 +626,10 @@ function cancelEdit() { isEditing.value = false }
                           <path d="M5 8l2 2 4-4" stroke="#22c55e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
                         </svg>
                         <svg v-else width="14" height="14" viewBox="0 0 16 16" fill="none" class="spin">
-                          <circle cx="8" cy="8" r="6" stroke="#a5b4fc" stroke-width="1.5" stroke-dasharray="20 18"/>
+                          <circle cx="8" cy="8" r="6" stroke="#66D3F5" stroke-width="1.5" stroke-dasharray="20 18"/>
                         </svg>
                       </span>
-                      <el-icon style="font-size:13px; color:#6366f1"><Search /></el-icon>
+                      <el-icon style="font-size:13px; color:#00AEEC"><Search /></el-icon>
                       <span class="tool-label">搜索了网络</span>
                       <span class="tool-query">「{{ (group.tc.input as any).query }}」</span>
                       <span v-if="!group.tc.done" class="tool-pending">搜索中...</span>
@@ -547,7 +648,7 @@ function cancelEdit() { isEditing.value = false }
                             <path d="M5.5 5.5l5 5M10.5 5.5l-5 5" stroke="#ef4444" stroke-width="1.4" stroke-linecap="round"/>
                           </svg>
                           <svg v-else width="12" height="12" viewBox="0 0 16 16" fill="none" class="spin">
-                            <circle cx="8" cy="8" r="6" stroke="#a5b4fc" stroke-width="1.5" stroke-dasharray="20 18"/>
+                            <circle cx="8" cy="8" r="6" stroke="#66D3F5" stroke-width="1.5" stroke-dasharray="20 18"/>
                           </svg>
                         </span>
                         <img :src="faviconUrl(item.url)" class="url-favicon"
@@ -570,7 +671,7 @@ function cancelEdit() { isEditing.value = false }
                           <path d="M5 8l2 2 4-4" stroke="#22c55e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
                         </svg>
                         <svg v-else width="14" height="14" viewBox="0 0 16 16" fill="none" class="spin">
-                          <circle cx="8" cy="8" r="6" stroke="#a5b4fc" stroke-width="1.5" stroke-dasharray="20 18"/>
+                          <circle cx="8" cy="8" r="6" stroke="#66D3F5" stroke-width="1.5" stroke-dasharray="20 18"/>
                         </svg>
                       </span>
                       <el-icon style="font-size:13px; color:#0ea5e9"><Document /></el-icon>
@@ -595,7 +696,7 @@ function cancelEdit() { isEditing.value = false }
                           <path d="M5 8l2 2 4-4" stroke="#22c55e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
                         </svg>
                         <svg v-else width="14" height="14" viewBox="0 0 16 16" fill="none" class="spin">
-                          <circle cx="8" cy="8" r="6" stroke="#a5b4fc" stroke-width="1.5" stroke-dasharray="20 18"/>
+                          <circle cx="8" cy="8" r="6" stroke="#66D3F5" stroke-width="1.5" stroke-dasharray="20 18"/>
                         </svg>
                       </span>
                       <el-icon :style="{ color: toolMeta(group.tc.name).color }" style="font-size:13px">
@@ -623,35 +724,44 @@ function cancelEdit() { isEditing.value = false }
                 <div class="sandbox-block">
                   <!-- 终端标题栏 -->
                   <div class="term-titlebar" @click="toggleSandbox(si)">
-                    <svg class="term-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-                    <span class="term-title">ChatFlow Sandbox</span>
+                    <!-- macOS 风格三色圆点 -->
+                    <div class="term-dots">
+                      <span class="term-dot term-dot--red"></span>
+                      <span class="term-dot term-dot--yellow"></span>
+                      <span class="term-dot term-dot--green"></span>
+                    </div>
+                    <!-- 居中标题 -->
+                    <span class="term-title">🖥 ChatFlow 的电脑</span>
                     <span class="term-ops-count" v-if="(group as any).tools.length > 1">{{ (group as any).tools.length }} ops</span>
                     <span class="tool-chevron" :class="{ open: !isSandboxCollapsed(si) }">›</span>
-                    <!-- ChatFlow sparkle 图标 — 运行时呼吸闪烁 -->
-                    <span class="term-cf-logo" :class="{ active: isSandboxRunning((group as any).tools) }">
-                      <svg width="16" height="16" viewBox="0 0 32 32" fill="none">
-                        <path d="M16 4C16 4 17.5 11 23 14C17.5 17 16 24 16 24C16 24 14.5 17 9 14C14.5 11 16 4 16 4Z" fill="currentColor"/>
-                        <path d="M25 7C25 7 25.6 9.8 27.5 10.7C25.6 11.6 25 14.4 25 14.4C25 14.4 24.4 11.6 22.5 10.7C24.4 9.8 25 7 25 7Z" fill="currentColor" opacity="0.45"/>
-                      </svg>
-                    </span>
                   </div>
 
                   <!-- 终端内容：所有沙箱操作顺序展示 -->
                   <Transition name="slide">
-                    <div v-show="!isSandboxCollapsed(si)" class="term-body">
+                    <div v-show="!isSandboxCollapsed(si)" v-auto-scroll class="term-body">
                       <template v-for="(item, ii) in (group as any).tools" :key="ii">
                         <!-- 操作间分隔线 -->
                         <div v-if="ii > 0" class="term-divider"></div>
 
                         <!-- sandbox_write -->
                         <template v-if="item.tc.name === 'sandbox_write'">
-                          <div class="term-line term-line--dimmed">
-                            <span class="term-prompt-sign">$</span>
-                            <span>cat &gt; {{ (item.tc.input as any).path || 'file' }} &lt;&lt; 'EOF'</span>
-                          </div>
-                          <pre v-if="(item.tc.input as any).content" class="term-code-inline">{{ (item.tc.input as any).content }}</pre>
-                          <div v-if="(item.tc.input as any).content" class="term-line term-line--dimmed"><span>EOF</span></div>
-                          <div v-if="item.tc.done && item.tc.output" class="term-line term-line--ok">{{ item.tc.output }}</div>
+                          <!-- 参数正在生成中（tool_call_start placeholder）→ 显示 loading -->
+                          <template v-if="(item.tc.input as any)._generating">
+                            <div class="term-line term-line--generating">
+                              <span class="term-prompt-sign">$</span>
+                              <span class="term-generating-text">正在生成文件内容</span>
+                              <span class="term-generating-dots">...</span>
+                            </div>
+                          </template>
+                          <template v-else>
+                            <div class="term-line term-line--dimmed">
+                              <span class="term-prompt-sign">$</span>
+                              <span>cat &gt; {{ (item.tc.input as any).path || 'file' }} &lt;&lt; 'EOF'</span>
+                            </div>
+                            <pre v-if="(item.tc.input as any).content" class="term-code-inline">{{ (item.tc.input as any).content }}</pre>
+                            <div v-if="(item.tc.input as any).content" class="term-line term-line--dimmed"><span>EOF</span></div>
+                            <div v-if="item.tc.done && item.tc.output" class="term-line term-line--ok">{{ item.tc.output }}</div>
+                          </template>
                         </template>
 
                         <!-- sandbox_read -->
@@ -740,11 +850,11 @@ function cancelEdit() { isEditing.value = false }
               <span class="think-hd-left">
                 <!-- 旋转星星图标（内容生成中）或静态图标（已完成） -->
                 <svg v-if="!sec.content" class="think-spin-icon" width="13" height="13" viewBox="0 0 24 24" fill="none">
-                  <path d="M12 3C12 3 13.2 8.8 18 11C13.2 13.2 12 19 12 19C12 19 10.8 13.2 6 11C10.8 8.8 12 3 12 3Z" fill="#7c3aed"/>
-                  <path d="M19.5 4C19.5 4 20.1 6.6 22 7.5C20.1 8.4 19.5 11 19.5 11C19.5 11 18.9 8.4 17 7.5C18.9 6.6 19.5 4 19.5 4Z" fill="#7c3aed" opacity="0.4"/>
+                  <path d="M12 3C12 3 13.2 8.8 18 11C13.2 13.2 12 19 12 19C12 19 10.8 13.2 6 11C10.8 8.8 12 3 12 3Z" fill="#00AEEC"/>
+                  <path d="M19.5 4C19.5 4 20.1 6.6 22 7.5C20.1 8.4 19.5 11 19.5 11C19.5 11 18.9 8.4 17 7.5C18.9 6.6 19.5 4 19.5 4Z" fill="#00AEEC" opacity="0.4"/>
                 </svg>
                 <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none">
-                  <path d="M12 3C12 3 13.2 8.8 18 11C13.2 13.2 12 19 12 19C12 19 10.8 13.2 6 11C10.8 8.8 12 3 12 3Z" fill="#7c3aed" opacity="0.6"/>
+                  <path d="M12 3C12 3 13.2 8.8 18 11C13.2 13.2 12 19 12 19C12 19 10.8 13.2 6 11C10.8 8.8 12 3 12 3Z" fill="#00AEEC" opacity="0.6"/>
                 </svg>
                 <span class="think-title">{{ sec.content ? '推理过程' : '思考中...' }}</span>
               </span>
@@ -756,7 +866,7 @@ function cancelEdit() { isEditing.value = false }
               </span>
             </button>
             <Transition name="think-slide">
-              <div v-if="isThinkExpanded(si)" class="think-body">{{ sec.thinking }}</div>
+              <div v-if="isThinkExpanded(si)" v-auto-scroll class="think-body">{{ sec.thinking }}</div>
             </Transition>
           </div>
 
@@ -765,6 +875,16 @@ function cancelEdit() { isEditing.value = false }
 
         </div>
         <!-- /sections -->
+
+        <!-- 文件产物卡片（sandbox_write 生成的文件） -->
+        <div v-if="fileArtifacts.length > 0" class="file-artifacts">
+          <FileArtifactCard
+            v-for="(f, fi) in fileArtifacts"
+            :key="fi"
+            :file="f"
+            @select="emit('selectFile', $event)"
+          />
+        </div>
 
         <!-- 操作行 -->
         <div v-if="hasContent || messageIndex !== undefined" class="ai-actions">
@@ -801,25 +921,26 @@ function cancelEdit() { isEditing.value = false }
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  /* 长对话虚拟渲染优化：屏幕外消息跳过渲染，滚动到可见时自动渲染 */
   content-visibility: auto;
-  contain-intrinsic-size: auto 120px;  /* 预估消息高度，防止滚动条跳动 */
+  contain-intrinsic-size: auto 120px;
 }
 
-/* 用户 */
+/* 用户 — Bilibili 风格 */
 .msg.user { flex-direction: row-reverse; }
 .user-avatar {
-  width: 34px; height: 34px;
+  width: 36px; height: 36px;
   border-radius: 50%;
-  background: #f4f4f5;
-  border: 1.5px solid #e4e4e7;
+  background: linear-gradient(135deg, #E3F6FD 0%, #FDE8EF 100%);
+  border: 2px solid #D0EEF9;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
   margin-top: 2px;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+  box-shadow: 0 2px 8px rgba(0,174,236,0.1);
+  transition: transform 0.2s;
 }
+.msg.user:hover .user-avatar { transform: scale(1.05); }
 .user-wrap {
   display: flex;
   flex-direction: column;
@@ -835,34 +956,35 @@ function cancelEdit() { isEditing.value = false }
   cursor: zoom-in;
 }
 .user-bubble {
-  background: #f4f4f4;
-  color: #0d0d0d;
+  background: #E3F6FD;
+  color: #18191C;
   padding: 11px 18px;
-  border-radius: 18px;
+  border-radius: 20px 20px 4px 20px;
   font-size: 14.5px;
   line-height: 1.65;
   white-space: pre-wrap;
   word-break: break-word;
-  box-shadow: none;
+  box-shadow: 0 1px 4px rgba(0,174,236,0.08);
   letter-spacing: -0.1px;
+  border: 1px solid #D0EEF9;
 }
 
 /* ── Workflow plan card ── */
 .wf-card {
   background: #fff;
-  border: 1.5px solid #e0e7ff;
-  border-radius: 14px;
+  border: 1.5px solid #D0EEF9;
+  border-radius: 16px;
   overflow: hidden;
   max-width: 320px;
-  box-shadow: 0 2px 10px rgba(99,102,241,0.08);
+  box-shadow: 0 2px 10px rgba(0,174,236,0.08);
 }
 .wf-card-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 9px 12px 8px;
-  background: linear-gradient(135deg, #eef2ff 0%, #f5f3ff 100%);
-  border-bottom: 1px solid #e0e7ff;
+  background: linear-gradient(135deg, #E3F6FD 0%, #FDE8EF 100%);
+  border-bottom: 1px solid #D0EEF9;
 }
 .wf-card-badge {
   display: flex;
@@ -870,13 +992,13 @@ function cancelEdit() { isEditing.value = false }
   gap: 5px;
   font-size: 12px;
   font-weight: 700;
-  color: #4f46e5;
+  color: #00AEEC;
 }
 .wf-card-count {
   font-size: 11px;
   font-weight: 600;
-  color: #8b5cf6;
-  background: rgba(139,92,246,0.1);
+  color: #FB7299;
+  background: rgba(251,114,153,0.08);
   padding: 1px 7px;
   border-radius: 10px;
 }
@@ -906,14 +1028,14 @@ function cancelEdit() { isEditing.value = false }
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  background: #eef2ff;
-  border: 1px solid #c7d2fe;
+  background: #E3F6FD;
+  border: 1px solid #B8E6F9;
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 9.5px;
   font-weight: 700;
-  color: #6366f1;
+  color: #00AEEC;
   flex-shrink: 0;
 }
 .wf-step-title {
@@ -943,39 +1065,40 @@ function cancelEdit() { isEditing.value = false }
   flex-shrink: 0;
 }
 
-/* AI */
+/* AI — Bilibili 风格 */
 .msg.assistant { flex-direction: row; }
 .ai-avatar {
-  width: 34px; height: 34px;
-  border-radius: 10px;          /* 改为圆角方形，与 logo/favicon 风格统一 */
-  background: #ffffff;
-  border: 1.5px solid #e4e4e7;
+  width: 36px; height: 36px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #E3F6FD 0%, #FDE8EF 100%);
+  border: 2px solid #D0EEF9;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
   margin-top: 2px;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.07);
-  transition: box-shadow 0.3s, border-color 0.3s;
+  box-shadow: 0 2px 8px rgba(0,174,236,0.1);
+  transition: all 0.3s cubic-bezier(0.34,1.56,0.64,1);
 }
 .msg.assistant:hover .ai-avatar {
-  border-color: #d1d5db;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.10);
+  border-color: #00AEEC;
+  box-shadow: 0 3px 12px rgba(0,174,236,0.15);
+  transform: scale(1.06) rotate(-3deg);
 }
-/* 呼吸动画 — 思考/加载中 */
+/* 呼吸动画 — 纯 opacity + border 变化，不改变尺寸避免遮挡 */
 .ai-avatar--breathing {
-  animation: ai-breathe 1.5s ease-in-out infinite !important;
-  border-color: #6B9EFF !important;
-  background: #f0f6ff !important;
+  animation: ai-breathe 2s ease-in-out infinite !important;
+  border-color: #00AEEC !important;
+  background: linear-gradient(135deg, #E3F6FD 0%, #D0EEF9 100%) !important;
 }
 @keyframes ai-breathe {
   0%, 100% {
-    box-shadow: 0 0 0 0 rgba(107,158,255,0.3), 0 1px 4px rgba(0,0,0,0.07);
-    transform: scale(1);
+    border-color: #00AEEC;
+    box-shadow: 0 0 8px rgba(0,174,236,0.25);
   }
   50% {
-    box-shadow: 0 0 0 5px rgba(107,158,255,0), 0 1px 4px rgba(107,158,255,0.15);
-    transform: scale(1.04);
+    border-color: #FB7299;
+    box-shadow: 0 0 8px rgba(251,114,153,0.25);
   }
 }
 .ai-content-wrap {
@@ -1039,11 +1162,11 @@ function cancelEdit() { isEditing.value = false }
 .section-wrap.step-done    .step-title { color: #6b7280; }
 .section-wrap.step-failed  .step-title { color: #dc2626; }
 
-/* ── 工具调用 ── */
+/* ── 工具调用 — Bilibili 风格 ── */
 .tool-calls { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
 .tool-block {
   border: 1px solid var(--cf-border);
-  border-radius: 12px;
+  border-radius: 14px;
   overflow: hidden;
   background: var(--cf-card);
   box-shadow: var(--cf-shadow-xs);
@@ -1056,18 +1179,18 @@ function cancelEdit() { isEditing.value = false }
 }
 .tool-block-sources .tool-header-flat {
   background: #fff;
-  border: 1px solid #e0e7ff;
-  border-left: 3px solid #a5b4fc;
-  border-radius: 10px;
+  border: 1px solid #D0EEF9;
+  border-left: 3px solid #00AEEC;
+  border-radius: 12px;
   padding: 6px 12px 6px 10px;
-  box-shadow: 0 1px 6px rgba(99,102,241,0.06);
+  box-shadow: 0 1px 6px rgba(0,174,236,0.06);
   transition: box-shadow 0.2s, border-color 0.2s, transform 0.2s ease-out;
   gap: 7px;
 }
 .tool-block-sources .tool-header-flat:hover {
-  border-color: #c4b5fd;
-  border-left-color: #6366f1;
-  box-shadow: 0 3px 12px rgba(99,102,241,0.12);
+  border-color: #B8E6F9;
+  border-left-color: #0095CC;
+  box-shadow: 0 3px 12px rgba(0,174,236,0.12);
   transform: translateY(-1px);
 }
 .tool-header {
@@ -1111,7 +1234,7 @@ function cancelEdit() { isEditing.value = false }
   animation: fade-row 0.2s ease both;
   min-width: 0;
 }
-.search-url-row:hover { background: var(--cf-active); color: #4f46e5; }
+.search-url-row:hover { background: var(--cf-active); color: #0095CC; }
 @keyframes fade-row { from { opacity: 0; transform: translateX(-4px); } to { opacity: 1; transform: translateX(0); } }
 .url-status { display: flex; align-items: center; flex-shrink: 0; }
 .url-favicon { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; }
@@ -1121,14 +1244,14 @@ function cancelEdit() { isEditing.value = false }
   color: var(--cf-text-3); text-decoration: none; font-size: 12px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 420px;
 }
-.fetch-url-link:hover { color: #4f46e5; }
+.fetch-url-link:hover { color: #0095CC; }
 
 /* 普通工具输出 */
 .tool-output-plain { display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; padding: 4px 2px; color: var(--cf-text-3); }
 .tool-tag {
-  flex-shrink: 0; padding: 1px 7px; border-radius: 5px;
+  flex-shrink: 0; padding: 1px 7px; border-radius: 10px;
   font-size: 11px; font-weight: 600;
-  background: #eef2ff; color: #4f46e5; border: 1px solid #e0e7ff;
+  background: #E3F6FD; color: #0095CC; border: 1px solid #D0EEF9;
 }
 
 /* 折叠动画 */
@@ -1139,19 +1262,27 @@ function cancelEdit() { isEditing.value = false }
 @keyframes spin { to { transform: rotate(360deg); } }
 .spin { animation: spin 1s linear infinite; transform-origin: center; }
 
-/* 操作行 */
+/* 文件产物 */
+.file-artifacts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+/* 操作行 — Bilibili 风格 */
 .ai-actions { display: flex; gap: 4px; margin-top: 8px; opacity: 0; transition: opacity 0.2s; }
 .msg.assistant:hover .ai-actions { opacity: 1; }
 .action-btn {
   display: inline-flex; align-items: center; gap: 5px;
-  padding: 4px 10px;
+  padding: 4px 12px;
   background: var(--cf-card); border: 1.5px solid var(--cf-border);
-  border-radius: 8px; color: var(--cf-text-4);
+  border-radius: 20px; color: var(--cf-text-4);
   font-size: 12px; font-weight: 500; font-family: inherit;
-  cursor: pointer; transition: all 0.15s;
+  cursor: pointer; transition: all 0.2s cubic-bezier(0.34,1.56,0.64,1);
 }
-.action-btn:hover { border-color: #a5b4fc; color: var(--cf-indigo); background: var(--cf-active); }
-.action-btn.copied { border-color: #bbf7d0; color: #16a34a; background: #f0fdf4; }
+.action-btn:hover { border-color: #00AEEC; color: #00AEEC; background: #E3F6FD; transform: scale(1.04); }
+.action-btn.copied { border-color: #8AE0C0; color: #00B578; background: #D5F5E8; }
 
 /* User message actions */
 .user-actions {
@@ -1160,29 +1291,30 @@ function cancelEdit() { isEditing.value = false }
 .msg.user:hover .user-actions { opacity: 1; }
 .action-btn-sm {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 26px; height: 26px; border-radius: 6px;
+  width: 26px; height: 26px; border-radius: 8px;
   background: var(--cf-card); border: 1.5px solid var(--cf-border);
   color: var(--cf-text-4); cursor: pointer; transition: all 0.15s;
 }
-.action-btn-sm:hover { border-color: #a5b4fc; color: var(--cf-indigo); background: var(--cf-active); }
+.action-btn-sm:hover { border-color: #00AEEC; color: #00AEEC; background: #E3F6FD; }
 
 /* Edit mode */
-.edit-wrap { width: 100%; max-width: 500px; }
+.edit-wrap { width: 100%; max-width: 86%; min-width: 320px; }
 .edit-textarea {
-  width: 100%; padding: 10px 14px; border: 1.5px solid var(--cf-indigo);
-  border-radius: 12px; font-size: 14px; font-family: inherit;
-  resize: vertical; min-height: 60px; background: var(--cf-card);
+  width: 100%; padding: 10px 14px; border: 2px solid #00AEEC;
+  border-radius: 14px; font-size: 14px; font-family: inherit;
+  resize: vertical; min-height: 80px; background: var(--cf-card);
   color: var(--cf-text-1); outline: none; line-height: 1.6;
 }
 .edit-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
 .edit-btn {
-  padding: 5px 14px; border-radius: 8px; font-size: 12.5px;
+  padding: 5px 14px; border-radius: 20px; font-size: 12.5px;
   font-weight: 500; font-family: inherit; cursor: pointer; border: none;
+  transition: all 0.15s;
 }
 .edit-cancel { background: var(--cf-hover); color: var(--cf-text-3); }
 .edit-cancel:hover { background: var(--cf-border); }
-.edit-submit { background: var(--cf-indigo); color: #fff; }
-.edit-submit:hover { opacity: 0.9; }
+.edit-submit { background: linear-gradient(135deg, #00AEEC, #23C1F0); color: #fff; box-shadow: 0 2px 8px rgba(0,174,236,0.25); }
+.edit-submit:hover { box-shadow: 0 4px 14px rgba(0,174,236,0.35); transform: translateY(-1px); }
 
 </style>
 
@@ -1206,18 +1338,18 @@ function cancelEdit() { isEditing.value = false }
 .markdown-body em { font-style: italic; }
 
 .markdown-body a {
-  color: #6366f1; text-decoration: underline;
-  text-decoration-color: #c7d2fe; text-underline-offset: 2px;
+  color: #00AEEC; text-decoration: underline;
+  text-decoration-color: #B8E6F9; text-underline-offset: 2px;
 }
-.markdown-body a:hover { text-decoration-color: #6366f1; }
+.markdown-body a:hover { text-decoration-color: #00AEEC; }
 
-/* 行内代码 */
+/* 行内代码 — Bilibili 蓝 */
 .markdown-body code {
-  background: #eef2ff; color: #4f46e5;
+  background: #E3F6FD; color: #0095CC;
   padding: 2px 7px; border-radius: 6px;
   font-family: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
   font-size: 13px; font-weight: 500;
-  border: 1px solid #e0e7ff;
+  border: 1px solid #D0EEF9;
 }
 
 /* ── 代码块 ── */
@@ -1252,8 +1384,8 @@ function cancelEdit() { isEditing.value = false }
   cursor: pointer; transition: all 0.15s; line-height: 1.4;
 }
 .markdown-body .cb-btn:hover { border-color: #8b949e; color: #24292f; background: #fff; }
-.markdown-body .cb-btn.cb-done { border-color: #2da44e !important; color: #1a7f37 !important; background: #dafbe1 !important; }
-.markdown-body .cb-preview:hover { border-color: #6366f1; color: #4f46e5; background: #eef2ff; }
+.markdown-body .cb-btn.cb-done { border-color: #00B578 !important; color: #00875A !important; background: #D5F5E8 !important; }
+.markdown-body .cb-preview:hover { border-color: #FB7299; color: #FB7299; background: #FDE8EF; }
 .markdown-body .code-pre {
   margin: 0; padding: 14px 18px; overflow-x: auto;
   background: #f6f8fa; font-size: 13px; line-height: 1.65;
@@ -1265,8 +1397,8 @@ function cancelEdit() { isEditing.value = false }
 }
 
 .markdown-body blockquote {
-  border-left: 3px solid #a5b4fc; padding: 8px 16px; color: #6b7280;
-  margin: 12px 0; background: #f5f3ff; border-radius: 0 8px 8px 0; font-style: italic;
+  border-left: 3px solid #00AEEC; padding: 8px 16px; color: #61666D;
+  margin: 12px 0; background: #E3F6FD; border-radius: 0 10px 10px 0; font-style: italic;
 }
 .markdown-body hr { border: none; border-top: 1px solid #e4e6ef; margin: 18px 0; }
 
@@ -1289,14 +1421,14 @@ function cancelEdit() { isEditing.value = false }
 .markdown-body tr:nth-child(even) td { background: #f9fafb; }
 .markdown-body tr:hover td { background: #eef2ff; }
 
-/* ── 推理过程块 ── */
+/* ── 推理过程块 — Bilibili 风格 ── */
 .think-block {
-  border: 1px solid #ede9fe;
-  border-radius: 12px;
+  border: 1px solid #D0EEF9;
+  border-radius: 14px;
   overflow: hidden;
   background: #fff;
   margin-bottom: 8px;
-  box-shadow: 0 1px 6px rgba(124,58,237,0.06);
+  box-shadow: 0 1px 6px rgba(0,174,236,0.06);
 }
 .think-toggle {
   display: flex;
@@ -1309,12 +1441,12 @@ function cancelEdit() { isEditing.value = false }
   cursor: pointer;
   font-size: 12.5px;
   font-family: inherit;
-  color: #7c3aed;
+  color: #00AEEC;
   text-align: left;
   user-select: none;
   transition: background 0.15s;
 }
-.think-toggle:hover { background: rgba(139,92,246,0.04); }
+.think-toggle:hover { background: rgba(0,174,236,0.04); }
 .think-hd-left {
   display: flex;
   align-items: center;
@@ -1324,10 +1456,10 @@ function cancelEdit() { isEditing.value = false }
   display: flex;
   align-items: center;
   gap: 5px;
-  color: #a78bfa;
+  color: #66D3F5;
 }
 .think-title { font-weight: 600; letter-spacing: 0.1px; }
-.think-len { font-size: 10.5px; color: #c4b5fd; font-weight: 400; }
+.think-len { font-size: 10.5px; color: #99E5F9; font-weight: 400; }
 .think-spin-icon { animation: think-rotate 1.8s linear infinite; transform-origin: center; flex-shrink: 0; }
 @keyframes think-rotate { to { transform: rotate(360deg); } }
 .think-chevron {
@@ -1339,14 +1471,14 @@ function cancelEdit() { isEditing.value = false }
 .think-body {
   padding: 10px 14px 12px;
   font-size: 12px;
-  color: #6b7280;
+  color: #61666D;
   line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-word;
-  border-top: 1px solid #f3e8ff;
+  border-top: 1px solid #D0EEF9;
   max-height: 320px;
   overflow-y: auto;
-  background: #faf7ff;
+  background: #F0FAFD;
   font-family: 'Fira Code', 'Cascadia Code', Consolas, monospace;
 }
 .think-slide-enter-active,
@@ -1385,15 +1517,30 @@ function cancelEdit() { isEditing.value = false }
 }
 .term-titlebar:hover { background: #eef0f2; }
 
-.term-icon { color: #9499a0; flex-shrink: 0; }
+/* macOS 三色圆点 */
+.term-dots {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+.term-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+.term-dot--red    { background: #FF5F57; }
+.term-dot--yellow { background: #FEBC2E; }
+.term-dot--green  { background: #28C840; }
 
 .term-title {
   flex: 1;
   font-size: 12px;
   font-weight: 600;
-  color: #18191c;
+  color: #61666D;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   letter-spacing: 0.02em;
+  text-align: center;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1477,7 +1624,7 @@ function cancelEdit() { isEditing.value = false }
 }
 .term-cmd-text { color: #18191c; font-weight: 500; }
 
-/* 内联代码展示 */
+/* 内联代码展示（不独立滚动，由 term-body 统一滚动） */
 .term-code-inline {
   margin: 2px 0 2px 18px;
   padding: 6px 10px;
@@ -1486,14 +1633,12 @@ function cancelEdit() { isEditing.value = false }
   color: #61666d;
   font-size: 12px;
   line-height: 1.55;
-  max-height: 200px;
-  overflow-y: auto;
   background: #f1f2f3;
   border-radius: 6px;
   border: 1px solid #e3e5e7;
 }
 
-/* 流式实时输出（执行中） */
+/* 流式实时输出（不独立滚动，由 term-body 统一滚动 + 自动跟随） */
 .term-stream-output {
   margin: 4px 0;
   padding: 6px 10px;
@@ -1502,10 +1647,22 @@ function cancelEdit() { isEditing.value = false }
   color: #18191c;
   font-size: 12.5px;
   line-height: 1.7;
-  max-height: 400px;
-  overflow-y: auto;
   background: #f6f7f8;
   border-radius: 6px;
+}
+
+/* 工具参数生成中 loading — 纯 opacity 闪烁，不改变宽度避免抖动 */
+.term-line--generating { color: #00AEEC; }
+.term-generating-text {
+  font-weight: 500;
+  animation: generating-pulse 1.5s ease-in-out infinite;
+}
+.term-generating-dots {
+  animation: generating-pulse 1.5s ease-in-out infinite;
+}
+@keyframes generating-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
 }
 
 /* 闪烁光标 */

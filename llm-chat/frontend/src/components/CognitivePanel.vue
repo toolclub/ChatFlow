@@ -1,18 +1,23 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue'
-import type { CognitiveState, PlanStep, ToolHistoryEvent } from '../types'
+import type { CognitiveState, PlanStep, ToolHistoryEvent, FileArtifact } from '../types'
+import { isPreviewable } from '../types'
 import { Delete } from '@element-plus/icons-vue'
 import PlanFlowCanvas from './PlanFlowCanvas.vue'
+import hljs from 'highlight.js/lib/common'
+import { buildIframeSrcdoc } from '../utils/codePreviewBuilders'
 
 const props = defineProps<{
   cognitive: CognitiveState
   loading: boolean
   userMessage?: string
+  selectedFile?: FileArtifact | null
 }>()
 
 const emit = defineEmits<{
   collapse: []
   modifyPlan: [plan: PlanStep[]]
+  closeFile: []
 }>()
 
 // ── Local plan state ──────────────────────────────────────────────────────────
@@ -44,8 +49,10 @@ const insertMode = ref(false)
 function saveEdit() {
   if (!editData.value.title.trim()) return
   const updated = [...localPlan.value]
+  let changeIdx: number
   if (insertMode.value) {
-    updated.splice(editingIndex.value + 1, 0, {
+    changeIdx = editingIndex.value + 1
+    updated.splice(changeIdx, 0, {
       id: `new-${Date.now()}`,
       title: editData.value.title.trim(),
       description: editData.value.description,
@@ -53,11 +60,18 @@ function saveEdit() {
       result: '',
     })
   } else {
-    updated[editingIndex.value] = {
-      ...updated[editingIndex.value],
+    changeIdx = editingIndex.value
+    updated[changeIdx] = {
+      ...updated[changeIdx],
       title: editData.value.title.trim(),
       description: editData.value.description,
+      status: 'pending',   // 编辑过的步骤重置为 pending
+      result: '',
     }
+  }
+  // 从修改点开始，后续所有步骤重置为 pending（需要重新执行）
+  for (let i = changeIdx + 1; i < updated.length; i++) {
+    updated[i] = { ...updated[i], status: 'pending', result: '' }
   }
   localPlan.value = updated
   isDirty.value = true
@@ -66,7 +80,13 @@ function saveEdit() {
 
 function deleteStep() {
   if (localPlan.value.length <= 1) return
-  localPlan.value = localPlan.value.filter((_, i) => i !== editingIndex.value)
+  const delIdx = editingIndex.value
+  const updated = localPlan.value.filter((_, i) => i !== delIdx)
+  // 删除点之后的步骤重置为 pending
+  for (let i = delIdx; i < updated.length; i++) {
+    updated[i] = { ...updated[i], status: 'pending', result: '' }
+  }
+  localPlan.value = updated
   isDirty.value = true
   editDialogVisible.value = false
 }
@@ -140,7 +160,7 @@ const doneCount = computed(() => localPlan.value.filter(s => s.status === 'done'
 
 // ── Tool history helpers ──────────────────────────────────────────────────────
 const HIST_TOOL_META: Record<string, { label: string; icon: string; color: string }> = {
-  web_search:           { label: '搜索了网络',  icon: '🔍', color: '#6366f1' },
+  web_search:           { label: '搜索了网络',  icon: '🔍', color: '#00AEEC' },
   fetch_webpage:        { label: '阅读了网页',  icon: '🌐', color: '#0ea5e9' },
   get_current_datetime: { label: '获取了时间',  icon: '🕐', color: '#0ea5e9' },
   calculator:           { label: '执行了计算',  icon: '🧮', color: '#10b981' },
@@ -160,26 +180,103 @@ function histFormatTime(ts: number): string {
 }
 // 有 live trace 时显示实时日志，否则显示历史工具记录
 const showLiveTrace = computed(() => props.loading || props.cognitive.traceLog.length > 0)
+
+// ── 文件预览 ─────────────────────────────────────────────────────────────────
+// 当前面板 tab：plan（执行计划） / file（文件预览）
+// 初始值：如果组件挂载时已有 selectedFile，直接切到文件 tab
+const activeTab = ref<'plan' | 'file'>(props.selectedFile ? 'file' : 'plan')
+
+// 当 selectedFile 变化时自动切到文件 tab（immediate 处理组件首次挂载）
+watch(() => props.selectedFile, (f) => {
+  if (f) activeTab.value = 'file'
+}, { immediate: true })
+
+// 文件预览模式
+const fileViewMode = ref<'code' | 'preview'>('code')
+
+// 语法高亮后的 HTML
+const highlightedCode = computed(() => {
+  if (!props.selectedFile) return ''
+  const lang = props.selectedFile.language
+  try {
+    if (hljs.getLanguage(lang)) {
+      return hljs.highlight(props.selectedFile.content, { language: lang, ignoreIllegals: true }).value
+    }
+    return hljs.highlightAuto(props.selectedFile.content).value
+  } catch {
+    return props.selectedFile.content
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+  }
+})
+
+// iframe srcdoc for HTML preview
+const previewSrcdoc = computed(() => {
+  if (!props.selectedFile) return ''
+  return buildIframeSrcdoc(props.selectedFile.content, props.selectedFile.language)
+})
+
+const canPreview = computed(() => props.selectedFile ? isPreviewable(props.selectedFile.language) : false)
+
+const fileSizeKb = computed(() => {
+  if (!props.selectedFile) return '0'
+  return (props.selectedFile.content.length / 1024).toFixed(1)
+})
+
+function downloadFile() {
+  if (!props.selectedFile) return
+  const blob = new window.Blob([props.selectedFile.content], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = props.selectedFile.name
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+const fileCopied = ref(false)
+function copyFileContent() {
+  if (!props.selectedFile) return
+  navigator.clipboard.writeText(props.selectedFile.content).catch(() => {})
+  fileCopied.value = true
+  setTimeout(() => { fileCopied.value = false }, 2000)
+}
 </script>
 
 <template>
   <div class="cognitive-panel">
 
-    <!-- Header -->
+    <!-- Header with tabs -->
     <div class="panel-hd">
       <div class="hd-left">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
-          <path d="M12 3C12 3 13.2 8.8 18 11C13.2 13.2 12 19 12 19C12 19 10.8 13.2 6 11C10.8 8.8 12 3 12 3Z" fill="#8b5cf6"/>
-        </svg>
-        <span class="hd-title">执行计划</span>
-        <span v-if="loading && cognitive.plan.length > 0" class="hd-progress">
-          {{ doneCount }}/{{ cognitive.plan.length }}
-        </span>
+        <!-- Tab 切换 -->
+        <button class="hd-tab" :class="{ active: activeTab === 'plan' }" @click="activeTab = 'plan'">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none">
+            <path d="M12 3C12 3 13.2 8.8 18 11C13.2 13.2 12 19 12 19C12 19 10.8 13.2 6 11C10.8 8.8 12 3 12 3Z" fill="currentColor"/>
+          </svg>
+          执行计划
+          <span v-if="loading && cognitive.plan.length > 0" class="hd-progress">
+            {{ doneCount }}/{{ cognitive.plan.length }}
+          </span>
+        </button>
+        <div v-if="selectedFile" class="hd-tab" :class="{ active: activeTab === 'file' }" @click="activeTab = 'file'">
+          <span class="hd-tab-file-icon">📄</span>
+          <span class="hd-tab-filename">{{ selectedFile.name }}</span>
+          <span class="hd-tab-close" @click.stop="emit('closeFile'); activeTab = 'plan'" title="关闭">
+            <svg width="8" height="8" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+              <path d="M12 4L4 12M4 4l8 8"/>
+            </svg>
+          </span>
+        </div>
       </div>
       <el-button size="small" text style="padding:4px;color:#9ca3af" @click="$emit('collapse')">
         <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M11 8L6 3v10l5-5z"/></svg>
       </el-button>
     </div>
+
+    <!-- ══ Tab: 执行计划 ══ -->
+    <div v-show="activeTab === 'plan'" class="tab-content plan-tab">
 
     <!-- Goal bar -->
     <div v-if="userMessage" class="goal-bar">
@@ -190,14 +287,21 @@ const showLiveTrace = computed(() => props.loading || props.cognitive.traceLog.l
     <!-- Empty -->
     <div v-if="localPlan.length === 0 && !loading" class="empty-state">
       <svg width="24" height="24" viewBox="0 0 48 48" fill="none" style="opacity:0.15">
-        <path d="M24 4C24 4 26.5 17 36 22C26.5 27 24 40 24 40C24 40 21.5 27 12 22C21.5 17 24 4 24 4Z" fill="#6366f1"/>
+        <path d="M24 4C24 4 26.5 17 36 22C26.5 27 24 40 24 40C24 40 21.5 27 12 22C21.5 17 24 4 24 4Z" fill="#00AEEC"/>
       </svg>
       <p>搜索/分析任务执行时，计划节点将在此展示</p>
     </div>
 
-    <!-- Skeleton -->
-    <div v-else-if="localPlan.length === 0 && loading" class="skel-area">
-      <div v-for="n in 3" :key="n" class="skel-node" :style="`opacity:${1-(n-1)*0.25}`" />
+    <!-- 加载中但尚无计划：友好状态提示（Bilibili 风格） -->
+    <div v-else-if="localPlan.length === 0 && loading" class="loading-hint">
+      <div class="hint-icon-wrap">
+        <svg class="hint-icon" width="28" height="28" viewBox="0 0 32 32" fill="none">
+          <path d="M16 4C16 4 17.5 11 23 14C17.5 17 16 24 16 24C16 24 14.5 17 9 14C14.5 11 16 4 16 4Z" fill="#00aeec"/>
+          <path d="M25 7C25 7 25.6 9.8 27.5 10.7C25.6 11.6 25 14.4 25 14.4C25 14.4 24.4 11.6 22.5 10.7C24.4 9.8 25 7 25 7Z" fill="#00aeec" opacity="0.4"/>
+        </svg>
+      </div>
+      <p class="hint-title">模型正在回答中</p>
+      <p class="hint-desc">当前问题无需多步计划，正在直接生成回答</p>
     </div>
 
     <!-- ── AntV X6 流程图画布 ── -->
@@ -278,6 +382,68 @@ const showLiveTrace = computed(() => props.loading || props.cognitive.traceLog.l
       </div>
     </div>
 
+    </div><!-- /plan-tab -->
+
+    <!-- ══ Tab: 文件预览 ══ -->
+    <div v-show="activeTab === 'file'" class="tab-content file-tab">
+      <template v-if="selectedFile">
+      <!-- 文件信息栏 -->
+      <div class="file-info-bar">
+        <span class="file-name-badge">{{ selectedFile.name }}</span>
+        <span class="file-lang-tag">{{ selectedFile.language }}</span>
+        <span class="file-size">{{ fileSizeKb }} KB</span>
+      </div>
+
+      <!-- 操作按钮栏 -->
+      <div class="file-actions-bar">
+        <button class="file-action-btn" :class="{ active: fileViewMode === 'code' }" @click="fileViewMode = 'code'">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
+          </svg>
+          代码
+        </button>
+        <button v-if="canPreview" class="file-action-btn" :class="{ active: fileViewMode === 'preview' }" @click="fileViewMode = 'preview'">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
+          </svg>
+          预览
+        </button>
+        <div class="file-actions-spacer"></div>
+        <button class="file-action-btn file-action-sm" :title="fileCopied ? '已复制' : '复制内容'" @click="copyFileContent">
+          <svg v-if="!fileCopied" width="12" height="12" viewBox="0 0 16 16" fill="none">
+            <rect x="5.5" y="5.5" width="8" height="9" rx="1.5" stroke="currentColor" stroke-width="1.4"/>
+            <path d="M3 10.5V3a1 1 0 011-1h7.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+          </svg>
+          <svg v-else width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#00B578" stroke-width="2" stroke-linecap="round">
+            <polyline points="3 8 6 11 13 5"/>
+          </svg>
+        </button>
+        <button class="file-action-btn file-action-sm" title="下载文件" @click="downloadFile">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+        </button>
+      </div>
+
+      <!-- 代码视图 -->
+      <div v-if="fileViewMode === 'code'" class="file-code-view">
+        <pre class="file-code-pre"><code class="hljs" v-html="highlightedCode"></code></pre>
+      </div>
+
+      <!-- 预览视图 -->
+      <div v-if="fileViewMode === 'preview' && canPreview" class="file-preview-view">
+        <iframe
+          :srcdoc="previewSrcdoc"
+          class="file-preview-frame"
+          sandbox="allow-scripts allow-forms allow-modals allow-popups"
+        />
+      </div>
+      </template>
+      <div v-else class="file-tab-empty">
+        <p>点击对话中的文件卡片查看文件</p>
+      </div>
+    </div><!-- /file-tab -->
+
   </div>
 
   <!-- Edit / Insert dialog -->
@@ -314,10 +480,10 @@ const showLiveTrace = computed(() => props.loading || props.cognitive.traceLog.l
 <style scoped>
 @keyframes node-spin { to { transform: rotate(360deg); } }
 @keyframes node-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(139,92,246,0.18); }
-  50%       { box-shadow: 0 0 0 4px rgba(139,92,246,0); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(0,174,236,0.18); }
+  50%       { box-shadow: 0 0 0 4px rgba(0,174,236,0); }
 }
-@keyframes sk { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
 
 .cognitive-panel {
   width: 100%;
@@ -325,9 +491,9 @@ const showLiveTrace = computed(() => props.loading || props.cognitive.traceLog.l
   display: flex;
   flex-direction: column;
   background: #ffffff;
-  border-radius: var(--cf-radius-lg, 16px);
-  border: 1px solid var(--cf-border-soft, #EBEEF5);
-  box-shadow: var(--cf-shadow-sm, 0 4px 16px rgba(0,0,0,0.08));
+  border-radius: var(--cf-radius-lg, 18px);
+  border: 1px solid var(--cf-border-soft, #EBEDF0);
+  box-shadow: var(--cf-shadow-sm, 0 2px 8px rgba(0,0,0,0.06));
   overflow: hidden;
 }
 
@@ -343,25 +509,25 @@ const showLiveTrace = computed(() => props.loading || props.cognitive.traceLog.l
   border-bottom: 1px solid #e8eaf2;
   flex-shrink: 0;
 }
-.hd-left { display: flex; align-items: center; gap: 6px; }
+.hd-left { display: flex; align-items: center; gap: 2px; min-width: 0; flex: 1; overflow: hidden; }
 .hd-title { font-size: 12.5px; font-weight: 600; color: #111827; }
 .hd-progress {
-  font-size: 10.5px; font-weight: 600; color: #8b5cf6;
-  background: rgba(139,92,246,0.1); padding: 1px 7px; border-radius: 10px;
+  font-size: 10.5px; font-weight: 600; color: #00AEEC;
+  background: rgba(0,174,236,0.08); padding: 1px 7px; border-radius: 10px;
 }
 
-/* Goal */
+/* Goal — Bilibili 风格 */
 .goal-bar {
   display: flex; align-items: flex-start; gap: 6px;
   padding: 5px 12px;
-  background: rgba(139,92,246,0.03);
-  border-bottom: 1px solid rgba(139,92,246,0.07);
+  background: rgba(0,174,236,0.03);
+  border-bottom: 1px solid rgba(0,174,236,0.07);
   flex-shrink: 0;
 }
 .goal-chip {
-  font-size: 10px; font-weight: 600; color: #8b5cf6;
-  background: rgba(139,92,246,0.1); padding: 1px 5px;
-  border-radius: 4px; flex-shrink: 0; margin-top: 1px;
+  font-size: 10px; font-weight: 600; color: #00AEEC;
+  background: rgba(0,174,236,0.08); padding: 1px 5px;
+  border-radius: 10px; flex-shrink: 0; margin-top: 1px;
 }
 .goal-text { font-size: 11px; color: #374151; line-height: 1.4; }
 
@@ -373,15 +539,31 @@ const showLiveTrace = computed(() => props.loading || props.cognitive.traceLog.l
 }
 .empty-state p { font-size: 11px; color: #9ca3af; line-height: 1.6; max-width: 180px; }
 
-/* Skeleton */
-.skel-area {
+/* 加载友好提示（Bilibili 风格） */
+.loading-hint {
   flex: 1; display: flex; flex-direction: column;
-  gap: 6px; padding: 12px 10px; align-items: stretch;
+  align-items: center; justify-content: center;
+  gap: 8px; padding: 24px 16px; text-align: center;
 }
-.skel-node {
-  height: 34px; border-radius: 6px;
-  background: linear-gradient(90deg, #e2e8f0 25%, #f1f5f9 50%, #e2e8f0 75%);
-  background-size: 200% 100%; animation: sk 1.4s infinite;
+.hint-icon-wrap {
+  width: 48px; height: 48px; border-radius: 14px;
+  background: rgba(0, 174, 236, 0.06);
+  display: flex; align-items: center; justify-content: center;
+}
+.hint-icon {
+  animation: hint-breathe 2s ease-in-out infinite;
+}
+@keyframes hint-breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.88); }
+}
+.hint-title {
+  font-size: 13px; font-weight: 600; color: #18191c;
+  margin: 4px 0 0;
+}
+.hint-desc {
+  font-size: 11.5px; color: #9499a0; line-height: 1.5;
+  max-width: 200px;
 }
 
 /* ── AntV X6 画布容器 ── */
@@ -394,20 +576,20 @@ const showLiveTrace = computed(() => props.loading || props.cognitive.traceLog.l
   position: relative;
 }
 
-/* ── Dirty banner ── */
+/* ── Dirty banner — Bilibili 风格 ── */
 .dirty-banner {
   display: flex; align-items: center; justify-content: space-between;
   padding: 7px 10px;
-  background: rgba(99,102,241,0.05); border: 1px solid rgba(99,102,241,0.18);
-  border-radius: 8px; margin: 4px 8px 8px; gap: 8px;
+  background: rgba(0,174,236,0.04); border: 1px solid rgba(0,174,236,0.15);
+  border-radius: 10px; margin: 4px 8px 8px; gap: 8px;
 }
 .dirty-left { display: flex; align-items: center; gap: 6px; }
 .dirty-dot {
-  width: 6px; height: 6px; border-radius: 50%; background: #6366f1;
+  width: 6px; height: 6px; border-radius: 50%; background: #00AEEC;
   animation: blink 1.2s ease-in-out infinite; flex-shrink: 0;
 }
 @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
-.dirty-label { font-size: 11.5px; color: #4f46e5; font-weight: 500; }
+.dirty-label { font-size: 11.5px; color: #0095CC; font-weight: 500; }
 .dirty-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .dirty-undo {
   font-size: 11.5px; color: #6b7280; background: none; border: none;
@@ -418,11 +600,11 @@ const showLiveTrace = computed(() => props.loading || props.cognitive.traceLog.l
 .dirty-run {
   display: flex; align-items: center; gap: 5px;
   font-size: 11.5px; font-weight: 600; color: #fff;
-  background: #6366f1; border: none; cursor: pointer;
-  padding: 4px 10px; border-radius: 6px; font-family: inherit;
-  transition: background 0.12s, transform 0.1s;
+  background: linear-gradient(135deg, #00AEEC, #23C1F0); border: none; cursor: pointer;
+  padding: 4px 12px; border-radius: 20px; font-family: inherit;
+  transition: all 0.15s; box-shadow: 0 2px 6px rgba(0,174,236,0.2);
 }
-.dirty-run:hover { background: #4f46e5; transform: translateY(-1px); }
+.dirty-run:hover { box-shadow: 0 4px 12px rgba(0,174,236,0.3); transform: translateY(-1px); }
 .dirty-run:active { transform: translateY(0); }
 
 /* Reflection bar */
@@ -453,16 +635,16 @@ const showLiveTrace = computed(() => props.loading || props.cognitive.traceLog.l
   background: transparent;
   transition: background 0.15s;
 }
-.trace-resize-handle:hover { background: rgba(99,102,241,0.04); }
+.trace-resize-handle:hover { background: rgba(0,174,236,0.04); }
 .trace-resize-bar {
   width: 36px;
   height: 3px;
-  background: #e2e5f0;
+  background: #E3E5E7;
   border-radius: 99px;
   transition: background 0.2s, width 0.2s;
 }
 .trace-resize-handle:hover .trace-resize-bar {
-  background: #6366f1;
+  background: #00AEEC;
   width: 48px;
 }
 .trace-hd { font-size: 10px; font-weight: 600; color: #9ca3af; padding: 2px 12px 3px; text-transform: uppercase; letter-spacing: 0.06em; }
@@ -485,7 +667,7 @@ const showLiveTrace = computed(() => props.loading || props.cognitive.traceLog.l
   border-radius: 5px;
   transition: background 0.1s;
 }
-.hist-row:hover { background: rgba(99,102,241,0.04); }
+.hist-row:hover { background: rgba(0,174,236,0.04); }
 .hist-icon { font-size: 12px; flex-shrink: 0; line-height: 1.7; }
 .hist-body {
   flex: 1;
@@ -519,4 +701,184 @@ const showLiveTrace = computed(() => props.loading || props.cognitive.traceLog.l
 .banner-enter-from, .banner-leave-to { opacity: 0; transform: translateY(-6px); }
 .fadebar-enter-active, .fadebar-leave-active { transition: opacity 0.22s; }
 .fadebar-enter-from, .fadebar-leave-to { opacity: 0; }
+
+/* ── Tab 切换按钮 ── */
+.hd-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #9499A0;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hd-tab:hover { background: rgba(0,174,236,0.05); color: #61666D; }
+.hd-tab.active {
+  background: rgba(0,174,236,0.08);
+  color: #00AEEC;
+  font-weight: 600;
+}
+.hd-tab-file-icon { font-size: 11px; }
+.hd-tab-filename {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100px;
+}
+.hd-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: #9499A0;
+  cursor: pointer;
+  padding: 0;
+  margin-left: 2px;
+  transition: all 0.12s;
+  flex-shrink: 0;
+}
+.hd-tab-close:hover { background: rgba(242,93,89,0.1); color: #F25D59; }
+
+/* ── Tab content container ── */
+.tab-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.plan-tab { /* inherits from existing styles */ }
+.file-tab { flex: 1; }
+.file-tab-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #9499A0;
+  font-size: 12px;
+}
+
+/* ── 文件信息栏 ── */
+.file-info-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: rgba(0,174,236,0.03);
+  border-bottom: 1px solid rgba(0,174,236,0.07);
+  flex-shrink: 0;
+}
+.file-name-badge {
+  font-size: 12px;
+  font-weight: 600;
+  color: #18191C;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.file-lang-tag {
+  font-size: 10px;
+  font-weight: 600;
+  color: #00AEEC;
+  background: rgba(0,174,236,0.08);
+  padding: 1px 6px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  text-transform: uppercase;
+}
+.file-size {
+  font-size: 10.5px;
+  color: #9499A0;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* ── 操作按钮栏 ── */
+.file-actions-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-bottom: 1px solid #E3E5E7;
+  flex-shrink: 0;
+}
+.file-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid #E3E5E7;
+  border-radius: 8px;
+  background: #fff;
+  color: #61666D;
+  font-size: 11.5px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.file-action-btn:hover {
+  border-color: #00AEEC;
+  color: #00AEEC;
+  background: #E3F6FD;
+}
+.file-action-btn.active {
+  border-color: #00AEEC;
+  background: #E3F6FD;
+  color: #00AEEC;
+  font-weight: 600;
+}
+.file-action-sm {
+  padding: 4px 6px;
+}
+.file-actions-spacer { flex: 1; }
+
+/* ── 代码视图 ── */
+.file-code-view {
+  flex: 1;
+  overflow: auto;
+  background: #FAFBFC;
+}
+.file-code-pre {
+  margin: 0;
+  padding: 12px 16px;
+  font-size: 12.5px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
+}
+.file-code-pre code.hljs {
+  background: transparent !important;
+  padding: 0;
+  font-size: inherit;
+  line-height: inherit;
+  border: none;
+}
+
+/* ── 预览视图 ── */
+.file-preview-view {
+  flex: 1;
+  overflow: hidden;
+  background: #fff;
+}
+.file-preview-frame {
+  width: 100%;
+  height: 100%;
+  border: none;
+  display: block;
+}
 </style>

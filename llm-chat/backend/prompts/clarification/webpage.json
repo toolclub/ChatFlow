@@ -1,0 +1,29 @@
+{
+  "question": "我来帮你制作网页！先了解一下你的偏好",
+  "items": [
+    {
+      "id": "style",
+      "type": "single_choice",
+      "label": "设计风格",
+      "options": ["简约现代", "商务专业", "活泼创意", "严肃正式", "科技感"]
+    },
+    {
+      "id": "color",
+      "type": "single_choice",
+      "label": "主色调",
+      "options": ["蓝色系", "绿色系", "红色系", "深色系（暗色主题）", "跟随图片/主题"]
+    },
+    {
+      "id": "tech",
+      "type": "single_choice",
+      "label": "技术方案",
+      "options": ["纯 HTML/CSS/JS（单文件）", "加动画效果", "响应式（移动端适配）"]
+    },
+    {
+      "id": "note",
+      "type": "text",
+      "label": "其他要求（可选）",
+      "placeholder": "如需要哪些板块、特殊功能等…"
+    }
+  ]
+}

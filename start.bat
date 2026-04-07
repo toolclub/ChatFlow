@@ -87,4 +87,4 @@ echo     Container:   docker compose logs -f backend
 echo.
 echo   Run stop.bat to shut down all services.
 echo ============================================
-pause
+pause

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { nextTick, watch, ref, computed, onMounted, onUnmounted } from 'vue'
-import type { Message, SendPayload, AgentStatus, CognitiveState } from '../types'
+import type { Message, SendPayload, AgentStatus, CognitiveState, FileArtifact } from '../types'
 import MessageItem from './MessageItem.vue'
 import InputBox from './InputBox.vue'
 import { Lightning, EditPen, DataAnalysis, Grid, TrendCharts, Check, Loading } from '@element-plus/icons-vue'
@@ -13,23 +13,24 @@ const props = defineProps<{
   cognitive: CognitiveState
   hasCognitiveContent?: boolean
   panelOpen?: boolean
-  convTitle?: string        // 当前对话标题（第一条用户消息 / 后端生成摘要）
-  canContinue?: boolean     // true 时在最后一条消息下方显示"继续"按钮
+  convTitle?: string
+  canContinue?: boolean
 }>()
 
 const emit = defineEmits<{
   send: [payload: SendPayload]
   stop: []
-  togglePanel: []                 // 切换认知面板展开/折叠
+  togglePanel: []
   clarificationSubmit: [answers: Record<string, string | string[]>]
-  continue: []                    // 用户点击"继续"按钮
+  continue: []
+  dismissContinue: []
   regenerate: []
   editMessage: [payload: { index: number; content: string }]
+  selectFile: [file: FileArtifact]
 }>()
 
 const messagesContainer = ref<HTMLDivElement>()
 
-// 用户是否手动向上滚动了（若是则不强制跳底）
 let userScrolledUp = false
 
 function onMessagesScroll() {
@@ -46,13 +47,13 @@ function scrollToBottom(force = false) {
   }
 }
 
-// 流式进度模拟（0-95 时缓慢增加，完成后跳到100）
+// 流式进度模拟
 const progress = ref(0)
 let progressTimer: ReturnType<typeof setInterval> | null = null
 
 watch(() => props.loading, (val) => {
   if (val) {
-    userScrolledUp = false   // 新请求开始时重置，确保跳到底部
+    userScrolledUp = false
     progress.value = 5
     progressTimer = setInterval(() => {
       if (progress.value < 90) {
@@ -74,12 +75,10 @@ watch(
   },
 )
 
-// 新消息列表时强制跳底（切换对话）
 watch(
   () => props.messages.length,
   async (newLen, oldLen) => {
     if (newLen < oldLen) {
-      // 对话切换，重置并跳底
       userScrolledUp = false
       await nextTick()
       scrollToBottom(true)
@@ -105,12 +104,12 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
 <template>
   <div class="chat-view">
 
-    <!-- 顶部进度条（AI 生成时） -->
+    <!-- 顶部进度条 — Bilibili 蓝粉渐变 -->
     <div class="top-progress" :class="{ visible: props.loading || showProgress }">
       <el-progress
         :percentage="Math.min(progress, 100)"
         :show-text="false"
-        :stroke-width="2"
+        :stroke-width="2.5"
         status=""
         class="gen-progress"
       />
@@ -119,15 +118,13 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
     <!-- 顶部 header -->
     <div class="chat-header">
       <div class="header-left">
-        <!-- 品牌图标：白底 + 双星，与 favicon 一致 -->
         <div class="header-brand-icon">
           <svg width="16" height="16" viewBox="0 0 32 32" fill="none">
-            <path d="M16 4C16 4 17.5 11 23 14C17.5 17 16 24 16 24C16 24 14.5 17 9 14C14.5 11 16 4 16 4Z" fill="#111827"/>
-            <path d="M25 7C25 7 25.6 9.8 27.5 10.7C25.6 11.6 25 14.4 25 14.4C25 14.4 24.4 11.6 22.5 10.7C24.4 9.8 25 7 25 7Z" fill="#111827" opacity="0.5"/>
+            <path d="M16 4C16 4 17.5 11 23 14C17.5 17 16 24 16 24C16 24 14.5 17 9 14C14.5 11 16 4 16 4Z" fill="#00AEEC"/>
+            <path d="M25 7C25 7 25.6 9.8 27.5 10.7C25.6 11.6 25 14.4 25 14.4C25 14.4 24.4 11.6 22.5 10.7C24.4 9.8 25 7 25 7Z" fill="#FB7299" opacity="0.6"/>
           </svg>
         </div>
 
-        <!-- 标题区 -->
         <div class="header-title-block">
           <span class="header-app-name">ChatFlow</span>
           <template v-if="convTitle">
@@ -141,7 +138,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
         </div>
       </div>
       <div class="header-right">
-        <!-- 认知面板切换按钮（有历史内容时显示） -->
+        <!-- 认知面板切换按钮 -->
         <button
           v-if="hasCognitiveContent"
           class="ghost-btn"
@@ -155,7 +152,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
           <span>{{ panelOpen ? '收起' : '计划' }}</span>
         </button>
 
-        <!-- 统一状态标签（单元素 transition，避免闪烁） -->
+        <!-- 统一状态标签 — Bilibili 风格圆角胶囊 -->
         <transition name="tag-swap" mode="out-in">
           <el-tag
             v-if="agentStatus.state === 'idle'"
@@ -191,8 +188,8 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
             v-else
             :key="agentStatus.state"
             type="info" effect="plain" round :closable="false" class="s-tag"
-            :style="agentStatus.state === 'planning'       ? 'color:#8b5cf6;border-color:#c4b5fd'
-                  : agentStatus.state === 'vision_analyze' ? 'color:#0ea5e9;border-color:#7dd3fc'
+            :style="agentStatus.state === 'planning'       ? 'color:#FB7299;border-color:#FDD4E0'
+                  : agentStatus.state === 'vision_analyze' ? 'color:#00AEEC;border-color:#B8E6F9'
                   : ''"
           >
             <el-icon class="s-spin" style="margin-right:4px"><Loading /></el-icon>
@@ -203,7 +200,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
           </el-tag>
         </transition>
 
-        <!-- 停止按钮 -->
+        <!-- 停止按钮 — Bilibili 风格 -->
         <el-button
           v-if="loading"
           size="small"
@@ -214,25 +211,24 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
           @click="emit('stop')"
         >
           <svg width="8" height="8" viewBox="0 0 10 10" fill="currentColor" style="margin-right:5px;flex-shrink:0">
-            <rect x="1" y="1" width="8" height="8" rx="1.5"/>
+            <rect x="1" y="1" width="8" height="8" rx="2"/>
           </svg>
           停止
         </el-button>
       </div>
     </div>
 
-    <!-- ── 空状态 ── -->
+    <!-- ── 空状态 — Bilibili 可爱风 ── -->
     <div v-if="messages.length === 0" class="empty-view">
       <div class="hero">
         <div class="hero-icon-wrap">
-          <!-- 与 favicon 一致：主星 + 副星（白底黑星） -->
-          <svg width="38" height="38" viewBox="0 0 32 32" fill="none">
-            <path d="M16 3C16 3 17.6 11 23.5 14C17.6 17 16 25 16 25C16 25 14.4 17 8.5 14C14.4 11 16 3 16 3Z" fill="#111827"/>
-            <path d="M25.5 6C25.5 6 26.2 9.2 28.3 10.2C26.2 11.2 25.5 14.4 25.5 14.4C25.5 14.4 24.8 11.2 22.7 10.2C24.8 9.2 25.5 6 25.5 6Z" fill="#111827" opacity="0.5"/>
+          <svg width="42" height="42" viewBox="0 0 32 32" fill="none">
+            <path d="M16 3C16 3 17.6 11 23.5 14C17.6 17 16 25 16 25C16 25 14.4 17 8.5 14C14.4 11 16 3 16 3Z" fill="#00AEEC"/>
+            <path d="M25.5 6C25.5 6 26.2 9.2 28.3 10.2C26.2 11.2 25.5 14.4 25.5 14.4C25.5 14.4 24.8 11.2 22.7 10.2C24.8 9.2 25.5 6 25.5 6Z" fill="#FB7299" opacity="0.6"/>
           </svg>
         </div>
-        <h1 class="hero-title">我能为你做什么？</h1>
-        <p class="hero-sub">新一代智能 AI · 随时随地为你服务</p>
+        <h1 class="hero-title">hi~ 有什么可以帮你的？</h1>
+        <p class="hero-sub">你的 AI 小助手 · 随时为你服务 (｡◕‿◕｡)</p>
       </div>
 
       <InputBox :loading="loading" :centered="true" @send="emit('send', $event)" />
@@ -249,7 +245,6 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
         </button>
       </div>
 
-      <!-- 底部信息 -->
       <div class="empty-info">
         <el-icon><Lightning /></el-icon>
         <span>支持多轮对话 · 图片识别 · 代码高亮 · 长期记忆</span>
@@ -266,12 +261,12 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
             :message="msg"
             :is-last-loading="loading && i === messages.length - 1 && msg.role === 'assistant'"
             :agent-status="(loading && i === messages.length - 1 && msg.role === 'assistant') ? agentStatus : undefined"
-            :cognitive="(loading && i === messages.length - 1 && msg.role === 'assistant') ? cognitive : undefined"
+            :cognitive="(i === messages.length - 1 && msg.role === 'assistant') ? cognitive : undefined"
             :message-index="i"
             @regenerate="emit('regenerate')"
             @edit-message="emit('editMessage', $event)"
+            @select-file="emit('selectFile', $event)"
           />
-          <!-- 澄清卡片：附加在最后一条 assistant 消息下方 -->
           <template
             v-if="messages.length > 0 && messages[messages.length-1].role === 'assistant'
                   && messages[messages.length-1].clarification"
@@ -284,9 +279,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
               />
             </div>
           </template>
-          <!-- 状态气泡已移入 MessageItem 内联渲染，与头像对齐 -->
 
-          <!-- 继续按钮：当上一次响应因异常中断时显示 -->
           <div v-if="canContinue && !loading" class="continue-wrap">
             <button class="continue-btn" @click="emit('continue')">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0">
@@ -296,11 +289,15 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
               继续
             </button>
             <span class="continue-hint">上次响应被中断，点击从断点继续</span>
+            <button class="continue-dismiss" @click="emit('dismissContinue')" title="忽略">
+              <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <path d="M12 4L4 12M4 4l8 8"/>
+              </svg>
+            </button>
           </div>
         </div>
       </div>
 
-      <!-- 底部输入框 -->
       <div class="bottom-input">
         <InputBox :loading="loading" @send="emit('send', $event)" />
       </div>
@@ -324,7 +321,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   height: 100%;
 }
 
-/* 顶部进度条 */
+/* 顶部进度条 — Bilibili 蓝粉渐变 */
 .top-progress {
   position: absolute;
   top: 0; left: 0; right: 0;
@@ -339,7 +336,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   border-radius: 0 !important;
 }
 :deep(.gen-progress .el-progress-bar__inner) {
-  background: linear-gradient(90deg, #6B9EFF, #6366f1, #6B9EFF) !important;
+  background: linear-gradient(90deg, #00AEEC, #FB7299, #00AEEC) !important;
   background-size: 200% !important;
   border-radius: 0 !important;
   animation: shimmer 1.5s linear infinite !important;
@@ -349,7 +346,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   100% { background-position: -200% center; }
 }
 
-/* ── Header ── */
+/* ── Header — Bilibili 简洁风 ── */
 .chat-header {
   display: flex;
   align-items: center;
@@ -360,7 +357,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   border-bottom: 1px solid var(--cf-border);
   flex-shrink: 0;
   z-index: 10;
-  box-shadow: 0 1px 6px rgba(0,0,0,0.04);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.03);
 }
 .header-left {
   display: flex;
@@ -371,16 +368,18 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   overflow: hidden;
 }
 .header-brand-icon {
-  width: 30px; height: 30px;
-  border-radius: 8px;
-  background: #ffffff;
-  border: 1.5px solid #e4e4e7;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  width: 32px; height: 32px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #E3F6FD 0%, #FDE8EF 100%);
+  border: 1.5px solid #D0EEF9;
+  box-shadow: 0 1px 4px rgba(0,174,236,0.1);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  transition: transform 0.3s cubic-bezier(0.34,1.56,0.64,1);
 }
+.header-brand-icon:hover { transform: rotate(-8deg) scale(1.06); }
 .header-title-block {
   display: flex;
   align-items: center;
@@ -423,15 +422,15 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   flex-shrink: 0;
 }
 
-/* ── 状态标签 ── */
+/* ── 状态标签 — Bilibili 圆角胶囊 ── */
 :deep(.s-tag) {
   font-size: 12px;
   font-weight: 500;
   font-family: inherit;
-  padding: 0 11px;
-  height: 27px;
+  padding: 0 12px;
+  height: 28px;
   border-radius: 99px !important;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.05);
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -445,12 +444,12 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   margin-right: 2px;
 }
 .s-dot--green {
-  background: #22c55e;
+  background: #00B578;
   animation: pulse-dot 2s ease-in-out infinite;
 }
 @keyframes pulse-dot {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(34,197,94,0.5); }
-  50%       { box-shadow: 0 0 0 4px rgba(34,197,94,0); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(0,181,120,0.5); }
+  50%       { box-shadow: 0 0 0 4px rgba(0,181,120,0); }
 }
 .s-spin {
   font-size: 12px !important;
@@ -462,22 +461,22 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
 /* ── 停止按钮 ── */
 :deep(.stop-btn) {
   font-family: inherit;
-  height: 27px;
-  padding: 0 12px;
+  height: 28px;
+  padding: 0 14px;
   font-size: 12px;
   font-weight: 600;
   display: inline-flex;
   align-items: center;
   border-radius: 99px !important;
-  box-shadow: 0 1px 5px rgba(220,38,38,0.18);
+  box-shadow: 0 1px 5px rgba(242,93,89,0.18);
   transition: all 0.15s;
 }
 :deep(.stop-btn:hover) {
-  box-shadow: 0 3px 10px rgba(220,38,38,0.28);
+  box-shadow: 0 3px 10px rgba(242,93,89,0.28);
   transform: translateY(-1px);
 }
 
-/* ── Ghost 按钮 ── */
+/* ── Ghost 按钮 — Bilibili 蓝 ── */
 .ghost-btn {
   display: inline-flex;
   align-items: center;
@@ -485,8 +484,8 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   padding: 5px 12px;
   background: transparent;
   border: 1px solid var(--cf-border);
-  border-radius: var(--cf-radius-sm);
-  color: var(--cf-indigo);
+  border-radius: 20px;
+  color: #00AEEC;
   font-size: 12px;
   font-weight: 500;
   font-family: inherit;
@@ -495,20 +494,20 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   letter-spacing: 0.1px;
 }
 .ghost-btn:hover {
-  background: rgba(107,158,255,0.1);
-  border-color: var(--cf-indigo);
+  background: rgba(0,174,236,0.06);
+  border-color: #00AEEC;
   transform: translateY(-1px);
-  box-shadow: var(--cf-shadow-xs);
+  box-shadow: 0 2px 8px rgba(0,174,236,0.12);
 }
 .ghost-btn:active { transform: translateY(0); }
 .ghost-btn--active {
-  background: rgba(107,158,255,0.1);
-  border-color: var(--cf-indigo);
-  color: var(--cf-indigo);
+  background: rgba(0,174,236,0.06);
+  border-color: #00AEEC;
+  color: #00AEEC;
 }
-.ghost-btn--active:hover { background: rgba(107,158,255,0.15); }
+.ghost-btn--active:hover { background: rgba(0,174,236,0.1); }
 
-/* ── 空状态 ── */
+/* ── 空状态 — Bilibili 卡通风 ── */
 .empty-view {
   flex: 1;
   display: flex;
@@ -526,38 +525,43 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   gap: 12px;
 }
 .hero-icon-wrap {
-  width: 72px; height: 72px;
-  border-radius: 20px;
-  background: #ffffff;
-  border: 1.5px solid #e4e4e7;
+  width: 80px; height: 80px;
+  border-radius: 24px;
+  background: linear-gradient(135deg, #E3F6FD 0%, #FDE8EF 100%);
+  border: 2px solid #D0EEF9;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-bottom: 2px;
-  box-shadow: 0 4px 20px rgba(0,0,0,0.08), 0 1px 4px rgba(0,0,0,0.05);
+  margin-bottom: 4px;
+  box-shadow: 0 4px 20px rgba(0,174,236,0.12), 0 2px 8px rgba(251,114,153,0.08);
+  animation: hero-float 3s ease-in-out infinite;
+}
+@keyframes hero-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
 }
 .hero-title {
-  font-size: 30px;
+  font-size: 28px;
   font-weight: 800;
-  letter-spacing: -0.8px;
+  letter-spacing: -0.5px;
   line-height: 1.2;
-  background: linear-gradient(135deg, #111827 0%, #6B9EFF 100%);
+  background: linear-gradient(135deg, #18191C 0%, #00AEEC 50%, #FB7299 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
 }
 .hero-sub {
   font-size: 13.5px;
-  color: var(--cf-text-4);
+  color: var(--cf-text-3);
   font-weight: 400;
   letter-spacing: 0.1px;
 }
 
-/* ── 快捷操作 ── */
+/* ── 快捷操作 — Bilibili 圆角胶囊 ── */
 .suggestions {
   display: flex;
   flex-wrap: wrap;
-  gap: 9px;
+  gap: 10px;
   justify-content: center;
   max-width: 680px;
 }
@@ -565,7 +569,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 9px 16px;
+  padding: 9px 18px;
   background: var(--cf-card);
   border: 1.5px solid var(--cf-border);
   border-radius: 24px;
@@ -574,16 +578,18 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   color: var(--cf-text-2);
   font-family: inherit;
   cursor: pointer;
-  transition: all 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
   box-shadow: var(--cf-shadow-xs);
 }
 .sug-card:hover {
-  background: rgba(107,158,255,0.08);
-  border-color: var(--cf-indigo);
-  color: var(--cf-indigo);
-  transform: translateY(-3px) scale(1.02);
-  box-shadow: 0 6px 20px rgba(107,158,255,0.18);
+  background: rgba(0,174,236,0.05);
+  border-color: #00AEEC;
+  color: #00AEEC;
+  transform: translateY(-3px) scale(1.03);
+  box-shadow: 0 6px 20px rgba(0,174,236,0.15);
 }
+.sug-card:nth-child(2):hover { border-color: #FB7299; color: #FB7299; box-shadow: 0 6px 20px rgba(251,114,153,0.15); }
+.sug-card:nth-child(4):hover { border-color: #FB7299; color: #FB7299; box-shadow: 0 6px 20px rgba(251,114,153,0.15); }
 .sug-icon { font-size: 14px; }
 .sug-label { font-weight: 500; }
 .empty-info {
@@ -591,7 +597,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   align-items: center;
   gap: 6px;
   font-size: 11.5px;
-  color: var(--cf-text-5);
+  color: var(--cf-text-4);
 }
 
 /* ── 对话区 ── */
@@ -624,9 +630,8 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
 
 /* ── 澄清卡片容器 ── */
 .clarification-wrap {
-  padding: 4px 0 8px 40px;  /* 与 assistant 消息对齐（头像宽度） */
+  padding: 4px 0 8px 40px;
 }
-
 
 /* ── 标签切换过渡 ── */
 .tag-swap-enter-active,
@@ -634,10 +639,10 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
 .tag-swap-enter-from   { opacity: 0; transform: translateY(-4px) scale(.94); }
 .tag-swap-leave-to     { opacity: 0; transform: translateY(4px)  scale(.94); }
 
-:deep(.s-tag--saving)  { color: #64748b !important; border-color: #cbd5e1 !important; }
-:deep(.s-tag--reflect) { color: #059669 !important; border-color: #6ee7b7 !important; }
+:deep(.s-tag--saving)  { color: #61666D !important; border-color: #C9CCD0 !important; }
+:deep(.s-tag--reflect) { color: #00B578 !important; border-color: #8AE0C0 !important; }
 
-/* 继续按钮 */
+/* 继续按钮 — Bilibili 风格 */
 .continue-wrap {
   display: flex;
   align-items: center;
@@ -648,23 +653,38 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 6px 14px;
+  padding: 6px 16px;
   border-radius: 20px;
-  border: 1.5px solid var(--cf-indigo);
+  border: 1.5px solid #00AEEC;
   background: #fff;
-  color: var(--cf-indigo);
+  color: #00AEEC;
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition: all 0.15s;
   white-space: nowrap;
 }
 .continue-btn:hover {
-  background: var(--cf-indigo);
+  background: #00AEEC;
   color: #fff;
+  box-shadow: 0 2px 10px rgba(0,174,236,0.25);
 }
 .continue-hint {
   font-size: 12px;
   color: var(--cf-text-3);
 }
+.continue-dismiss {
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: var(--cf-text-4);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: all 0.12s;
+}
+.continue-dismiss:hover { background: var(--cf-hover); color: var(--cf-text-2); }
 </style>

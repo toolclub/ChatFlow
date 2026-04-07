@@ -13,7 +13,7 @@ const CONSOLE_STYLE = `
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#f8f9fa;padding:14px;font-family:system-ui,sans-serif;font-size:13px}
 #out{display:flex;flex-direction:column;gap:3px}
-.ln{padding:5px 12px;border-radius:6px;background:#fff;border-left:3px solid #6366f1;
+.ln{padding:5px 12px;border-radius:6px;background:#fff;border-left:3px solid #00AEEC;
     font-family:'Fira Code',Consolas,monospace;font-size:12.5px;white-space:pre-wrap;word-break:break-all;line-height:1.5}
 .err{border-left-color:#ef4444;color:#ef4444;background:#fff5f5}
 .warn{border-left-color:#f59e0b;color:#78350f;background:#fffbeb}

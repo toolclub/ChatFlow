@@ -79,11 +79,8 @@ class CallModelAfterToolNode(BaseNode):
         if plan and current_idx < len(plan):
             messages = self._inject_boundary(messages, plan, current_idx)
 
-        # ── 工具绑定决策 ──────────────────────────────────────────────────────
-        # 计划末步不绑工具（强制流式输出最终产品）
-        # 其他情况绑定工具，让模型可以在看到第一轮工具结果后继续调用更多工具
-        # 典型场景：sandbox_write 后需要 execute_code 运行
-        use_tools = bool(self._tools) and not (plan and is_last)
+        # ── 工具绑定：始终绑定全部工具，让模型自主决定是否搜索/执行代码 ────
+        use_tools = bool(self._tools)
         tools_schema = self._tools_to_openai_schema(self._tools) if use_tools else None
 
         logger.info(
@@ -139,15 +136,28 @@ class CallModelAfterToolNode(BaseNode):
         if prev_results:
             boundary += "\n\n" + "\n\n".join(prev_results)
 
+        # 检查上一次工具执行是否失败
+        last_tool_failed = False
+        for m in reversed(messages):
+            if type(m).__name__ == "ToolMessage":
+                content_str = str(getattr(m, "content", ""))
+                if any(kw in content_str for kw in ("exit_code=1", "执行失败", "Traceback", "Error", "error")):
+                    last_tool_failed = True
+                break
+
         boundary += (
             f"\n\n===当前执行步骤 {current_idx + 1}/{total}（最后一步）===\n"
             f"标题：{step['title']}\n"
             f"任务：{step['description']}\n"
             f"本步已调用工具 {tool_count} 次。\n"
-            "请基于以上所有信息和工具结果，直接给出完整的最终回复。"
         )
-        if tool_count >= 2:
-            boundary += "不要再调用工具。"
+        if last_tool_failed:
+            boundary += (
+                "上一次代码执行失败了。请修复代码并使用 execute_code/run_shell 重新在沙箱中执行，"
+                "验证通过后再给出结论。不要直接把代码写在回复里。"
+            )
+        else:
+            boundary += "请基于以上所有信息和工具结果给出完整的最终回复。如需补充搜索或执行代码可继续使用工具。"
 
         if messages and type(messages[0]).__name__ == "SystemMessage":
             messages = [SystemMessage(content=messages[0].content + boundary)] + messages[1:]
@@ -190,11 +200,9 @@ class CallModelAfterToolNode(BaseNode):
         else:
             tool_msgs = [m for m in messages if type(m).__name__ == "ToolMessage"]
 
-        focused_system = SystemMessage(content=(
-            f"你是一个信息采集助手。请根据工具返回的结果，"
-            f"简洁总结步骤‘{step['title']}’的执行情况（约100-300字）。\n"
-            "⚠️ 严格限制：只输出本步骤收集到的关键信息摘要；"
-            "不得生成HTML代码、完整文章、最终产品，也不得执行后续步骤的内容。"
+        from prompts import load_prompt as _lp
+        focused_system = SystemMessage(content=_lp(
+            "nodes/after_tool_step", step_title=step['title'],
         ))
         step_instruction = HumanMessage(content=(
             f"当前步骤任务：{step['description']}\n"

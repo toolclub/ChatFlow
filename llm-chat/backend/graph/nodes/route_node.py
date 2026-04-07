@@ -22,36 +22,10 @@ from llm.chat import get_chat_llm
 
 logger = logging.getLogger("graph.nodes.route")
 
-# ── 路由提示词 ────────────────────────────────────────────────────────────────
-_ROUTE_PROMPT = """你是一个智能路由器。分析用户消息（和附带图片说明），选择最合适的处理方式，输出以下标签之一：
+from prompts import load_prompt
 
-- chat         直接回答，无需联网或工具：
-                 日常对话、解释概念、翻译、写作、数学、逻辑推理、分析图片内容
-
-- code         纯代码任务，需求明确、无需查资料：
-                 编写/调试/重构/解释代码，依据图片内容直接生成代码
-
-- search       需联网查询，不涉及写代码：
-                 实时/最新信息（新闻、股价、天气、版本号）、具体事实核查、
-                 查询图片中出现的商品/地点/人物/文字的详细信息
-
-- search_code  需先查资料再写代码：
-                 查官方文档/API 后写代码、根据图片内容查资料再实现功能、
-                 用户要实现/完成/开发某个产品或系统（但你不清楚它具体是什么）、
-                 模仿/参考某个产品做开发（需先了解该产品）
-
-【判断原则】
-- 图片纯分析（描述/解读/OCR/情感）→ chat
-- 图片内容需要联网核实或延伸查询 → search
-- 根据图片直接写代码且需求明确 → code
-- 根据图片写代码但需先查资料 → search_code
-- 明确要求查官方/文档后写代码 → search_code
-- 只写代码需求明确不查资料 → code
-- 只查信息不写代码 → search
-- 要实现/完成/开发某产品，但该产品你不熟悉或名称模糊 → search_code（先搜索了解再实现）
-- 不确定 search 还是 search_code → 优先 search_code
-
-只输出标签本身，例如：chat"""
+# 路由提示词从 prompts/nodes/route.md 加载
+_ROUTE_PROMPT = load_prompt("nodes/route")
 
 # 路由标签优先顺序（search_code 必须在 search 之前，防止部分匹配）
 _ROUTE_CANDIDATES = ("search_code", "search", "code", "chat")
@@ -95,20 +69,36 @@ class RouteNode(BaseNode):
         else:
             routing_input = f"用户消息：{user_msg}"
 
-        # ── 调用路由 LLM ────────────────────────────────────────────────────
+        # ── 流式调用路由 LLM（边推送 thinking 事件，边收集结果） ──────────────
         messages = [{"role": "user", "content": f"{_ROUTE_PROMPT}\n\n{routing_input}"}]
         from logging_config import log_prompt
         log_prompt(state.get("conv_id", ""), "route_model", ROUTER_MODEL, messages)
-        completion = await llm.ainvoke(messages, timeout=30.0)
-        if not completion.choices:
-            # MiniMax 等厂商在审核或服务异常时可能返回 200 但 choices 为 None/空
+
+        from langchain_core.callbacks.manager import adispatch_custom_event
+        _THINK_PREFIX = "\x00THINK\x00"
+        content_parts: list[str] = []
+        try:
+            async for delta in llm.astream(messages, temperature=0.0, timeout=30.0):
+                if delta.startswith(_THINK_PREFIX):
+                    thinking_text = delta[len(_THINK_PREFIX):]
+                    await adispatch_custom_event(
+                        "llm_thinking", {"content": thinking_text, "node": "route_model"},
+                    )
+                else:
+                    content_parts.append(delta)
+            raw = "".join(content_parts).strip().lower()
+        except Exception as exc:
             logger.warning(
-                "route_model 收到空 choices | conv=%s | model=%s，降级到 search_code",
+                "route_model 流式调用异常 | conv=%s | model=%s | error=%s，降级到 search_code",
+                state.get("conv_id", ""), ROUTER_MODEL, exc,
+            )
+            raw = "search_code"
+        if not raw:
+            logger.warning(
+                "route_model 返回空内容 | conv=%s | model=%s，降级到 search_code",
                 state.get("conv_id", ""), ROUTER_MODEL,
             )
             raw = "search_code"
-        else:
-            raw = (completion.choices[0].message.content or "").strip().lower()
 
         # 解析路由标签
         route = "chat"

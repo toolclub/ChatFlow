@@ -130,6 +130,17 @@ class SaveResponseNode(BaseNode):
         # ── 写回语义缓存 ─────────────────────────────────────────────────────
         await self._write_cache(state, user_msg, full_response, route, client_id, conv_id)
 
+        # ── 确保 DB 中所有步骤都标记为 done（兜底） ────────────────────────────
+        # reflector 每步完成时会写 DB，但最后一步可能因异常/时序未更新
+        plan_id = state.get("plan_id", "")
+        plan = state.get("plan", [])
+        if plan_id and plan:
+            try:
+                from db.plan_store import finalize_all_steps
+                await finalize_all_steps(plan_id, plan)
+            except Exception:
+                pass  # 不影响主流程
+
         return {}
 
     # ══════════════════════════════════════════════════════════════════════════

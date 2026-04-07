@@ -52,8 +52,8 @@ const srcdoc = computed(() => buildIframeSrcdoc(props.code, props.lang))
         <span class="preview-dialog-title">{{ title }}</span>
         <span v-if="needsCDN" class="preview-cdn-note">
           <svg width="12" height="12" viewBox="0 0 16 16" fill="none" style="flex-shrink:0">
-            <circle cx="8" cy="8" r="6.5" stroke="#6366f1" stroke-width="1.4"/>
-            <path d="M8 5v3.5L10 10" stroke="#6366f1" stroke-width="1.4" stroke-linecap="round"/>
+            <circle cx="8" cy="8" r="6.5" stroke="#00AEEC" stroke-width="1.4"/>
+            <path d="M8 5v3.5L10 10" stroke="#00AEEC" stroke-width="1.4" stroke-linecap="round"/>
           </svg>
           需要联网加载运行时
         </span>
@@ -64,7 +64,7 @@ const srcdoc = computed(() => buildIframeSrcdoc(props.code, props.lang))
       <div v-if="loading" class="preview-loading">
         <svg class="spin-icon" width="28" height="28" viewBox="0 0 24 24" fill="none">
           <circle cx="12" cy="12" r="10" stroke="#e4e6ef" stroke-width="2.5"/>
-          <path d="M12 2a10 10 0 0 1 10 10" stroke="#6366f1" stroke-width="2.5" stroke-linecap="round"/>
+          <path d="M12 2a10 10 0 0 1 10 10" stroke="#00AEEC" stroke-width="2.5" stroke-linecap="round"/>
         </svg>
         <span>渲染中…</span>
       </div>
@@ -87,13 +87,13 @@ const srcdoc = computed(() => buildIframeSrcdoc(props.code, props.lang))
 }
 .preview-lang-badge {
   padding: 2px 8px;
-  background: #eef2ff;
-  color: #4f46e5;
+  background: #E3F6FD;
+  color: #0095CC;
   border-radius: 5px;
   font-size: 11.5px;
   font-weight: 700;
   font-family: 'Fira Code', Consolas, monospace;
-  border: 1px solid #e0e7ff;
+  border: 1px solid #D0EEF9;
 }
 .preview-dialog-title {
   font-size: 15px;
@@ -106,11 +106,11 @@ const srcdoc = computed(() => buildIframeSrcdoc(props.code, props.lang))
   align-items: center;
   gap: 5px;
   font-size: 12px;
-  color: #6366f1;
-  background: #eef2ff;
+  color: #00AEEC;
+  background: #E3F6FD;
   padding: 3px 10px;
   border-radius: 20px;
-  border: 1px solid #e0e7ff;
+  border: 1px solid #D0EEF9;
 }
 
 .preview-body {

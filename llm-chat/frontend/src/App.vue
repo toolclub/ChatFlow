@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, computed, ref, watch } from 'vue'
 import { useChat } from './composables/useChat'
+import type { FileArtifact } from './types'
 import Sidebar from './components/Sidebar.vue'
 import ChatView from './components/ChatView.vue'
 import CognitivePanel from './components/CognitivePanel.vue'
@@ -13,12 +14,12 @@ onMounted(async () => {
 })
 
 // ── 面板折叠/展开（用户可手动控制） ──────────────────────────────────────────
-const panelOpen = ref(true)
+const panelOpen = ref(false)
 
 // 是否存在值得展示的认知内容（计划或日志）
 const hasCognitiveContent = computed(() => {
   const cog = chat.cognitive.value
-  return cog.plan.length > 0 || cog.traceLog.length > 0 || cog.historyEvents.length > 0
+  return cog.plan.length > 0 || cog.traceLog.length > 0 || cog.historyEvents.length > 0 || cog.artifacts.length > 0
 })
 
 // 面板展示条件：
@@ -26,6 +27,7 @@ const hasCognitiveContent = computed(() => {
 //   2. 有认知内容 AND 用户未折叠
 // 不包括 routing/thinking/tool 状态，避免简单问题也触发面板一闪
 const showCognitivePanel = computed(() => {
+  if (selectedFile.value && panelOpen.value) return true  // 文件预览时强制展开
   const status = chat.agentStatus.value.state
   if (status === 'planning') return true
   return hasCognitiveContent.value && panelOpen.value
@@ -38,7 +40,8 @@ watch(() => chat.agentStatus.value.state, (state) => {
 
 // 切换会话时折叠认知面板（新会话没有历史计划）
 watch(() => chat.currentConvId.value, () => {
-  panelOpen.value = true  // 默认开，但 showCognitivePanel 还受 hasCognitiveContent 控制
+  panelOpen.value = false  // 默认关，由 planning 状态或用户手动打开
+  selectedFile.value = null
 })
 
 // 当前目标（最新用户消息，优先用 workflowGoal 避免显示后端指令文本）
@@ -56,6 +59,19 @@ const currentConvTitle = computed(() => {
   if (!chat.currentConvId.value) return ''
   const conv = chat.conversations.value.find(c => c.id === chat.currentConvId.value)
   return conv?.title ?? ''
+})
+
+// ── 文件预览状态 ──────────────────────────────────────────────────────────────
+const selectedFile = ref<FileArtifact | null>(null)
+
+function onSelectFile(file: FileArtifact) {
+  selectedFile.value = file
+  panelOpen.value = true  // 自动展开面板
+}
+
+// 切换对话时清除文件选择
+watch(() => chat.currentConvId.value, () => {
+  selectedFile.value = null
 })
 </script>
 
@@ -88,8 +104,10 @@ const currentConvTitle = computed(() => {
         @toggle-panel="panelOpen = !panelOpen"
         @clarification-submit="chat.submitClarification($event)"
         @continue="chat.continueLast()"
+        @dismiss-continue="chat.dismissContinue()"
         @regenerate="chat.regenerate()"
         @edit-message="chat.editMessage($event.index, $event.content)"
+        @select-file="onSelectFile($event)"
       />
 
       <!-- 右侧：认知面板 -->
@@ -99,9 +117,11 @@ const currentConvTitle = computed(() => {
           :cognitive="chat.cognitive.value"
           :loading="chat.loading.value"
           :user-message="currentGoal"
+          :selected-file="selectedFile"
           class="cognitive-panel-slot"
           @collapse="panelOpen = false"
           @modify-plan="chat.applyModifiedPlan($event)"
+          @close-file="selectedFile = null"
         />
       </transition>
     </div>
@@ -110,73 +130,81 @@ const currentConvTitle = computed(() => {
 
 <style>
 :root {
-  /* 背景 & 表面 — 参考 vue3-demo 清爽风格 */
-  --cf-bg:          #F5F7FA;   /* 主内容背景：中性浅灰，不偏蓝 */
-  --cf-sidebar:     #ffffff;   /* 侧边栏：纯白卡片 */
+  /* ══ Bilibili 风格色彩系统 ══ */
+  /* 背景 & 表面 */
+  --cf-bg:          #F1F2F3;   /* Bilibili 经典浅灰背景 */
+  --cf-sidebar:     #ffffff;
   --cf-card:        #ffffff;
-  --cf-hover:       #F0F2F5;
-  --cf-active:      #EBF0FF;   /* 蓝调高亮，与主色呼应 */
+  --cf-hover:       #E7E8EA;
+  --cf-active:      #E3F6FD;   /* 浅蓝高亮 */
 
   /* 边框 */
-  --cf-border:      #DCDFE6;   /* Element Plus 标准边框色 */
-  --cf-border-soft: #EBEEF5;
+  --cf-border:      #E3E5E7;
+  --cf-border-soft: #EBEDF0;
 
-  /* 文字 — Element Plus 标准色阶 */
-  --cf-text-1: #303133;
-  --cf-text-2: #606266;
-  --cf-text-3: #909399;
-  --cf-text-4: #C0C4CC;
-  --cf-text-5: #DCDFE6;
+  /* 文字 — Bilibili 标准色阶 */
+  --cf-text-1: #18191C;
+  --cf-text-2: #61666D;
+  --cf-text-3: #9499A0;
+  --cf-text-4: #C9CCD0;
+  --cf-text-5: #E3E5E7;
 
-  /* 主色 — 蓝紫双色体系 */
-  --cf-indigo:  #6B9EFF;       /* 主蓝，与 vue3-demo 一致 */
-  --cf-indigo-d:#5a8eef;
-  --cf-purple:  #6366f1;       /* 紫色，用于特殊高亮 */
-  --cf-green:   #67C23A;
-  --cf-red:     #F56C6C;
-  --cf-amber:   #E6A23C;
+  /* 主色 — Bilibili 蓝粉双色 */
+  --cf-bili-blue:  #00AEEC;     /* Bilibili 标志蓝 */
+  --cf-bili-blue-d:#0095CC;
+  --cf-bili-pink:  #FB7299;     /* Bilibili 标志粉 */
+  --cf-indigo:     #00AEEC;     /* 兼容别名 → bili-blue */
+  --cf-indigo-d:   #0095CC;
+  --cf-purple:     #FB7299;     /* 兼容别名 → bili-pink */
+  --cf-green:      #00B578;     /* Bilibili 绿 */
+  --cf-red:        #F25D59;     /* Bilibili 红 */
+  --cf-amber:      #FF9736;     /* Bilibili 橙 */
 
-  /* 阴影 — 轻量层次 */
-  --cf-shadow-xs: 0 2px 8px rgba(0,0,0,0.04);
-  --cf-shadow-sm: 0 4px 16px rgba(0,0,0,0.08);
-  --cf-shadow-md: 0 8px 24px rgba(0,0,0,0.10);
-  --cf-shadow-lg: 0 12px 32px rgba(0,0,0,0.12);
+  /* 阴影 — 柔和卡通风 */
+  --cf-shadow-xs: 0 1px 4px rgba(0,0,0,0.04);
+  --cf-shadow-sm: 0 2px 8px rgba(0,0,0,0.06);
+  --cf-shadow-md: 0 4px 16px rgba(0,0,0,0.08);
+  --cf-shadow-lg: 0 8px 28px rgba(0,0,0,0.10);
 
-  /* 圆角 */
-  --cf-radius-sm: 8px;
-  --cf-radius-md: 12px;
-  --cf-radius-lg: 16px;
+  /* 圆角 — 更圆更卡通 */
+  --cf-radius-sm: 10px;
+  --cf-radius-md: 14px;
+  --cf-radius-lg: 18px;
+  --cf-radius-xl: 24px;
 
   --cf-sidebar-w: 240px;
 }
 
 body.dark {
-  --cf-bg:          #0f0f0f;
-  --cf-sidebar:     #1a1a1a;
-  --cf-card:        #1a1a1a;
-  --cf-hover:       #2a2a2a;
-  --cf-active:      #1e2433;
+  --cf-bg:          #17181A;
+  --cf-sidebar:     #1F2023;
+  --cf-card:        #1F2023;
+  --cf-hover:       #2B2C30;
+  --cf-active:      #1A2F3A;
 
-  --cf-border:      #2e2e2e;
-  --cf-border-soft: #252525;
+  --cf-border:      #323335;
+  --cf-border-soft: #2B2C30;
 
-  --cf-text-1: #e5e5e5;
-  --cf-text-2: #a3a3a3;
-  --cf-text-3: #737373;
-  --cf-text-4: #525252;
-  --cf-text-5: #404040;
+  --cf-text-1: #E6E7E9;
+  --cf-text-2: #A2A7AE;
+  --cf-text-3: #7A7C82;
+  --cf-text-4: #505255;
+  --cf-text-5: #3B3C3F;
 
-  --cf-indigo:  #818cf8;
-  --cf-indigo-d:#6366f1;
-  --cf-purple:  #a78bfa;
-  --cf-green:   #4ade80;
-  --cf-red:     #f87171;
-  --cf-amber:   #fbbf24;
+  --cf-bili-blue:  #23ADE5;
+  --cf-bili-blue-d:#1A9AD0;
+  --cf-bili-pink:  #F67C9B;
+  --cf-indigo:     #23ADE5;
+  --cf-indigo-d:   #1A9AD0;
+  --cf-purple:     #F67C9B;
+  --cf-green:      #3DDC84;
+  --cf-red:        #F4726D;
+  --cf-amber:      #FFB040;
 
-  --cf-shadow-xs: 0 2px 8px rgba(0,0,0,0.3);
-  --cf-shadow-sm: 0 4px 16px rgba(0,0,0,0.4);
-  --cf-shadow-md: 0 8px 24px rgba(0,0,0,0.5);
-  --cf-shadow-lg: 0 12px 32px rgba(0,0,0,0.6);
+  --cf-shadow-xs: 0 1px 4px rgba(0,0,0,0.25);
+  --cf-shadow-sm: 0 2px 8px rgba(0,0,0,0.35);
+  --cf-shadow-md: 0 4px 16px rgba(0,0,0,0.45);
+  --cf-shadow-lg: 0 8px 28px rgba(0,0,0,0.55);
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -192,11 +220,11 @@ html, body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* 全局滚动条 */
-::-webkit-scrollbar { width: 5px; height: 5px; }
+/* 全局滚动条 — Bilibili 风格细滚动条 */
+::-webkit-scrollbar { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 99px; }
-::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+::-webkit-scrollbar-thumb { background: #C9CCD0; border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: #9499A0; }
 
 #app { height: 100%; }
 
@@ -205,80 +233,99 @@ body.dark {
   background: var(--cf-bg);
   color: var(--cf-text-1);
 }
-body.dark ::-webkit-scrollbar-thumb { background: #404040; }
-body.dark ::-webkit-scrollbar-thumb:hover { background: #525252; }
+body.dark ::-webkit-scrollbar-thumb { background: #3B3C3F; }
+body.dark ::-webkit-scrollbar-thumb:hover { background: #505255; }
 
 /* Dark mode overrides for components with hardcoded colors */
 body.dark .chat-view,
-body.dark .messages-scroll { background: #141414; }
-body.dark .chat-header { background: #1a1a1a; border-bottom-color: var(--cf-border); box-shadow: 0 1px 6px rgba(0,0,0,0.3); }
-body.dark .user-bubble { background: #2a2a2a; color: #e5e5e5; }
-body.dark .ai-avatar { background: #1a1a1a; border-color: #333; }
-body.dark .user-avatar { background: #2a2a2a; border-color: #333; }
-body.dark .hero-title { background: linear-gradient(135deg, #e5e5e5 0%, #818cf8 100%); -webkit-background-clip: text; background-clip: text; }
-body.dark .hero-icon-wrap { background: #1a1a1a; border-color: #333; }
-body.dark .header-brand-icon { background: #1a1a1a; border-color: #333; }
-body.dark .logo-icon { background: #1a1a1a; border-color: #333; }
+body.dark .messages-scroll { background: #1F2023; }
+body.dark .chat-header { background: #1F2023; border-bottom-color: var(--cf-border); box-shadow: 0 1px 6px rgba(0,0,0,0.3); }
+body.dark .user-bubble { background: #1A2F3A; color: #E6E7E9; border-color: #1E3A48; }
+body.dark .ai-avatar { background: #1F2023; border-color: #323335; }
+body.dark .user-avatar { background: #2B2C30; border-color: #323335; }
+body.dark .hero-title { background: linear-gradient(135deg, #E6E7E9 0%, #23ADE5 50%, #F67C9B 100%); -webkit-background-clip: text; background-clip: text; }
+body.dark .hero-icon-wrap { background: #1F2023; border-color: #323335; }
+body.dark .header-brand-icon { background: #1F2023; border-color: #323335; }
+body.dark .logo-icon { background: #1F2023; border-color: #323335; }
 
 /* Dark code blocks */
-body.dark .markdown-body .code-block { background: #1e1e1e; border-color: #333; }
-body.dark .markdown-body .code-header { background: #252525; border-bottom-color: #333; }
-body.dark .markdown-body .code-lang-badge { color: #a3a3a3; }
-body.dark .markdown-body .code-pre { background: #1e1e1e; }
-body.dark .markdown-body code { background: #2a2a3a; color: #a78bfa; border-color: #333; }
-body.dark .markdown-body th { background: #252525; color: #e5e5e5; }
-body.dark .markdown-body th, body.dark .markdown-body td { border-color: #333; }
-body.dark .markdown-body tr:nth-child(even) td { background: #1e1e1e; }
-body.dark .markdown-body tr:hover td { background: #1e2433; }
-body.dark .markdown-body blockquote { background: #1a1a2a; color: #a3a3a3; border-left-color: #6366f1; }
-body.dark .markdown-body h1, body.dark .markdown-body h2, body.dark .markdown-body h3 { color: #e5e5e5; }
-body.dark .markdown-body h2 { border-bottom-color: #333; }
-body.dark .markdown-body strong { color: #e5e5e5; }
-body.dark .markdown-body a { color: #818cf8; text-decoration-color: #4338ca; }
+body.dark .markdown-body .code-block { background: #1A1B1D; border-color: #323335; }
+body.dark .markdown-body .code-header { background: #222325; border-bottom-color: #323335; }
+body.dark .markdown-body .code-lang-badge { color: #A2A7AE; }
+body.dark .markdown-body .code-pre { background: #1A1B1D; }
+body.dark .markdown-body code { background: #252730; color: #23ADE5; border-color: #323335; }
+body.dark .markdown-body th { background: #222325; color: #E6E7E9; }
+body.dark .markdown-body th, body.dark .markdown-body td { border-color: #323335; }
+body.dark .markdown-body tr:nth-child(even) td { background: #1A1B1D; }
+body.dark .markdown-body tr:hover td { background: #1A2F3A; }
+body.dark .markdown-body blockquote { background: #1A2530; color: #A2A7AE; border-left-color: #00AEEC; }
+body.dark .markdown-body h1, body.dark .markdown-body h2, body.dark .markdown-body h3 { color: #E6E7E9; }
+body.dark .markdown-body h2 { border-bottom-color: #323335; }
+body.dark .markdown-body strong { color: #E6E7E9; }
+body.dark .markdown-body a { color: #23ADE5; text-decoration-color: #0095CC; }
 
 /* Dark mode for tool blocks and think blocks */
-body.dark .tool-block { background: #1a1a1a; border-color: #2e2e2e; }
-body.dark .tool-block-sources .tool-header-flat { background: #1a1a1a; border-color: #2e2e2e; border-left-color: #6366f1; }
-body.dark .think-block { background: #1a1a2a; border-color: #2e2e3e; }
-body.dark .think-body { background: #151520; border-top-color: #2e2e3e; }
+body.dark .tool-block { background: #1F2023; border-color: #323335; }
+body.dark .tool-block-sources .tool-header-flat { background: #1F2023; border-color: #323335; border-left-color: #00AEEC; }
+body.dark .think-block { background: #1F1F2A; border-color: #323345; }
+body.dark .think-body { background: #1A1A25; border-top-color: #323345; }
 
 /* Dark mode for step borders */
-body.dark .section-wrap.has-step { border-left-color: #333; }
+body.dark .section-wrap.has-step { border-left-color: #323335; }
 
 /* Dark SVG fills in logo/icons */
 body.dark .sidebar-logo svg path,
 body.dark .header-brand-icon svg path,
 body.dark .hero-icon-wrap svg path,
-body.dark .ai-avatar svg path { fill: #e5e5e5; }
-body.dark .user-avatar svg circle { fill: #a3a3a3; }
-body.dark .user-avatar svg path { stroke: #a3a3a3; }
+body.dark .ai-avatar svg path { fill: #E6E7E9; }
+body.dark .user-avatar svg circle { fill: #A2A7AE; }
+body.dark .user-avatar svg path { stroke: #A2A7AE; }
 
 /* Dark workflow card */
-body.dark .wf-card { background: #1a1a2a; border-color: #2e2e3e; }
-body.dark .wf-card-header { background: #1e1e2e; border-bottom-color: #2e2e3e; }
+body.dark .wf-card { background: #1F2025; border-color: #323340; }
+body.dark .wf-card-header { background: #222230; border-bottom-color: #323340; }
 
 /* Dark mode model status in sidebar */
-body.dark .model-status { background: linear-gradient(135deg, #0a1a0a, #0a200a); border-color: #1a3a1a; }
-body.dark .status-text { color: #4ade80; }
-body.dark .status-icon { color: #4ade80; }
+body.dark .model-status { background: linear-gradient(135deg, #0A1A1A, #0A2020); border-color: #1A3A3A; }
+body.dark .status-text { color: #3DDC84; }
+body.dark .status-icon { color: #3DDC84; }
 
 /* Dark input area */
-body.dark .input-card { background: #1a1a1a; border-color: #333; }
-body.dark .the-textarea { color: #e5e5e5; }
-body.dark .input-card:focus-within { border-color: #6366f1; box-shadow: var(--cf-shadow-lg), 0 0 0 4px rgba(99,102,241,0.15); }
+body.dark .input-card { background: #1F2023; border-color: #323335; }
+body.dark .the-textarea { color: #E6E7E9; }
+body.dark .input-card:focus-within { border-color: #00AEEC; box-shadow: var(--cf-shadow-lg), 0 0 0 4px rgba(0,174,236,0.15); }
 
 /* Dark continue button */
-body.dark .continue-btn { background: #1a1a1a; }
+body.dark .continue-btn { background: #1F2023; }
 
 /* Dark empty state suggestions */
-body.dark .sug-card { background: #1a1a1a; border-color: #333; color: var(--cf-text-2); }
+body.dark .sug-card { background: #1F2023; border-color: #323335; color: var(--cf-text-2); }
 
 /* Dark cognitive panel */
-body.dark .ai-avatar--breathing { background: #1a1a2e !important; }
+body.dark .ai-avatar--breathing { background: #1A2530 !important; }
+body.dark .file-code-view { background: #1A1B1D; }
+body.dark .file-code-pre { color: #E6E7E9; }
+body.dark .file-info-bar { background: rgba(0,174,236,0.05); border-bottom-color: #323335; }
+body.dark .file-name-badge { color: #E6E7E9; }
+body.dark .file-actions-bar { border-bottom-color: #323335; }
+body.dark .file-action-btn { background: #1F2023; border-color: #323335; color: #A2A7AE; }
+body.dark .file-action-btn:hover { background: #1A2F3A; border-color: #23ADE5; color: #23ADE5; }
+body.dark .file-action-btn.active { background: #1A2F3A; border-color: #23ADE5; color: #23ADE5; }
+body.dark .artifact-card { background: #1F2023; border-color: #323335; }
+body.dark .artifact-card:hover { border-color: #23ADE5; }
+body.dark .artifact-name { color: #E6E7E9; }
+body.dark .artifact-icon { background: linear-gradient(135deg, #1A2F3A 0%, #2A1F2A 100%); }
+
+/* Dark sandbox terminal */
+body.dark .sandbox-block { background: #1A1B1D; border-color: #323335; }
+body.dark .term-titlebar { background: #222325; border-bottom-color: #323335; }
+body.dark .term-body { background: #1A1B1D; }
+body.dark .term-title { color: #E6E7E9; }
+body.dark .term-code-inline { background: #222325; border-color: #323335; color: #A2A7AE; }
 </style>
 
 <style scoped>
-/* 整体布局：全屏卡片风格，四周统一间距 */
+/* 整体布局 — Bilibili 卡片风格 */
 .app {
   display: flex;
   height: 100vh;

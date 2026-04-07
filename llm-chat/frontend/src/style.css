@@ -1,42 +1,43 @@
-/* ── Element Plus 主题覆盖 ── */
+/* ── Element Plus 主题覆盖 — Bilibili 风格 ── */
 :root {
-  --el-color-primary: #6366f1;
-  --el-color-primary-light-3: #818cf8;
-  --el-color-primary-light-5: #a5b4fc;
-  --el-color-primary-light-7: #c7d2fe;
-  --el-color-primary-light-9: #eef2ff;
-  --el-color-primary-dark-2: #4f46e5;
+  --el-color-primary: #00AEEC;
+  --el-color-primary-light-3: #33C1F0;
+  --el-color-primary-light-5: #66D3F5;
+  --el-color-primary-light-7: #99E5F9;
+  --el-color-primary-light-9: #CCF2FC;
+  --el-color-primary-dark-2: #0095CC;
 
-  /* 应用色彩系统 */
-  --cf-bg: #f3f4f8;
+  /* 应用色彩系统 — Bilibili */
+  --cf-bg: #F1F2F3;
   --cf-sidebar: #ffffff;
   --cf-card: #ffffff;
-  --cf-hover: #f1f2f6;
-  --cf-active: #eef2ff;
-  --cf-border: #e4e6ef;
-  --cf-border-soft: #eef0f5;
+  --cf-hover: #E7E8EA;
+  --cf-active: #E3F6FD;
+  --cf-border: #E3E5E7;
+  --cf-border-soft: #EBEDF0;
 
-  --cf-text-1: #111827;
-  --cf-text-2: #374151;
-  --cf-text-3: #6b7280;
-  --cf-text-4: #9ca3af;
-  --cf-text-5: #d1d5db;
+  --cf-text-1: #18191C;
+  --cf-text-2: #61666D;
+  --cf-text-3: #9499A0;
+  --cf-text-4: #C9CCD0;
+  --cf-text-5: #E3E5E7;
 
-  --cf-indigo: #6366f1;
-  --cf-indigo-dark: #4f46e5;
-  --cf-green: #22c55e;
-  --cf-green-bg: #dcfce7;
-  --cf-red: #ef4444;
+  --cf-indigo: #00AEEC;
+  --cf-indigo-dark: #0095CC;
+  --cf-bili-pink: #FB7299;
+  --cf-green: #00B578;
+  --cf-green-bg: #D5F5E8;
+  --cf-red: #F25D59;
 
   --cf-shadow-xs: 0 1px 2px rgba(0,0,0,0.04);
-  --cf-shadow-sm: 0 1px 8px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
-  --cf-shadow-md: 0 4px 20px rgba(0,0,0,0.07), 0 1px 4px rgba(0,0,0,0.04);
-  --cf-shadow-lg: 0 8px 40px rgba(0,0,0,0.10), 0 2px 8px rgba(0,0,0,0.05);
+  --cf-shadow-sm: 0 1px 8px rgba(0,0,0,0.05);
+  --cf-shadow-md: 0 4px 16px rgba(0,0,0,0.06);
+  --cf-shadow-lg: 0 8px 28px rgba(0,0,0,0.08);
 
-  --cf-radius-sm: 8px;
-  --cf-radius-md: 12px;
-  --cf-radius-lg: 16px;
-  --cf-radius-xl: 22px;
+  --cf-radius-sm: 10px;
+  --cf-radius-md: 14px;
+  --cf-radius-lg: 18px;
+  --cf-radius-xl: 24px;
 }
 
 /* ── 全局重置 ── */
@@ -44,7 +45,7 @@
 html, body {
   margin: 0; padding: 0;
   height: 100%;
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
   font-feature-settings: 'kern' 1, 'liga' 1;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -54,7 +55,7 @@ html, body {
   overflow: hidden;
 }
 
-::selection { background: rgba(99,102,241,0.15); }
+::selection { background: rgba(0,174,236,0.18); }
 
 /* ── 布局 ── */
 .app {
@@ -62,11 +63,11 @@ html, body {
   height: 100vh;
 }
 
-/* ── 滚动条 ── */
+/* ── 滚动条 — Bilibili 风格 ── */
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+::-webkit-scrollbar-thumb { background: #C9CCD0; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #9499A0; }
 
 /* ── Element Plus 组件微调 ── */
 .el-select .el-input__wrapper {
@@ -77,7 +78,7 @@ html, body {
 }
 .el-select .el-input__wrapper.is-focus {
   border-color: var(--cf-indigo) !important;
-  box-shadow: 0 0 0 2px rgba(99,102,241,0.12) !important;
+  box-shadow: 0 0 0 2px rgba(0,174,236,0.12) !important;
 }
 .el-select .el-input__inner {
   font-family: inherit !important;

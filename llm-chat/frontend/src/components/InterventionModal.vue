@@ -181,8 +181,8 @@ function close() {
 
 .intervention-modal {
   background: #fff;
-  border-radius: 16px;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.2);
+  border-radius: 20px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.15);
   width: 100%;
   max-width: 560px;
   max-height: 80vh;
@@ -217,20 +217,20 @@ function close() {
   margin-top: 2px;
 }
 
-/* 目标 */
+/* 目标 — Bilibili 风格 */
 .modal-goal {
   display: flex;
   align-items: flex-start;
   gap: 8px;
   padding: 10px 20px;
-  background: rgba(139, 92, 246, 0.04);
-  border-bottom: 1px solid rgba(139, 92, 246, 0.08);
+  background: rgba(0, 174, 236, 0.03);
+  border-bottom: 1px solid rgba(0, 174, 236, 0.08);
 }
 .goal-chip {
   font-size: 11px;
   font-weight: 600;
-  color: #8b5cf6;
-  background: rgba(139, 92, 246, 0.1);
+  color: #00AEEC;
+  background: rgba(0, 174, 236, 0.08);
   padding: 1px 7px;
   border-radius: 20px;
   flex-shrink: 0;
@@ -265,7 +265,7 @@ function close() {
   position: relative;
   transition: border-color 0.2s;
 }
-.step-item:hover { border-color: #a5b4fc; }
+.step-item:hover { border-color: #00AEEC; }
 
 .step-index {
   width: 28px;
@@ -321,9 +321,9 @@ function close() {
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  border: 1.5px dashed #a5b4fc;
+  border: 1.5px dashed #B8E6F9;
   background: #fff;
-  color: #6366f1;
+  color: #00AEEC;
   cursor: pointer;
   font-size: 12px;
   transition: all 0.2s;
@@ -332,8 +332,8 @@ function close() {
 }
 .step-item:hover .insert-btn { opacity: 1; }
 .insert-btn:hover {
-  background: #eef2ff;
-  border-color: #6366f1;
+  background: #E3F6FD;
+  border-color: #00AEEC;
 }
 
 /* 添加步骤按钮 */
@@ -353,9 +353,9 @@ function close() {
   margin-top: 4px;
 }
 .add-step-btn:hover {
-  border-color: #a5b4fc;
-  color: #6366f1;
-  background: #f5f3ff;
+  border-color: #00AEEC;
+  color: #00AEEC;
+  background: #E3F6FD;
 }
 
 /* 底部操作 */

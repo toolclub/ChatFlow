@@ -20,37 +20,37 @@ const PHASE: Record<string, PhaseConfig> = {
   vision_analyze: {
     label: '图像解析',
     desc:  '正在解析图像内容，理解视觉信息...',
-    color: '#0891b2', bg: 'rgba(8,145,178,0.08)', pulse: '#22d3ee',
+    color: '#00AEEC', bg: 'rgba(0,174,236,0.06)', pulse: '#33C1F0',
   },
   routing:    {
     label: '分析意图',
     desc:  '识别问题类型，匹配最优策略',
-    color: '#6366f1', bg: 'rgba(99,102,241,0.08)', pulse: '#818cf8',
+    color: '#00AEEC', bg: 'rgba(0,174,236,0.06)', pulse: '#66D3F5',
   },
   planning:   {
     label: '制定计划',
     desc:  '分解任务，规划执行步骤',
-    color: '#7c3aed', bg: 'rgba(124,58,237,0.08)', pulse: '#a78bfa',
+    color: '#FB7299', bg: 'rgba(251,114,153,0.06)', pulse: '#FCA0B8',
   },
   tool:       {
     label: '执行工具',
     desc:  s => `正在调用 ${s.tool || '工具'}`,
-    color: '#d97706', bg: 'rgba(217,119,6,0.08)',  pulse: '#fbbf24',
+    color: '#FF9736', bg: 'rgba(255,151,54,0.06)',  pulse: '#FFBC73',
   },
   thinking:   {
     label: '推理生成',
-    desc:  '正在思考...',
-    color: '#2563eb', bg: 'rgba(37,99,235,0.08)',  pulse: '#60a5fa',
+    desc:  '模型正在回答...',
+    color: '#00AEEC', bg: 'rgba(0,174,236,0.06)',  pulse: '#33C1F0',
   },
   reflecting: {
     label: '反思评估',
     desc:  '评估执行结果，决定下一步',
-    color: '#059669', bg: 'rgba(5,150,105,0.08)',  pulse: '#34d399',
+    color: '#00B578', bg: 'rgba(0,181,120,0.06)',  pulse: '#3DDC84',
   },
   saving:     {
     label: '保存记录',
     desc:  '整理并保存本次对话',
-    color: '#6b7280', bg: 'rgba(107,114,128,0.08)', pulse: '#9ca3af',
+    color: '#9499A0', bg: 'rgba(148,153,160,0.06)', pulse: '#C9CCD0',
   },
 }
 
@@ -58,6 +58,10 @@ const cfg = computed(() => PHASE[props.status.state] ?? null)
 
 const desc = computed(() => {
   if (!cfg.value) return ''
+  // thinking 状态 + 无执行计划 → 直达回答模式
+  if (props.status.state === 'thinking' && props.cognitive.plan.length === 0) {
+    return '模型正在回答，请稍候...'
+  }
   const d = cfg.value.desc
   return typeof d === 'function' ? d(props.status) : d
 })
@@ -125,14 +129,14 @@ const planSteps = computed(() => props.cognitive.plan)
 .bubble-fade-enter-from  { opacity: 0; transform: translateY(6px); }
 .bubble-fade-leave-to    { opacity: 0; }
 
-/* ── 外层卡片 ── */
+/* ── 外层卡片 — Bilibili 风格 ── */
 .status-bubble {
   display: flex;
   align-items: stretch;
-  background: var(--cf-bg, #F5F7FA);
-  border: 1px solid var(--cf-border, #DCDFE6);
-  border-radius: 12px;
-  box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+  background: var(--cf-bg, #F1F2F3);
+  border: 1px solid var(--cf-border, #E3E5E7);
+  border-radius: 14px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.04);
   overflow: hidden;
   margin: 2px 0 6px;
   max-width: 520px;
@@ -234,10 +238,10 @@ const planSteps = computed(() => props.cognitive.plan)
   flex-shrink: 0;
   transition: all .25s;
 }
-.step-circle.pending  { background: #f3f4f6; color: #9ca3af; border: 1.5px solid #e5e7eb; }
-.step-circle.running  { background: #dbeafe; color: #2563eb; border: 1.5px solid #93c5fd; }
-.step-circle.done     { background: #d1fae5; color: #059669; border: 1.5px solid #6ee7b7; }
-.step-circle.failed   { background: #fee2e2; color: #dc2626; border: 1.5px solid #fca5a5; }
+.step-circle.pending  { background: #F1F2F3; color: #9499A0; border: 1.5px solid #E3E5E7; }
+.step-circle.running  { background: #E3F6FD; color: #00AEEC; border: 1.5px solid #B8E6F9; }
+.step-circle.done     { background: #D5F5E8; color: #00B578; border: 1.5px solid #8AE0C0; }
+.step-circle.failed   { background: #FDE8E7; color: #F25D59; border: 1.5px solid #F9ADAB; }
 
 .step-icon-done { font-size: 11px; }
 .step-icon-spin { font-size: 11px; animation: spin 1.1s linear infinite; }
@@ -252,7 +256,7 @@ const planSteps = computed(() => props.cognitive.plan)
   margin: 2px 0;
   transition: background .3s;
 }
-.step-connector.passed { background: #6ee7b7; }
+.step-connector.passed { background: #8AE0C0; }
 
 /* 步骤文字 */
 .step-content {
@@ -269,9 +273,9 @@ const planSteps = computed(() => props.cognitive.plan)
   line-height: 1.4;
   transition: color .2s;
 }
-.step-title.done    { color: #9ca3af; text-decoration: line-through; }
-.step-title.running { color: #1d4ed8; font-weight: 600; }
-.step-title.failed  { color: #dc2626; }
+.step-title.done    { color: #9499A0; text-decoration: line-through; }
+.step-title.running { color: #00AEEC; font-weight: 600; }
+.step-title.failed  { color: #F25D59; }
 
 .step-desc {
   font-size: 11px;

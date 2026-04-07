@@ -91,10 +91,25 @@ async def sandbox_write(path: str, content: str) -> str:
     Returns:
         写入结果
     """
+    from langchain_core.callbacks.manager import adispatch_custom_event
     from sandbox.manager import sandbox_manager
+    from db.artifact_store import save_artifact, detect_language
+
     conv_id = _get_conv_id()
     logger.info("sandbox_write | conv=%s | path=%s | len=%d", conv_id, path, len(content))
     result = await sandbox_manager.write_file(conv_id, path, content)
+
+    # 写入完成后，保存为文件产物并通知前端（write_file 内部总是 exit_code=0）
+    try:
+        name = path.rsplit("/", 1)[-1] if "/" in path else path
+        await save_artifact(conv_id, name, path, content)
+        await adispatch_custom_event(
+            "file_artifact",
+            {"name": name, "path": path, "content": content, "language": detect_language(path)},
+        )
+    except Exception:
+        logger.warning("file_artifact 事件发送失败 | conv=%s path=%s", conv_id, path, exc_info=True)
+
     return result.to_display()
 
 

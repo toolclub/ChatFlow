@@ -15,7 +15,7 @@ const pendingImages = ref<string[]>([])
 const fileInputRef = ref<HTMLInputElement>()
 const textareaRef = ref<HTMLTextAreaElement>()
 
-// ── Agent 模式开关 ──────────────────────────────────────────────────────────
+// ── Agent 模式开关 ──
 const agentMode = ref(true)
 const tipVisible = ref(false)
 const tipText = ref('')
@@ -55,10 +55,6 @@ function autoResize() {
   el.style.height = Math.min(el.scrollHeight, 200) + 'px'
 }
 
-/**
- * 将图片压缩到指定最大边长和 JPEG 质量，防止大图片超出 nginx/后端 body 限制。
- * 原图 ≤ 目标尺寸时仅做格式转换（统一为 JPEG），不放大。
- */
 function compressImage(dataUrl: string, maxPx = 1280, quality = 0.82): Promise<string> {
   return new Promise((resolve) => {
     const img = new Image()
@@ -79,7 +75,7 @@ function compressImage(dataUrl: string, maxPx = 1280, quality = 0.82): Promise<s
       canvas.getContext('2d')!.drawImage(img, 0, 0, width, height)
       resolve(canvas.toDataURL('image/jpeg', quality))
     }
-    img.onerror = () => resolve(dataUrl)   // 降级：压缩失败时返回原图
+    img.onerror = () => resolve(dataUrl)
     img.src = dataUrl
   })
 }
@@ -91,7 +87,6 @@ async function addImageFile(file: File) {
     const raw = ev.target?.result as string
     if (!raw) return
     const compressed = await compressImage(raw)
-    // 开发期可在控制台看到压缩比
     if (import.meta.env.DEV) {
       const ratio = Math.round((1 - compressed.length / raw.length) * 100)
       console.debug(`[InputBox] 图片压缩: ${Math.round(raw.length/1024)}KB → ${Math.round(compressed.length/1024)}KB (压缩率 ${ratio}%)`)
@@ -148,7 +143,7 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
           @keydown="handleKeydown"
           @paste="handlePaste"
           @input="autoResize"
-          :placeholder="centered ? '分配一个任务或提问任何问题...' : '发消息... （Enter 发送 · Shift+Enter 换行 · 支持粘贴截图）'"
+          :placeholder="centered ? '随便问点什么吧~ (●ˇ∀ˇ●)' : '发消息... （Enter 发送 · Shift+Enter 换行 · 支持粘贴截图）'"
           :disabled="loading"
           rows="1"
           class="the-textarea"
@@ -172,7 +167,7 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
             </button>
           </el-tooltip>
 
-          <!-- Agent 模式切换按钮 -->
+          <!-- Agent 模式切换 — Bilibili 风格 -->
           <button
             class="agent-toggle"
             :class="{ active: agentMode }"
@@ -181,7 +176,6 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
             :title="agentMode ? '当前：Agent 模式（点击切换）' : '当前：普通对话（点击切换）'"
           >
             <span class="agent-icon">
-              <!-- 闪电 = Agent，气泡 = Chat -->
               <svg v-if="agentMode" width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
                 <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
               </svg>
@@ -215,7 +209,7 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
       </div>
     </div>
 
-    <!-- 固定高度底部区域：tip 与 hint 叠加，仅过渡 opacity，不改变布局高度 -->
+    <!-- 底部提示 -->
     <div class="input-footer">
       <Transition name="mode-tip">
         <div v-if="tipVisible" class="mode-tip-bar">{{ tipText }}</div>
@@ -236,18 +230,19 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
   margin: 0 auto;
 }
 
-/* 卡片 */
+/* 卡片 — Bilibili 圆角柔和风 */
 .input-card {
   background: var(--cf-card);
   border: 1.5px solid var(--cf-border);
-  border-radius: var(--cf-radius-lg);
+  border-radius: var(--cf-radius-xl);
   box-shadow: var(--cf-shadow-md);
   overflow: hidden;
-  transition: box-shadow 0.2s, border-color 0.2s;
+  transition: box-shadow 0.25s, border-color 0.25s, transform 0.2s;
 }
 .input-card:focus-within {
-  border-color: #c4b5fd;
-  box-shadow: var(--cf-shadow-lg), 0 0 0 4px rgba(99,102,241,0.07);
+  border-color: #00AEEC;
+  box-shadow: var(--cf-shadow-lg), 0 0 0 4px rgba(0,174,236,0.08);
+  transform: translateY(-1px);
 }
 .input-card.is-loading { opacity: 0.75; }
 
@@ -261,7 +256,7 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
 .img-thumb {
   position: relative;
   width: 68px; height: 68px;
-  border-radius: 10px;
+  border-radius: 12px;
   overflow: hidden;
   border: 1.5px solid var(--cf-border);
 }
@@ -273,9 +268,9 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
 .img-remove {
   position: absolute;
   top: 3px; right: 3px;
-  width: 17px; height: 17px;
+  width: 18px; height: 18px;
   border-radius: 50%;
-  background: rgba(0,0,0,0.65);
+  background: rgba(0,0,0,0.6);
   color: #fff;
   border: none;
   cursor: pointer;
@@ -285,11 +280,11 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
   padding: 0;
   transition: background 0.12s;
 }
-.img-remove:hover { background: rgba(239,68,68,0.9); }
+.img-remove:hover { background: rgba(242,93,89,0.9); }
 
 /* 文本区 */
 .textarea-area {
-  padding: 14px 16px 6px;
+  padding: 14px 18px 6px;
 }
 .the-textarea {
   width: 100%;
@@ -297,7 +292,7 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
   border: none;
   outline: none;
   font-size: 14.5px;
-  font-family: 'Inter', inherit;
+  font-family: inherit;
   font-weight: 400;
   line-height: 1.65;
   color: var(--cf-text-1);
@@ -307,7 +302,7 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
   letter-spacing: -0.1px;
 }
 .the-textarea::placeholder {
-  color: var(--cf-text-5);
+  color: var(--cf-text-4);
   font-weight: 400;
 }
 
@@ -316,7 +311,7 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 12px 10px;
+  padding: 6px 14px 10px;
 }
 .tl, .tr {
   display: flex;
@@ -325,7 +320,7 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
 }
 .tool-btn {
   width: 30px; height: 30px;
-  border-radius: var(--cf-radius-sm);
+  border-radius: 10px;
   background: none;
   border: none;
   color: var(--cf-text-4);
@@ -338,28 +333,28 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
 }
 .tool-btn:hover:not(:disabled) {
   background: var(--cf-hover);
-  color: var(--cf-indigo);
+  color: #00AEEC;
 }
 .tool-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 
 .img-badge {
   font-size: 11px;
-  color: var(--cf-indigo);
-  background: var(--cf-active);
+  color: #00AEEC;
+  background: #E3F6FD;
   padding: 2px 8px;
   border-radius: 10px;
   font-weight: 500;
 }
 .char-count {
   font-size: 11px;
-  color: var(--cf-text-5);
+  color: var(--cf-text-4);
   font-variant-numeric: tabular-nums;
 }
 
-/* 发送按钮 */
+/* 发送按钮 — Bilibili 蓝粉渐变 */
 .send-btn {
-  width: 32px; height: 32px;
-  border-radius: 10px;
+  width: 34px; height: 34px;
+  border-radius: 12px;
   background: var(--cf-hover);
   color: var(--cf-text-4);
   border: 1.5px solid var(--cf-border);
@@ -368,18 +363,17 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
   align-items: center;
   justify-content: center;
   font-size: 15px;
-  transition: all 0.15s;
+  transition: all 0.2s cubic-bezier(0.34,1.56,0.64,1);
 }
 .send-btn.active {
-  background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+  background: linear-gradient(135deg, #00AEEC 0%, #FB7299 100%);
   color: #fff;
-  border-color: #6366f1;
-  box-shadow: 0 2px 10px rgba(99,102,241,0.35);
+  border-color: transparent;
+  box-shadow: 0 2px 10px rgba(0,174,236,0.3);
 }
 .send-btn.active:hover {
-  background: linear-gradient(135deg, #4f46e5 0%, #4338ca 100%);
-  transform: scale(1.05);
-  box-shadow: 0 4px 16px rgba(99,102,241,0.4);
+  transform: scale(1.1) rotate(-3deg);
+  box-shadow: 0 4px 18px rgba(0,174,236,0.4);
 }
 .send-btn:disabled:not(.active) { cursor: not-allowed; }
 
@@ -393,38 +387,39 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
   to { transform: rotate(360deg); }
 }
 
-/* Agent 模式切换按钮 */
+/* Agent 模式切换 — Bilibili 风格 */
 .agent-toggle {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   height: 26px;
-  padding: 0 9px;
+  padding: 0 10px;
   border-radius: 13px;
   border: 1.5px solid var(--cf-border);
   background: var(--cf-hover);
-  color: var(--cf-text-4);
+  color: var(--cf-text-3);
   font-size: 11.5px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.18s;
+  transition: all 0.2s cubic-bezier(0.34,1.56,0.64,1);
   white-space: nowrap;
   letter-spacing: 0.1px;
 }
 .agent-toggle:hover:not(:disabled) {
-  border-color: #a78bfa;
-  color: #a78bfa;
-  background: rgba(167,139,250,0.08);
+  border-color: #FB7299;
+  color: #FB7299;
+  background: rgba(251,114,153,0.06);
+  transform: scale(1.03);
 }
 .agent-toggle.active {
-  background: linear-gradient(135deg, rgba(99,102,241,0.12) 0%, rgba(139,92,246,0.12) 100%);
-  border-color: #818cf8;
-  color: #a5b4fc;
+  background: linear-gradient(135deg, rgba(0,174,236,0.08) 0%, rgba(251,114,153,0.08) 100%);
+  border-color: #00AEEC;
+  color: #00AEEC;
 }
 .agent-toggle.active:hover:not(:disabled) {
-  background: linear-gradient(135deg, rgba(99,102,241,0.2) 0%, rgba(139,92,246,0.2) 100%);
-  border-color: #a78bfa;
-  color: #c4b5fd;
+  background: linear-gradient(135deg, rgba(0,174,236,0.15) 0%, rgba(251,114,153,0.15) 100%);
+  border-color: #FB7299;
+  color: #FB7299;
 }
 .agent-toggle:disabled { opacity: 0.4; cursor: not-allowed; }
 .agent-icon {
@@ -434,14 +429,14 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
 }
 .agent-label { line-height: 1; }
 
-/* 固定高度底部容器，内部元素绝对定位叠加，不影响布局 */
+/* 底部容器 */
 .input-footer {
   position: relative;
   height: 28px;
   margin-top: 6px;
 }
 
-/* 切换提示条：绝对覆盖，仅改 opacity */
+/* 切换提示 — Bilibili 蓝 */
 .mode-tip-bar {
   position: absolute;
   inset: 0;
@@ -449,10 +444,10 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
   align-items: center;
   justify-content: center;
   padding: 0 14px;
-  border-radius: 8px;
-  background: rgba(99,102,241,0.08);
-  border: 1px solid rgba(99,102,241,0.18);
-  color: #a5b4fc;
+  border-radius: 12px;
+  background: rgba(0,174,236,0.06);
+  border: 1px solid rgba(0,174,236,0.15);
+  color: #00AEEC;
   font-size: 11.5px;
   letter-spacing: 0.1px;
   white-space: nowrap;
@@ -460,7 +455,6 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
   text-overflow: ellipsis;
 }
 
-/* Hint 文字：绝对居中 */
 .hint {
   position: absolute;
   inset: 0;
@@ -468,11 +462,10 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
   align-items: center;
   justify-content: center;
   font-size: 11px;
-  color: var(--cf-text-5);
+  color: var(--cf-text-4);
   pointer-events: none;
 }
 
-/* tip 过渡：纯 opacity，无位移 */
 .mode-tip-enter-active,
 .mode-tip-leave-active {
   transition: opacity 0.2s ease;
@@ -482,7 +475,6 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
   opacity: 0;
 }
 
-/* hint 过渡：纯 opacity */
 .mode-hint-enter-active,
 .mode-hint-leave-active {
   transition: opacity 0.2s ease;

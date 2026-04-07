@@ -21,8 +21,8 @@ from graph.runner.utils import sse
 # 需要推送 thinking 状态的节点集合
 _LLM_NODES = frozenset({"call_model", "call_model_after_tool"})
 
-# 需要转发流式 thinking/token 事件的节点集合（包括 planner/reflector）
-_STREAMING_NODES = frozenset({"call_model", "call_model_after_tool", "planner", "reflector"})
+# 需要转发流式 thinking/token 事件的节点集合（所有会发出 llm_token/llm_thinking 的节点）
+_STREAMING_NODES = frozenset({"call_model", "call_model_after_tool", "planner", "reflector", "route_model"})
 
 # MiniMax 等模型在流式模式下可能输出的工具调用文本残留（需过滤）
 _TOOL_CALL_ARTIFACTS = ("<minimax:tool_call>", "[TOOL_CALL]")

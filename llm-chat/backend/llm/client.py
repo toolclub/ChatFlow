@@ -192,6 +192,8 @@ class LLMClient:
         thinking_parts: list[str] = []
         # tool_calls 拼装：index → {id, name, arguments_fragments}
         tc_builders: dict[int, dict] = {}
+        # 已通知前端"开始生成"的工具 index 集合
+        tc_notified: set[int] = set()
 
         async for chunk in stream:
             if not chunk.choices:
@@ -225,6 +227,12 @@ class LLMClient:
                             tc_builders[idx]["name"] = tc_delta.function.name
                     if tc_delta.function and tc_delta.function.arguments:
                         tc_builders[idx]["arguments"] += tc_delta.function.arguments
+
+                    # 首次检测到工具名时，立即通知前端"工具调用参数正在生成中"
+                    # 前端可以提前显示终端 loading 状态，不用等 48 秒参数生成完
+                    if idx not in tc_notified and tc_builders[idx]["name"]:
+                        tc_notified.add(idx)
+                        yield ("tool_call_start", tc_builders[idx]["name"])
 
         # 拼装最终结果
         content = "".join(content_parts)

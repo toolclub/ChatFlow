@@ -1,4 +1,4 @@
-import type { ClarificationData, PlanStep, ToolHistoryEvent } from '../types'
+import type { ClarificationData, FileArtifact, PlanStep, ToolHistoryEvent } from '../types'
 
 const API_BASE = ''
 
@@ -100,12 +100,21 @@ export async function fetchLatestPlan(convId: string): Promise<{ id: string; goa
   return data.plan || null
 }
 
+export async function fetchConvArtifacts(convId: string): Promise<FileArtifact[]> {
+  const res = await fetch(`${API_BASE}/api/conversations/${convId}/artifacts`, {
+    headers: { 'X-Client-ID': getClientId() },
+  })
+  const data = await res.json()
+  return data.artifacts || []
+}
+
 export async function sendMessage(
   conversationId: string,
   message: string,
   model: string,
   images: string[],
   agentMode: boolean,
+  forcePlan?: Record<string, unknown>[] | null,
   onChunk: (text: string) => void,
   onToolCall: (name: string, input: Record<string, unknown>) => void,
   onToolResult: (name: string, data: Record<string, unknown>) => void,
@@ -121,6 +130,8 @@ export async function sendMessage(
   onClarification?: (data: ClarificationData) => void,
   onInterrupted?: () => void,
   onSandboxOutput?: (toolName: string, stream: string, text: string) => void,
+  onFileArtifact?: (artifact: FileArtifact) => void,
+  onToolCallStart?: (name: string) => void,
 ) {
   const body: Record<string, unknown> = {
     conversation_id: conversationId,
@@ -130,6 +141,9 @@ export async function sendMessage(
   }
   if (images.length > 0) {
     body.images = images
+  }
+  if (forcePlan?.length) {
+    body.force_plan = forcePlan
   }
 
   const res = await fetch(`${API_BASE}/api/chat`, {
@@ -157,6 +171,31 @@ export async function sendMessage(
     }
   }, 5000)
 
+  function processLine(line: string) {
+    if (!line.startsWith('data: ')) return
+    try {
+      const data = JSON.parse(line.slice(6))
+      if (data.thinking)        onThinking?.(data.thinking)
+      if (data.clarification)  onClarification?.(data.clarification)
+      if (data.sandbox_output) onSandboxOutput?.(data.sandbox_output.tool_name, data.sandbox_output.stream, data.sandbox_output.text)
+      if (data.file_artifact)    onFileArtifact?.(data.file_artifact as FileArtifact)
+      if (data.tool_call_start) onToolCallStart?.(data.tool_call_start.name)
+      if (data.content)         onChunk(data.content)
+      if (data.tool_call)      onToolCall(data.tool_call.name, data.tool_call.input)
+      if (data.tool_result)    onToolResult(data.tool_result.name, data.tool_result)
+      if (data.search_item)    onSearchItem(data.search_item)
+      if (data.status)         onStatus(data.status, data.model)
+      if (data.route)          onRoute(data.route.model, data.route.intent)
+      if (data.plan_generated) onPlanGenerated(data.plan_generated.steps)
+      if (data.reflection)     onReflection(data.reflection.content, data.reflection.decision)
+      if (data.error)          { onChunk('\n\n⚠️ ' + data.error); if (data.can_continue) onInterrupted?.() }
+      if (data.ping)           lastDataTime = Date.now()
+      // done/stopped 单独 try-catch，确保 streamDone 标记不丢失
+      if (data.done)           { streamDone = true; try { onDone() } catch(e) { console.error('[SSE] onDone error', e) } }
+      if (data.stopped)        { streamDone = true; try { onStopped() } catch(e) { console.error('[SSE] onStopped error', e) } }
+    } catch {}
+  }
+
   try {
     while (true) {
       let done: boolean
@@ -166,7 +205,6 @@ export async function sendMessage(
         done = result.done
         value = result.value
       } catch {
-        // 流被取消或网络中断，正常退出
         break
       }
       if (done) break
@@ -175,29 +213,10 @@ export async function sendMessage(
       buffer += decoder.decode(value, { stream: true })
       const lines = buffer.split('\n')
       buffer = lines.pop() ?? ''
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue
-        try {
-          const data = JSON.parse(line.slice(6))
-          if (data.thinking)        onThinking?.(data.thinking)
-          if (data.clarification)  onClarification?.(data.clarification)
-          if (data.sandbox_output) onSandboxOutput?.(data.sandbox_output.tool_name, data.sandbox_output.stream, data.sandbox_output.text)
-          if (data.content)        onChunk(data.content)
-          if (data.tool_call)      onToolCall(data.tool_call.name, data.tool_call.input)
-          if (data.tool_result)    onToolResult(data.tool_result.name, data.tool_result)
-          if (data.search_item)    onSearchItem(data.search_item)
-          if (data.status)         onStatus(data.status, data.model)
-          if (data.route)          onRoute(data.route.model, data.route.intent)
-          if (data.plan_generated) onPlanGenerated(data.plan_generated.steps)
-          if (data.reflection)     onReflection(data.reflection.content, data.reflection.decision)
-          if (data.error)          { onChunk('\n\n⚠️ ' + data.error); if (data.can_continue) onInterrupted?.() }
-          if (data.ping)           lastDataTime = Date.now()
-          if (data.done)           { streamDone = true; onDone() }
-          if (data.stopped)        { streamDone = true; onStopped() }
-        } catch {}
-      }
+      for (const line of lines) processLine(line)
     }
+    // 处理残留 buffer（最后一个事件可能没以 \n 结尾）
+    if (buffer.trim()) processLine(buffer.trim())
   } finally {
     clearInterval(idleTimer)
   }

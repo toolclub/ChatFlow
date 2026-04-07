@@ -80,8 +80,8 @@ async def save_step_result(
             await session.execute(
                 text(
                     "UPDATE plan_steps"
-                    "   SET steps       = jsonb_set(jsonb_set(steps, :p_status, :v_status::jsonb),"
-                    "                               :p_result, :v_result::jsonb),"
+                    "   SET steps       = jsonb_set(jsonb_set(steps, :p_status, CAST(:v_status AS jsonb)),"
+                    "                               :p_result, CAST(:v_result AS jsonb)),"
                     "       current_step = :next_step,"
                     "       updated_at   = :now"
                     " WHERE id = :plan_id"
@@ -106,6 +106,40 @@ async def save_step_result(
             "保存步骤结果失败（不影响主流程）| plan_id=%s | step=%d | error=%s",
             plan_id, step_index, exc,
         )
+
+
+async def finalize_all_steps(plan_id: str, plan: list[dict]) -> None:
+    """
+    将所有步骤标记为 done 并写入 DB（save_response 完成时调用）。
+
+    确保刷新页面后 DB 里的状态全部是 done，不会残留 running。
+    """
+    try:
+        finalized = []
+        for step in plan:
+            s = dict(step)
+            if s.get("status") != "failed":
+                s["status"] = "done"
+            finalized.append(s)
+
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                text(
+                    "UPDATE plan_steps"
+                    "   SET steps = CAST(:steps AS jsonb),"
+                    "       updated_at = :now"
+                    " WHERE id = :plan_id"
+                ),
+                {
+                    "steps": json.dumps(finalized, ensure_ascii=False),
+                    "now": time.time(),
+                    "plan_id": plan_id,
+                },
+            )
+            await session.commit()
+        logger.info("finalize_all_steps | plan_id=%s | steps=%d", plan_id, len(finalized))
+    except Exception as exc:
+        logger.error("finalize_all_steps 失败 | plan_id=%s | error=%s", plan_id, exc)
 
 
 async def get_latest_plan_for_conv(conv_id: str) -> dict | None:

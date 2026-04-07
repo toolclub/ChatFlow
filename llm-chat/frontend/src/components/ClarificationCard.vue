@@ -52,14 +52,13 @@ function selectedIsOther(itemId: string): boolean {
   return isOtherOption(val)
 }
 
-// 检查必填项（选择题至少选一个；选了"其他"时补充文本框必须填写）
+// 检查必填项
 const canSubmit = computed(() => {
   return effectiveItems.value.every((item: ClarificationItem) => {
-    if (item.type === 'text') return true  // 文本输入可选
+    if (item.type === 'text') return true
     const val = answers.value[item.id]
     const hasVal = Array.isArray(val) ? val.length > 0 : !!val
     if (!hasVal) return false
-    // 选了"其他"时，补充说明必填
     if (item.type === 'single_choice' && selectedIsOther(item.id)) {
       return !!otherText.value[item.id]?.trim()
     }
@@ -82,7 +81,6 @@ function isSelected(itemId: string, option: string): boolean {
 
 function handleSubmit() {
   if (!canSubmit.value || props.loading) return
-  // 合并"其他"的补充文本到答案中
   const merged: Record<string, string | string[]> = {}
   effectiveItems.value.forEach((item: ClarificationItem) => {
     const val = answers.value[item.id]
@@ -101,13 +99,7 @@ function handleSubmit() {
   <div class="clarification-card">
     <!-- 卡片头部 -->
     <div class="card-header">
-      <div class="card-icon">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-          <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.8"/>
-          <path d="M12 8v1m0 7v-5m0 0c0-1.5 2-2.5 2-4a2 2 0 00-4 0" stroke="currentColor"
-                stroke-width="1.8" stroke-linecap="round"/>
-        </svg>
-      </div>
+      <div class="card-icon">💬</div>
       <span class="card-title">{{ data.question }}</span>
     </div>
 
@@ -197,37 +189,31 @@ function handleSubmit() {
 .clarification-card {
   margin-top: 14px;
   background: #ffffff;
-  border: 1.5px solid #e0deff;
+  border: 1px solid #E3E5E7;
   border-radius: 14px;
   overflow: hidden;
-  box-shadow: 0 2px 16px rgba(99, 102, 241, 0.10), 0 1px 4px rgba(0,0,0,0.05);
+  box-shadow: 0 1px 6px rgba(0,0,0,0.04);
   max-width: 620px;
 }
 
-/* ── 头部 ── */
+/* ── 头部 — 浅色柔和 ── */
 .card-header {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  padding: 14px 16px 12px;
-  background: linear-gradient(135deg, #f5f3ff 0%, #ede9fe 100%);
-  border-bottom: 1px solid #e0deff;
+  padding: 13px 16px 11px;
+  background: #FAFBFC;
+  border-bottom: 1px solid #EBEDF0;
 }
 .card-icon {
+  font-size: 18px;
   flex-shrink: 0;
-  width: 28px; height: 28px;
-  border-radius: 8px;
-  background: #6366f1;
-  color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   margin-top: 1px;
 }
 .card-title {
   font-size: 13.5px;
   font-weight: 600;
-  color: #3730a3;
+  color: #18191C;
   line-height: 1.5;
 }
 
@@ -246,10 +232,10 @@ function handleSubmit() {
 .item-label {
   font-size: 12.5px;
   font-weight: 600;
-  color: #374151;
+  color: #18191C;
 }
 
-/* ── 选项网格 ── */
+/* ── 选项网格 — 柔和浅色 ── */
 .options-grid {
   display: flex;
   flex-wrap: wrap;
@@ -259,28 +245,28 @@ function handleSubmit() {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 13px;
-  border: 1.5px solid #d1d5db;
+  padding: 7px 14px;
+  border: 1px solid #E3E5E7;
   border-radius: 20px;
-  background: #f9fafb;
+  background: #FAFBFC;
   font-size: 12.5px;
   font-weight: 500;
-  color: #374151;
+  color: #61666D;
   cursor: pointer;
   transition: all 0.16s cubic-bezier(0.34, 1.56, 0.64, 1);
   font-family: inherit;
   line-height: 1.4;
 }
 .opt-btn:hover {
-  border-color: #a5b4fc;
-  background: #eef2ff;
-  color: #4338ca;
+  border-color: #C9CCD0;
+  background: #F1F2F3;
+  color: #18191C;
   transform: translateY(-1px);
 }
 .opt-btn.selected {
-  border-color: #6366f1;
-  background: #ede9fe;
-  color: #4338ca;
+  border-color: #00AEEC;
+  background: #F0FAFD;
+  color: #0095CC;
   font-weight: 600;
 }
 
@@ -289,35 +275,33 @@ function handleSubmit() {
 .opt-check {
   width: 14px; height: 14px;
   border-radius: 50%;
-  border: 1.5px solid currentColor;
+  border: 1.5px solid #C9CCD0;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  color: #6366f1;
-  opacity: 0.7;
+  transition: all 0.15s;
 }
 .opt-btn--multi .opt-check {
   border-radius: 4px;
 }
 .opt-btn.selected .opt-radio,
 .opt-btn.selected .opt-check {
-  background: #6366f1;
-  border-color: #6366f1;
+  background: #00AEEC;
+  border-color: #00AEEC;
   color: #fff;
-  opacity: 1;
 }
 
 /* ── 文本输入 ── */
 .text-input {
   width: 100%;
   padding: 8px 12px;
-  border: 1.5px solid #d1d5db;
-  border-radius: 8px;
+  border: 1px solid #E3E5E7;
+  border-radius: 10px;
   font-size: 13px;
   font-family: inherit;
-  color: #374151;
-  background: #f9fafb;
+  color: #18191C;
+  background: #FAFBFC;
   resize: vertical;
   min-height: 62px;
   outline: none;
@@ -325,15 +309,15 @@ function handleSubmit() {
   box-sizing: border-box;
 }
 .text-input:focus {
-  border-color: #6366f1;
+  border-color: #00AEEC;
   background: #fff;
-  box-shadow: 0 0 0 3px rgba(99,102,241,0.1);
+  box-shadow: 0 0 0 2px rgba(0,174,236,0.08);
 }
-.text-input::placeholder { color: #9ca3af; }
+.text-input::placeholder { color: #C9CCD0; }
 .other-input {
   margin-top: 4px;
-  border-color: #a5b4fc;
-  background: #f5f3ff;
+  border-color: #D0EEF9;
+  background: #F8FCFE;
 }
 
 /* ── 底部 ── */
@@ -347,7 +331,7 @@ function handleSubmit() {
   align-items: center;
   gap: 6px;
   padding: 8px 20px;
-  background: #6366f1;
+  background: #00AEEC;
   color: #fff;
   border: none;
   border-radius: 20px;
@@ -356,15 +340,16 @@ function handleSubmit() {
   font-family: inherit;
   cursor: pointer;
   transition: all 0.18s;
-  box-shadow: 0 2px 8px rgba(99,102,241,0.3);
+  box-shadow: 0 1px 4px rgba(0,174,236,0.2);
 }
 .submit-btn:hover:not(:disabled) {
-  background: #4f46e5;
-  box-shadow: 0 4px 14px rgba(99,102,241,0.4);
+  background: #0095CC;
+  box-shadow: 0 2px 8px rgba(0,174,236,0.3);
   transform: translateY(-1px);
 }
 .submit-btn:disabled {
-  background: #c7d2fe;
+  background: #E3E5E7;
+  color: #C9CCD0;
   box-shadow: none;
   cursor: not-allowed;
   transform: none;

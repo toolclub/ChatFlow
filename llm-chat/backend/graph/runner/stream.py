@@ -34,6 +34,7 @@ async def stream_response(
     client_id: str = "",
     images: list[str] | None = None,
     agent_mode: bool = True,
+    force_plan: list[dict] | None = None,
 ) -> AsyncGenerator[str, None]:
     """
     驱动 LangGraph 图执行，将事件流翻译为 FastAPI SSE 字符串流。
@@ -76,6 +77,7 @@ async def stream_response(
         # 澄清问询初始值（由 SaveResponseNode 检测后写入）
         "needs_clarification": False,
         # 认知规划初始值
+        "force_plan":         force_plan or [],
         "plan":               [],
         "plan_id":            "",
         "plan_goal":          "",

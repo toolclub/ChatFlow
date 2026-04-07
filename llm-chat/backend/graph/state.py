@@ -50,6 +50,7 @@ class GraphState(TypedDict):
     vision_description: str                     # Ollama 视觉模型对图片的文字描述
 
     # ── 认知规划 ────────────────────────────────────────────────────────────
+    force_plan: list[PlanStep]       # 用户编辑后的强制计划（非空时 planner 跳过 LLM 直接使用）
     plan: list[PlanStep]
     plan_id: str                 # plan_steps 表主键（planner 写入，后续节点只读）
     plan_goal: str               # 原始任务目标（续写时 user_message 是"继续"，需单独保存 goal）

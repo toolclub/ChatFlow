@@ -14,6 +14,9 @@
 import logging
 
 from config import LONGTERM_MEMORY_ENABLED, SUMMARY_SYSTEM_PROMPT
+from prompts import load_prompt as _lp
+
+_compressor_instruction = _lp("nodes/compressor")
 from llm.chat import get_summary_llm
 from memory import store as memory_store
 from memory.context_builder import should_compress, slice_for_compression
@@ -60,7 +63,7 @@ async def maybe_compress(conv_id: str) -> bool:
     prompt_content = (
         (f"已有摘要：\n{existing}\n\n" if existing else "")
         + f"新增对话：\n{history_text}\n\n"
-        + "请将以上内容更新为一段完整的中文摘要，保留关键信息、用户偏好、重要结论。"
+        + _compressor_instruction
     )
 
     # 使用原生 OpenAI LLMClient（替代旧版 langchain ChatOpenAI.ainvoke）

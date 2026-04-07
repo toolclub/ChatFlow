@@ -15,6 +15,7 @@ email: lzh19162600626@gmail.com
   GET  /api/tools                        —— 查看当前可用工具列表
   GET  /api/conversations/{id}/memory    —— 记忆状态调试
   GET  /api/conversations/{id}/tools     —— 对话工具调用历史（供前端刷新后复现）
+  GET  /api/conversations/{id}/artifacts —— 对话文件产物列表（供前端刷新后恢复文件卡片）
 """
 import asyncio
 import logging
@@ -284,6 +285,7 @@ async def chat(req: ChatRequest, request: Request):
                 client_id=client_id,
                 images=req.images,
                 agent_mode=req.agent_mode,
+                force_plan=req.force_plan,
             ):
                 if await request.is_disconnected() or stop_event.is_set():
                     yield "data: {\"stopped\": true}\n\n"
@@ -323,6 +325,16 @@ async def get_conversation_tools(conv_id: str):
     """获取对话的工具调用历史（供前端刷新后复现"此会话经历了什么"）。"""
     events = await get_tool_events(conv_id)
     return {"events": events}
+
+
+# ── 文件产物接口 ───────────────────────────────────────────────────────────────
+
+@app.get("/api/conversations/{conv_id}/artifacts")
+async def get_conversation_artifacts(conv_id: str):
+    """获取对话的文件产物列表（供前端刷新后恢复文件卡片）。"""
+    from db.artifact_store import get_artifacts_for_conv
+    artifacts = await get_artifacts_for_conv(conv_id)
+    return {"artifacts": artifacts}
 
 
 # ── 执行计划接口 ───────────────────────────────────────────────────────────────

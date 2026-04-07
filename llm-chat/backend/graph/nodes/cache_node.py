@@ -48,6 +48,11 @@ class SemanticCacheNode(BaseNode):
         client_id = state.get("client_id", "")
         clog      = get_conv_logger(client_id, conv_id)
 
+        # 强制计划时跳过缓存（用户编辑了执行计划，必须重新执行）
+        if state.get("force_plan"):
+            clog.info("Cache SKIP  | force_plan 模式，跳过语义缓存")
+            return {"cache_hit": False, "full_response": "", "cache_similarity": 0.0}
+
         # 含图片时跳过缓存
         if state.get("images"):
             clog.info(

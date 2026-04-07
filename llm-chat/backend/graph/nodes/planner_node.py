@@ -72,25 +72,7 @@ def _fix_json_inner_quotes(text: str) -> str:
     return ''.join(result)
 
 
-# ── 今日日期（构建时固定，进程生命周期内不变） ─────────────────────────────────
-_TODAY = date.today().strftime("%Y年%m月%d日")
-
-_PLANNER_SYSTEM = f"""你是一个任务规划专家。分析用户的请求，制定清晰的执行计划。
-当前日期：{_TODAY}。搜索时直接用核心关键词，不要手动添加年份。
-要求：
-- 将任务分解为若干个具体可执行的步骤
-- 每步有明确的操作（搜索信息、获取数据、计算、分析、撰写等）
-- 步骤间有逻辑顺序，后一步依赖前一步的结果
-- 如果任务很简单只需一步操作，就只列 1 个步骤
-- 【最后一步原则】如果用户最终需要获得某个产品（网页、完整代码、分析报告等），
-  最后一步必须是"直接输出该产品的完整内容（代码/HTML/文档）"；
-  不能用"规划结构"、"设计架构"、"制定方案"等描述性步骤代替；
-  前面的步骤专门负责收集或分析所需信息，最后步才是生成
-
-输出格式（JSON）：
-{{"steps": [{{"title": "简短标题（10字以内）", "description": "具体描述（说明要做什么、搜索什么）"}}]}}
-
-只输出 JSON，不要任何解释。"""
+from prompts import load_prompt
 
 # 每步最多计划步数（stream.py recursion_limit=120，每步约4节点，10步≈45节点，远低于上限）
 _MAX_PLAN_STEPS = 10
@@ -141,6 +123,82 @@ class PlannerNode(BaseNode):
     def _is_continuation(cls, user_msg: str) -> bool:
         """判断用户是否在要求续写上次被中断的任务。"""
         return user_msg.strip() in cls._CONTINUATION_WORDS
+
+    @staticmethod
+    async def _apply_force_plan(force_plan: list[dict], state: GraphState) -> PlannerNodeOutput:
+        """
+        用户在前端编辑了计划（增删改步骤）后强制执行。
+
+        逻辑：
+          1. 已完成（status=done）的步骤保留 result，跳过不重跑
+          2. 从第一个非 done 步骤开始执行
+          3. 写入 DB（覆盖旧计划），支持"继续"恢复
+        """
+        plan: list[PlanStep] = []
+        resume_idx = 0
+
+        for i, s in enumerate(force_plan):
+            status = s.get("status", "pending")
+            result = s.get("result", "")
+            step = PlanStep(
+                id=s.get("id", str(i + 1)),
+                title=s.get("title", f"步骤 {i + 1}"),
+                description=s.get("description", ""),
+                status="done" if status == "done" else "pending",
+                result=result,
+            )
+            plan.append(step)
+
+        # 找第一个非 done 步骤
+        for i, step in enumerate(plan):
+            if step["status"] != "done":
+                resume_idx = i
+                plan[i] = {**plan[i], "status": "running"}
+                break
+        else:
+            resume_idx = len(plan) - 1
+            plan[-1] = {**plan[-1], "status": "running"}
+
+        # 收集已完成步骤的 result
+        step_results = [
+            plan[i]["result"]
+            for i in range(resume_idx)
+            if plan[i].get("result")
+        ]
+
+        goal = state.get("user_message", "")
+        for line in goal.split("\n"):
+            if not line.startswith("请按以下") and line.strip():
+                goal = line.strip()
+                break
+
+        # 写入 DB（覆盖旧计划），这样中断后"继续"能恢复编辑后的计划
+        plan_id = str(uuid.uuid4())
+        conv_id = state.get("conv_id", "")
+        try:
+            from db.plan_store import create_plan
+            await create_plan(
+                plan_id=plan_id,
+                conv_id=conv_id,
+                goal=goal,
+                steps=[dict(s) for s in plan],
+            )
+        except Exception:
+            logger.warning("force_plan 写入 DB 失败 | conv=%s", conv_id, exc_info=True)
+
+        logger.info(
+            "强制计划：使用用户编辑的 %d 步计划 | resume_step=%d | done_steps=%d",
+            len(plan), resume_idx + 1, sum(1 for s in plan if s["status"] == "done"),
+        )
+
+        return {
+            "plan":               plan,
+            "plan_id":            plan_id,
+            "plan_goal":          goal,
+            "current_step_index": resume_idx,
+            "step_iterations":    0,
+            "step_results":       step_results,
+        }
 
     async def _try_resume_from_db(self, state: GraphState) -> PlannerNodeOutput | None:
         """
@@ -233,6 +291,11 @@ class PlannerNode(BaseNode):
         route    = state.get("route", "")
         user_msg = state.get("user_message", "")
 
+        # ── 强制计划：用户在前端编辑了计划，直接使用，跳过 LLM 规划 ────────────
+        force_plan = state.get("force_plan", [])
+        if force_plan:
+            return await self._apply_force_plan(force_plan, state)
+
         # ── 续写检测：优先从 DB 恢复中断计划 ──────────────────────────────────
         # 用户说"继续"时，先尝试找上次未完成的计划，直接跳到断点步骤执行，
         # 避免重新规划和重复搜索，节省时间和 API 费用。
@@ -301,7 +364,7 @@ class PlannerNode(BaseNode):
             planning_msg = user_msg
 
         messages = [
-            {"role": "system", "content": _PLANNER_SYSTEM},
+            {"role": "system", "content": load_prompt("nodes/planner", today=date.today().strftime("%Y年%m月%d日"))},
             {"role": "user",   "content": planning_msg},
         ]
 

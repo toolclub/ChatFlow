@@ -416,7 +416,7 @@ const detailIdx = computed(() => detailPanel.value.node?.planIdx ?? -1)
 .toolbar-title { font-size: 13px; font-weight: 600; color: #111827; }
 .node-count {
   font-size: 11px; font-weight: 600;
-  color: #6366f1; background: #eef2ff;
+  color: #00AEEC; background: #E3F6FD;
   padding: 1px 7px; border-radius: 10px;
 }
 .toolbar-actions { display: flex; gap: 6px; }
@@ -427,7 +427,7 @@ const detailIdx = computed(() => detailPanel.value.node?.planIdx ?? -1)
   border-radius: 7px; color: #6b7280; font-size: 12px;
   cursor: pointer; transition: all .18s ease; font-family: inherit;
 }
-.toolbar-btn:hover { background: #eef2ff; border-color: #a5b4fc; color: #6366f1; transform: translateY(-1px); }
+.toolbar-btn:hover { background: #E3F6FD; border-color: #B8E6F9; color: #00AEEC; transform: translateY(-1px); }
 
 /* ── 画布 ── */
 .graph-container {
@@ -585,7 +585,7 @@ const detailIdx = computed(() => detailPanel.value.node?.planIdx ?? -1)
   font-size: 13px; color: #374151;
   transition: background .1s;
 }
-.menu-item:hover { background: #f5f3ff; color: #6366f1; }
+.menu-item:hover { background: #F0FAFD; color: #00AEEC; }
 
 /* ── 弹性反馈 ── */
 :deep(.bounce-feedback) {
@@ -654,7 +654,7 @@ const detailIdx = computed(() => detailPanel.value.node?.planIdx ?? -1)
   color: #374151; font-size: 11.5px; font-family: inherit;
   cursor: pointer; transition: all .15s;
 }
-.detail-btn:hover { background: #eef2ff; border-color: #a5b4fc; color: #6366f1; }
+.detail-btn:hover { background: #E3F6FD; border-color: #B8E6F9; color: #00AEEC; }
 .detail-btn--danger:hover { background: #fff1f0; border-color: #fca5a5; color: #ef4444; }
 .detail-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 

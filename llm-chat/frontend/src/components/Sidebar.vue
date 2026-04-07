@@ -54,8 +54,7 @@ async function finishRename(id: string) {
   const trimmed = editTitle.value.trim()
   if (trimmed && editingId.value === id) {
     await api.renameConversation(id, trimmed)
-    // Refresh list to show new title
-    emit('select', id)  // trigger reload
+    emit('select', id)
   }
   editingId.value = null
 }
@@ -74,13 +73,13 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
 <template>
   <div class="sidebar">
 
-    <!-- Logo -->
+    <!-- Logo — Bilibili 风格 -->
     <div class="sidebar-logo">
       <div class="logo-icon">
-        <!-- 与 favicon 一致：白底 + 主星 + 副星 -->
-        <svg width="20" height="20" viewBox="0 0 32 32" fill="none">
-          <path d="M16 4C16 4 17.5 11 23 14C17.5 17 16 24 16 24C16 24 14.5 17 9 14C14.5 11 16 4 16 4Z" fill="#111827"/>
-          <path d="M25 7C25 7 25.6 9.8 27.5 10.7C25.6 11.6 25 14.4 25 14.4C25 14.4 24.4 11.6 22.5 10.7C24.4 9.8 25 7 25 7Z" fill="#111827" opacity="0.5"/>
+        <!-- Bilibili 风格小电视 / 可爱星星 -->
+        <svg width="22" height="22" viewBox="0 0 32 32" fill="none">
+          <path d="M16 4C16 4 17.5 11 23 14C17.5 17 16 24 16 24C16 24 14.5 17 9 14C14.5 11 16 4 16 4Z" fill="#00AEEC"/>
+          <path d="M25 7C25 7 25.6 9.8 27.5 10.7C25.6 11.6 25 14.4 25 14.4C25 14.4 24.4 11.6 22.5 10.7C24.4 9.8 25 7 25 7Z" fill="#FB7299" opacity="0.7"/>
         </svg>
       </div>
       <span class="logo-text">ChatFlow</span>
@@ -91,7 +90,7 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
     <div class="sidebar-actions">
       <button class="new-chat-btn" @click="emit('newChat')">
         <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-          <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
         </svg>
         新对话
       </button>
@@ -185,14 +184,14 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
   background: var(--cf-sidebar);
   display: flex;
   flex-direction: column;
-  height: 100%;           /* 跟随 .app padding 后的可用高度 */
+  height: 100%;
   border-radius: var(--cf-radius-lg);
   border: 1px solid var(--cf-border-soft);
   box-shadow: var(--cf-shadow-sm);
   overflow: hidden;
 }
 
-/* ── Logo ── */
+/* ── Logo — Bilibili 风格 ── */
 .sidebar-logo {
   display: flex;
   align-items: center;
@@ -201,19 +200,23 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
   border-bottom: 1px solid var(--cf-border-soft);
 }
 .logo-icon {
-  width: 36px; height: 36px;
-  border-radius: 10px;
-  background: #ffffff;
-  border: 1.5px solid #e4e4e7;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.08), inset 0 1px 0 rgba(255,255,255,0.9);
+  width: 38px; height: 38px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #E3F6FD 0%, #FDE8EF 100%);
+  border: 1.5px solid #D0EEF9;
+  box-shadow: 0 2px 8px rgba(0,174,236,0.12);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  transition: transform 0.3s cubic-bezier(0.34,1.56,0.64,1);
+}
+.logo-icon:hover {
+  transform: scale(1.08) rotate(-5deg);
 }
 .logo-text {
   font-size: 16px;
-  font-weight: 700;
+  font-weight: 800;
   color: var(--cf-text-1);
   letter-spacing: -0.3px;
   flex: 1;
@@ -222,15 +225,15 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.5px;
-  color: var(--cf-indigo);
-  background: rgba(107,158,255,0.1);
-  border: 1px solid rgba(107,158,255,0.25);
-  padding: 2px 7px;
-  border-radius: 6px;
+  color: #00AEEC;
+  background: rgba(0,174,236,0.08);
+  border: 1px solid rgba(0,174,236,0.2);
+  padding: 2px 8px;
+  border-radius: 20px;
   margin-left: auto;
 }
 
-/* ── 新对话 ── */
+/* ── 新对话 — Bilibili 蓝粉渐变 ── */
 .sidebar-actions { padding: 14px 12px 6px; }
 .new-chat-btn {
   display: flex;
@@ -238,38 +241,38 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
   justify-content: center;
   gap: 7px;
   width: 100%;
-  height: 36px;
-  background: linear-gradient(135deg, rgba(107,158,255,0.08), rgba(99,102,241,0.08));
-  border: 1px solid rgba(107,158,255,0.3);
-  border-radius: var(--cf-radius-sm);
-  color: var(--cf-indigo);
+  height: 38px;
+  background: linear-gradient(135deg, rgba(0,174,236,0.1) 0%, rgba(251,114,153,0.08) 100%);
+  border: 1.5px solid rgba(0,174,236,0.3);
+  border-radius: 20px;
+  color: #00AEEC;
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 600;
   font-family: inherit;
   cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.34,1.56,0.64,1);
-  letter-spacing: 0.1px;
+  transition: all 0.25s cubic-bezier(0.34,1.56,0.64,1);
+  letter-spacing: 0.2px;
 }
 .new-chat-btn:hover {
-  background: linear-gradient(135deg, rgba(107,158,255,0.15), rgba(99,102,241,0.12));
-  border-color: var(--cf-indigo);
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(107,158,255,0.25);
+  background: linear-gradient(135deg, rgba(0,174,236,0.18) 0%, rgba(251,114,153,0.12) 100%);
+  border-color: #00AEEC;
+  transform: translateY(-2px) scale(1.02);
+  box-shadow: 0 4px 14px rgba(0,174,236,0.2);
 }
-.new-chat-btn:active { transform: translateY(0); }
+.new-chat-btn:active { transform: translateY(0) scale(0.98); }
 
 /* ── 搜索 ── */
 .sidebar-search { padding: 6px 10px 8px; }
 :deep(.search-input .el-input__wrapper) {
   background: var(--cf-bg) !important;
-  border-radius: var(--cf-radius-sm) !important;
+  border-radius: 20px !important;
   border: 1px solid var(--cf-border) !important;
   box-shadow: none !important;
   transition: border-color 0.15s !important;
 }
 :deep(.search-input .el-input__wrapper:hover),
 :deep(.search-input .el-input__wrapper.is-focus) {
-  border-color: #a5b4fc !important;
+  border-color: #00AEEC !important;
 }
 :deep(.search-input .el-input__inner) {
   font-size: 12.5px !important;
@@ -295,8 +298,8 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
   font-size: 10px;
   height: 16px; line-height: 16px;
   min-width: 16px; padding: 0 4px;
-  background: #e2e8f0 !important;
-  color: var(--cf-text-3) !important;
+  background: #E3F6FD !important;
+  color: #00AEEC !important;
   border: none !important; box-shadow: none !important;
 }
 
@@ -310,26 +313,28 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 9px;
+  padding: 8px 10px;
   margin: 1px 0;
-  border-radius: var(--cf-radius-sm);
+  border-radius: 12px;
   cursor: pointer;
   color: var(--cf-text-3);
   font-size: 13px;
-  transition: background 0.12s, color 0.12s;
+  transition: all 0.15s cubic-bezier(0.34,1.56,0.64,1);
   position: relative;
 }
 .conv-item:hover {
   background: var(--cf-hover);
   color: var(--cf-text-1);
+  transform: translateX(2px);
 }
 .conv-item.active {
-  background: linear-gradient(135deg, rgba(107,158,255,0.12), rgba(99,102,241,0.08));
-  color: var(--cf-indigo);
+  background: linear-gradient(135deg, rgba(0,174,236,0.08), rgba(251,114,153,0.05));
+  color: #00AEEC;
   font-weight: 500;
-  border: 1px solid rgba(107,158,255,0.2);
+  border: 1px solid rgba(0,174,236,0.18);
+  box-shadow: 0 1px 6px rgba(0,174,236,0.08);
 }
-.conv-item.active .conv-icon { color: var(--cf-indigo); opacity: 1; }
+.conv-item.active .conv-icon { color: #00AEEC; opacity: 1; }
 .conv-icon { font-size: 13px; flex-shrink: 0; opacity: 0.45; }
 .conv-title {
   flex: 1;
@@ -341,8 +346,8 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
   flex: 1;
   min-width: 0;
   padding: 2px 6px;
-  border: 1.5px solid var(--cf-indigo);
-  border-radius: 5px;
+  border: 1.5px solid #00AEEC;
+  border-radius: 8px;
   font-size: 13px;
   font-family: inherit;
   background: var(--cf-card);
@@ -362,22 +367,22 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
   color: var(--cf-text-4);
   cursor: pointer;
   padding: 3px;
-  border-radius: 5px;
+  border-radius: 6px;
   transition: color 0.15s, background 0.15s;
 }
-.del-icon:hover { color: var(--cf-red); background: #fee2e2; }
+.del-icon:hover { color: #F25D59; background: #FDE8E7; }
 
-/* ── 后台活跃指示 ── */
+/* ── 后台活跃指示 — Bilibili 蓝 ── */
 .conv-active-dot {
   width: 6px; height: 6px;
   border-radius: 50%;
-  background: var(--cf-indigo);
+  background: #00AEEC;
   flex-shrink: 0;
   animation: conv-pulse 1.4s ease-in-out infinite;
 }
 @keyframes conv-pulse {
-  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(99,102,241,0.5); }
-  50%       { opacity: 0.8; box-shadow: 0 0 0 5px rgba(99,102,241,0); }
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(0,174,236,0.5); }
+  50%       { opacity: 0.8; box-shadow: 0 0 0 5px rgba(0,174,236,0); }
 }
 
 /* ── Footer ── */
@@ -390,24 +395,24 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
   align-items: center;
   gap: 8px;
   padding: 9px 13px;
-  background: linear-gradient(135deg, #f0fdf4, #dcfce7);
-  border: 1px solid #bbf7d0;
-  border-radius: var(--cf-radius-sm);
+  background: linear-gradient(135deg, #E3F6FD, #D5F5E8);
+  border: 1px solid #B8E6D6;
+  border-radius: 12px;
   box-shadow: var(--cf-shadow-xs);
 }
 .status-dot {
   width: 7px; height: 7px;
   border-radius: 50%;
-  background: var(--cf-green);
+  background: #00B578;
   flex-shrink: 0;
   animation: pulse-green 2s ease-in-out infinite;
 }
 @keyframes pulse-green {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(103,194,58,0.4); }
-  50%       { box-shadow: 0 0 0 5px rgba(103,194,58,0); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(0,181,120,0.4); }
+  50%       { box-shadow: 0 0 0 5px rgba(0,181,120,0); }
 }
-.status-text { font-size: 11.5px; color: #15803d; font-weight: 500; flex: 1; }
-.status-icon { font-size: 12px; color: #15803d; opacity: 0.55; }
+.status-text { font-size: 11.5px; color: #00875A; font-weight: 500; flex: 1; }
+.status-icon { font-size: 12px; color: #00875A; opacity: 0.55; }
 
 /* ── Dark toggle ── */
 .dark-toggle {
@@ -419,7 +424,7 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
   margin-bottom: 8px;
   background: none;
   border: 1px solid var(--cf-border-soft);
-  border-radius: var(--cf-radius-sm);
+  border-radius: 12px;
   color: var(--cf-text-3);
   font-size: 12px;
   font-weight: 500;

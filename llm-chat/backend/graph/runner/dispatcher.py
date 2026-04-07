@@ -37,6 +37,8 @@ from graph.runner.handlers import (
     VisionStreamHandler,
 )
 from graph.runner.handlers.sandbox_handler import SandboxOutputHandler
+from graph.runner.handlers.artifact_handler import FileArtifactHandler
+from graph.runner.handlers.tool_call_start_handler import ToolCallStartHandler
 
 # ── Handler 注册顺序即优先级 ─────────────────────────────────────────────────
 # LLMStreamHandler 监听 on_custom_event(llm_token)，在节点执行中逐 token 触发。
@@ -46,6 +48,7 @@ from graph.runner.handlers.sandbox_handler import SandboxOutputHandler
 _HANDLERS: list[EventHandler] = [
     ClarificationHandler(),          # 澄清问询事件（on_custom_event）—— 优先处理
     SandboxOutputHandler(),          # 沙箱实时输出（on_custom_event sandbox_output）→ 终端流
+    FileArtifactHandler(),           # 文件产物（on_custom_event file_artifact）→ 文件卡片
     VisionStartHandler(),            # 视觉分析开始（on_custom_event vision_analyze）→ 状态标签
     VisionStreamHandler(),           # 视觉分析 token 流（on_custom_event vision_token）→ thinking
     CacheHitEndHandler(),
@@ -58,6 +61,7 @@ _HANDLERS: list[EventHandler] = [
     CallModelAfterToolEndHandler(),     # call_model_after_tool 非流式时补发内容
     LLMStartHandler(),                  # 监听 on_chain_start → 推送 thinking 状态
     LLMStreamHandler(),                 # 监听 on_custom_event(llm_token) → 逐 token 推流
+    ToolCallStartHandler(),              # 工具参数开始生成（on_custom_event tool_call_start）→ 前端提前显示终端
     ToolStartHandler(),
     ToolEndHandler(),
     SaveResponseEndHandler(),

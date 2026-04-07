@@ -114,6 +114,45 @@ class PlanStepModel(Base):
     )
 
 
+class ArtifactModel(Base):
+    """文件产物表：记录沙箱中生成的用户可见文件"""
+    __tablename__ = "artifacts"
+
+    id = Column(
+        Integer, primary_key=True, autoincrement=True,
+        comment="自增主键"
+    )
+    conv_id = Column(
+        String(36), nullable=False,
+        comment="所属对话ID",
+        index=True,
+    )
+    name = Column(
+        String(255), nullable=False,
+        comment="文件名 (e.g. 'baidu_tech.html')"
+    )
+    path = Column(
+        String(512), nullable=False,
+        comment="沙箱内相对路径"
+    )
+    language = Column(
+        String(50), nullable=False, default="text",
+        comment="文件语言类型 (html/python/javascript/...)"
+    )
+    content = Column(
+        Text, nullable=False,
+        comment="文件完整内容"
+    )
+    created_at = Column(
+        Float, nullable=False,
+        comment="创建时间（Unix时间戳）"
+    )
+
+    __table_args__ = (
+        Index("ix_artifacts_conv_created", "conv_id", "created_at"),
+    )
+
+
 class ToolEventModel(Base):
     """工具调用事件表：记录每个对话中使用的工具调用历史"""
     __tablename__ = "tool_events"

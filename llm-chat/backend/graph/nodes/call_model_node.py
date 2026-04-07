@@ -50,35 +50,9 @@ def _needs_webpage_clarification(user_msg: str) -> bool:
     return bool(_WEBPAGE_KEYWORDS.search(user_msg)) and not bool(_STYLE_KEYWORDS.search(user_msg))
 
 
-_WEBPAGE_CLARIFICATION = {
-    "question": "我来帮你制作网页！先了解一下你的偏好",
-    "items": [
-        {
-            "id": "style",
-            "type": "single_choice",
-            "label": "设计风格",
-            "options": ["简约现代", "商务专业", "活泼创意", "严肃正式", "科技感"],
-        },
-        {
-            "id": "color",
-            "type": "single_choice",
-            "label": "主色调",
-            "options": ["蓝色系", "绿色系", "红色系", "深色系（暗色主题）", "跟随图片/主题"],
-        },
-        {
-            "id": "tech",
-            "type": "single_choice",
-            "label": "技术方案",
-            "options": ["纯 HTML/CSS/JS（单文件）", "加动画效果", "响应式（移动端适配）"],
-        },
-        {
-            "id": "note",
-            "type": "text",
-            "label": "其他要求（可选）",
-            "placeholder": "如需要哪些板块、特殊功能等…",
-        },
-    ],
-}
+from prompts import load_json_prompt, load_prompt as _load_prompt
+
+_WEBPAGE_CLARIFICATION = load_json_prompt("clarification/webpage")
 
 
 class CallModelNode(BaseNode):
@@ -140,25 +114,10 @@ class CallModelNode(BaseNode):
         temperature = state["temperature"]
         conv_id     = state.get("conv_id", "")
 
-        # 工具绑定策略：
-        #   search / search_code：始终绑定（需要搜索信息）
-        #   code：始终绑定（可能需要执行代码、搜索文档等）
-        #   chat：不绑定（纯对话不需要工具）
+        # 工具绑定策略：有工具就全部绑定，让模型自主判断何时搜索/执行代码
         is_intermediate_plan_step = bool(plan) and cur_idx < len(plan) - 1
-        use_tools = bool(
-            self._tools and (
-                not route
-                or route in ("search", "search_code", "code")
-            )
-        )
+        use_tools = bool(self._tools)
         tools_schema = self._tools_to_openai_schema(self._tools) if use_tools else None
-
-        # ── 多步计划末步强制流式（不绑工具） ───────────────────────────────
-        # 末步任务是"生成产品"，前面各步已完成信息收集，无需再搜索；
-        # 禁工具 → 走 _stream_tokens 流式路径，逐 token 推送给前端。
-        if use_tools and len(plan) > 1 and cur_idx >= len(plan) - 1:
-            use_tools = False
-            tools_schema = None
 
         # ── 消息列表（本地副本，步骤 1+ 使用聚焦上下文，不喂完整历史） ────────
         current_idx = cur_idx
@@ -256,11 +215,7 @@ class CallModelNode(BaseNode):
             )
         else:
             # 中间步骤：专注执行者角色，防止提前生成最终产品
-            system_content = (
-                "你是一个专注的任务执行助手，负责完成多步骤任务中的当前步骤。\n"
-                "每次只完成当前步骤的任务，使用工具收集所需信息，"
-                "不要提前生成后续步骤的内容或最终产品。"
-            )
+            system_content = _load_prompt("nodes/call_model_step")
 
         # ── 任务总目标 ───────────────────────────────────────────────────────
         goal = user_msg

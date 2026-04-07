@@ -83,6 +83,7 @@ export interface SendPayload {
   text: string
   images: string[]
   agentMode: boolean
+  forcePlan?: PlanStep[]    // 用户编辑后的强制计划（跳过 planner LLM 规划）
 }
 
 export interface AgentStatus {
@@ -114,6 +115,37 @@ export interface CognitiveState {
   traceLog: TraceEntry[]
   isActive: boolean
   historyEvents: ToolHistoryEvent[]
+  artifacts: FileArtifact[]           // 文件产物（sandbox_write 生成的文件）
+}
+
+// ── 文件产物（沙箱生成的文件） ─────────────────────────────────────────────────
+export interface FileArtifact {
+  name: string        // 文件名 e.g. "baidu_tech.html"
+  path: string        // 完整路径 e.g. "/sandbox/baidu_tech.html"
+  content: string     // 文件内容
+  language: string    // 语言标记 e.g. "html", "python"
+}
+
+/** 从文件路径推断语言 */
+export function detectLanguage(path: string): string {
+  const ext = path.split('.').pop()?.toLowerCase() ?? ''
+  const map: Record<string, string> = {
+    html: 'html', htm: 'html', svg: 'svg', css: 'css',
+    js: 'javascript', mjs: 'javascript', jsx: 'javascript',
+    ts: 'typescript', tsx: 'typescript',
+    py: 'python', rb: 'ruby', go: 'go', rs: 'rust',
+    java: 'java', kt: 'kotlin', c: 'c', cpp: 'cpp', h: 'c',
+    sh: 'shell', bash: 'shell', zsh: 'shell',
+    json: 'json', yaml: 'yaml', yml: 'yaml', toml: 'toml',
+    xml: 'xml', md: 'markdown', sql: 'sql', vue: 'vue',
+    txt: 'text', csv: 'text', log: 'text',
+  }
+  return map[ext] || 'text'
+}
+
+/** 该语言是否可在 iframe 中预览 */
+export function isPreviewable(lang: string): boolean {
+  return ['html', 'svg'].includes(lang)
 }
 
 export function makeEmptyCognitiveState(): CognitiveState {
@@ -125,5 +157,6 @@ export function makeEmptyCognitiveState(): CognitiveState {
     traceLog: [],
     isActive: false,
     historyEvents: [],
+    artifacts: [],
   }
 }
