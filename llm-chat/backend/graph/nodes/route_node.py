@@ -100,7 +100,15 @@ class RouteNode(BaseNode):
         from logging_config import log_prompt
         log_prompt(state.get("conv_id", ""), "route_model", ROUTER_MODEL, messages)
         completion = await llm.ainvoke(messages, timeout=30.0)
-        raw = (completion.choices[0].message.content or "").strip().lower()
+        if not completion.choices:
+            # MiniMax 等厂商在审核或服务异常时可能返回 200 但 choices 为 None/空
+            logger.warning(
+                "route_model 收到空 choices | conv=%s | model=%s，降级到 search_code",
+                state.get("conv_id", ""), ROUTER_MODEL,
+            )
+            raw = "search_code"
+        else:
+            raw = (completion.choices[0].message.content or "").strip().lower()
 
         # 解析路由标签
         route = "chat"

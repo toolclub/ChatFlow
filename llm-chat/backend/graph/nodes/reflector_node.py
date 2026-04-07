@@ -224,6 +224,8 @@ class ReflectorNode(BaseNode):
         reflection_text = "评估完成"
         try:
             completion = await llm.ainvoke(messages_for_llm)
+            if not completion.choices:
+                raise ValueError("LLM 返回空 choices")
             raw = (completion.choices[0].message.content or "").strip()
             if "```" in raw:
                 for part in raw.split("```"):
