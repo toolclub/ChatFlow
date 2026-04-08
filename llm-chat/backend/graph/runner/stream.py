@@ -245,12 +245,14 @@ class StreamSession:
                 elif kind == "stopped":
                     await self._flush_to_db()
                     await self._save_partial()
+                    await self._mark_stream_completed()  # 确保 stream_completed=True
                     self._emit_sse(sse({"stopped": True}), "stopped")
                     await self._set_done("active")
                     break
 
                 elif kind == "cancelled":
                     await self._flush_to_db()
+                    await self._mark_stream_completed()  # 确保 stream_completed=True
                     self._emit_sse(sse({"stopped": True}), "stopped")
                     await self._set_done("active")
                     break
@@ -394,6 +396,18 @@ class StreamSession:
             )
         except Exception as exc:
             logger.warning("保存部分响应失败: %s", exc)
+
+    async def _mark_stream_completed(self) -> None:
+        """强制标记 assistant 消息 stream_completed=True（stopped/cancelled 时调用）。"""
+        if not self.assistant_db_id:
+            return
+        try:
+            from memory import store as memory_store
+            await memory_store.update_message_streaming(
+                self.assistant_db_id, stream_completed=True,
+            )
+        except Exception:
+            pass
 
     async def _set_done(self, status: str) -> None:
         """标记会话结束。"""
