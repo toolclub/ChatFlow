@@ -56,6 +56,9 @@ dependencies = [
 
     # ── PPT 生成 ──
     "python-pptx>=1.0.0",
+
+    # ── 状态机框架 ──
+    "python-statemachine>=3.0.0",
 ]
 
 [project.scripts]
