@@ -115,6 +115,11 @@ CHAT_MODEL="claude-sonnet-4-20250514"
 - **工具参数生成 30 秒静默**：前端只收 ping。已加 `tool_call_args` 流式事件，终端实时显示代码生成。
 - **用户猛刷新打垮后端**：无防抖，每次 F5 都发 full-state 请求。已加 2 秒防抖。
 - **进程内状态跨 worker 不一致**：`_stop_events`/`_active_sessions`/`_store` 都是进程内 dict。已全部升级为 Redis 共享状态。
+- **Redis 缓存失效 pop 竞态**：`_on_invalidate` 直接 pop 缓存，图执行中读取会 KeyError。已改为 `db_get_conversation` 刷新覆盖。
+- **SSH 探活每次 +100ms**：健康连接也做 `echo ok`。已加 `_pool_last_used` 时间戳，30 秒内用过的跳过探活。
+- **tool_call_args SSE 洪泛**：每个 JSON 片段都发一次。已加节流（200ms 或 500 字符一批）。
+- **心跳 Redis 调用无超时**：Redis 慢时阻塞心跳循环。已加 `wait_for(timeout=2)`。
+- **onToolCallArgs 找不到工具**：`_generating` 标记可能不存在。已加兜底 `findLast(t => !t.done)`。
 
 ---
 

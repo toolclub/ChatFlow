@@ -1,6 +1,7 @@
 # ChatFlow — AI 智能对话平台
 
-> 基于 LangChain + LangGraph 构建的新一代 AI 对话系统，支持多意图路由、认知规划、工具调用、多模态理解、三级记忆与语义缓存。
+> 基于 LangChain + LangGraph 构建的新一代 AI 对话系统。
+> **DB 驱动 + 状态机 + 模型无关 + 全链路流式** — 切换模型只改 `.env`，不改代码。
 
 ---
 
@@ -52,12 +53,28 @@
 ### 语义缓存
 - **秒级响应**：相似问题命中 Redis KNN 缓存，跳过全部 LLM 推理链路
 - **四种隔离模式**：`user` / `prompt` / `global` / `conv`
-- **TTL 策略**：`chat/code` 路由永不过期，`search` 类可配置过期时间
+- **Write-through + TTL**：先写 DB 后写缓存，chat/code 24h TTL 兜底防缓存中毒
+
+### DB-first 架构 + 状态机
+- **DB 是唯一真相源**：所有状态（对话/消息/工具执行）由 DB 字段表达，不从文本推断
+- **四层状态机**（`fsm/` 目录，基于 python-statemachine 框架）：
+  - 对话：`ACTIVE → STREAMING → COMPLETED/ERROR`
+  - 消息：`PRE_WRITE → STREAMING → FINALIZED/PARTIAL`
+  - 工具执行：`RUNNING → DONE/ERROR/TIMEOUT`
+  - SSE 事件：枚举注册表，按优先级匹配
+- **Redis 跨 worker 共享**：停止信号（pub/sub）、活跃会话注册（TTL+心跳）、缓存失效通知
+- **结构化字段分离**：`tool_summary`、`step_summary`、`clarification_data` 独立存储，不混入 `content`
+
+### 模型无关
+- **零代码切换**：改 `.env` 的 `LLM_BASE_URL` + `CHAT_MODEL` 即可换任意 OpenAI 兼容模型
+- **桥接层**：`llm/client.py` 自动检测 `reasoning_content`（DeepSeek-R1/Claude Thinking）
+- **COMPAT 兼容层**：模型特定行为（MiniMax 残留文本、`<think>` 标签）标记为 COMPAT，对其他模型空转无副作用
 
 ### 流式输出与实时反馈
-- **Token 级别推流**：SSE 逐 token 渲染，thinking 推理块实时展示
-- **心跳保活**：每 5s 发 ping，防止 nginx 超时断流
-- **优雅降级**：MiniMax 等厂商内容审核触发时自动降级响应，不中断 SSE 流
+- **全链路流式**：所有 LLM 调用（含工具绑定）都走 `stream=True`，禁用 `ainvoke`
+- **工具参数实时可见**：`tool_call_args` 事件流式推送，前端终端实时显示代码生成过程
+- **心跳保活**：每 3s 发 ping + Redis TTL 续期
+- **优雅降级**：内容审核触发时自动降级响应，不中断 SSE 流
 
 ---
 
@@ -65,12 +82,13 @@
 
 | 层次 | 技术 |
 |------|------|
-| **后端框架** | Python 3.11 · FastAPI · asyncio |
+| **后端框架** | Python 3.12 · FastAPI · asyncio |
 | **AI 编排** | LangChain · LangGraph |
+| **状态机** | python-statemachine（对话/工具/SSE 事件） |
 | **前端框架** | Vue 3 · TypeScript · Vite |
 | **关系数据库** | PostgreSQL 16（含 JSONB 原子更新） |
 | **向量数据库** | Qdrant |
-| **缓存** | Redis Stack（RediSearch KNN） |
+| **缓存/共享状态** | Redis Stack（语义缓存 KNN + 跨 worker 状态同步） |
 | **部署** | Docker Compose · Nginx |
 
 ---
@@ -482,11 +500,17 @@ ChatFlow/
 │   │   │   └── schema.py                   # 数据模型
 │   │   ├── rag/                            # 长期记忆（Qdrant）
 │   │   ├── cache/                          # 语义缓存（Redis KNN）
+│   │   ├── fsm/                            # 状态机（python-statemachine 框架）
+│   │   │   ├── conversation.py             # 对话生命周期状态机
+│   │   │   ├── tool_execution.py           # 工具执行状态机
+│   │   │   └── sse_events.py               # SSE 事件类型注册表
 │   │   ├── db/
 │   │   │   ├── models.py                   # SQLAlchemy ORM
 │   │   │   ├── database.py                 # 异步会话
+│   │   │   ├── redis_state.py              # Redis 跨 worker 共享状态
+│   │   │   ├── migrate.py                  # 幂等迁移
 │   │   │   └── plan_store.py               # 执行计划 CRUD（jsonb_set 原子更新）
-│   │   ├── llm/                            # LLM / Embedding 工厂
+│   │   ├── llm/                            # LLM / Embedding 工厂（模型无关适配层）
 │   │   ├── tools/                          # 内置工具 + MCP 加载器
 │   │   └── Dockerfile
 │   ├── frontend/
@@ -523,8 +547,13 @@ ChatFlow/
 | `POST` | `/api/conversations` | 创建对话 |
 | `GET` | `/api/conversations/{id}` | 对话详情 |
 | `DELETE` | `/api/conversations/{id}` | 删除对话 |
+| `GET` | `/api/conversations/{id}/full-state` | 完整状态恢复（消息+工具+计划+产物） |
+| `GET` | `/api/conversations/{id}/resume` | SSE 断线重连（从 event_log 回放） |
+| `GET` | `/api/conversations/{id}/streaming-status` | 流式状态检查 |
 | `GET` | `/api/conversations/{id}/tools` | 工具调用历史 |
-| `GET` | `/api/conversations/{id}/plan` | 最新执行计划（刷新恢复用） |
+| `GET` | `/api/conversations/{id}/plan` | 最新执行计划 |
+| `GET` | `/api/conversations/{id}/artifacts` | 文件产物列表 |
+| `GET` | `/api/artifacts/{id}` | 产物完整内容（按需加载） |
 | `GET` | `/api/conversations/{id}/memory` | 记忆状态调试 |
 | `GET` | `/api/tools` | 可用工具列表 |
 
@@ -536,17 +565,23 @@ ChatFlow/
 
 | 事件字段 | 说明 |
 |---------|------|
-| `{"token": "..."}` | LLM 输出 token（逐字流式） |
+| `{"content": "..."}` | LLM 输出 token（逐字流式） |
 | `{"thinking": "..."}` | 推理模型 thinking 内容（折叠展示） |
-| `{"status": "cache_hit", "similarity": 0.92}` | 语义缓存命中 |
-| `{"route": "search_code"}` | 路由决策结果 |
-| `{"plan": [...]}` | 执行计划（含步骤标题和状态） |
-| `{"step_result": {...}}` | 单步完成事件 |
-| `{"tool_start": {...}}` | 工具调用开始 |
-| `{"tool_end": {...}}` | 工具调用结果 |
+| `{"tool_call_start": {"name": "..."}}` | 工具参数开始生成（前端立即显示终端 loading） |
+| `{"tool_call_args": {"text": "..."}}` | 工具参数片段流式（终端实时显示代码生成） |
+| `{"tool_call": {"name": "...", "input": {...}}}` | 工具参数生成完毕，开始执行 |
+| `{"sandbox_output": {"stream": "stdout", "text": "..."}}` | 沙箱终端实时输出 |
+| `{"tool_result": {"name": "...", "status": "done/error"}}` | 工具执行完成 |
+| `{"search_item": {"url": "...", "title": "..."}}` | 搜索结果逐条推送 |
+| `{"file_artifact": {"name": "...", "language": "..."}}` | 文件产物生成 |
+| `{"status": "thinking/planning/routing"}` | 状态变更通知 |
+| `{"route": {"model": "...", "intent": "..."}}` | 路由决策结果 |
+| `{"plan_generated": {"steps": [...]}}` | 执行计划（含步骤标题和状态） |
+| `{"reflection": {"content": "...", "decision": "..."}}` | 步骤评估结果 |
+| `{"clarification": {"question": "...", "items": [...]}}` | 澄清问询卡片 |
 | `{"done": true, "compressed": false}` | 流正常结束 |
 | `{"error": "...", "can_continue": true}` | 执行出错，前端展示 Continue 按钮 |
-| `{"ping": true}` | 心跳保活（前端忽略） |
+| `{"ping": true}` | 心跳保活 |
 
 ---
 
