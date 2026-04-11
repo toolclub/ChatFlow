@@ -43,10 +43,10 @@ class SemanticCacheNode(BaseNode):
         from logging_config import get_conv_logger
         from memory import store as memory_store
 
-        user_msg  = state["user_message"]
-        conv_id   = state["conv_id"]
+        user_msg = state["user_message"]
+        conv_id = state["conv_id"]
         client_id = state.get("client_id", "")
-        clog      = get_conv_logger(client_id, conv_id)
+        clog = get_conv_logger(client_id, conv_id)
 
         # 强制计划时跳过缓存（用户编辑了执行计划，必须重新执行）
         if state.get("force_plan"):
@@ -61,10 +61,10 @@ class SemanticCacheNode(BaseNode):
             )
             return {"cache_hit": False, "full_response": "", "cache_similarity": 0.0}
 
-        conv      = memory_store.get(conv_id)
+        conv = memory_store.get(conv_id)
         namespace = self._derive_cache_namespace(conv, SEMANTIC_CACHE_NAMESPACE_MODE, client_id)
-        cache     = get_cache()
-        result    = await cache.lookup(user_msg, namespace)
+        cache = get_cache()
+        result = await cache.lookup(user_msg, namespace)
 
         if result is None:
             clog.info(
@@ -78,8 +78,8 @@ class SemanticCacheNode(BaseNode):
             result.similarity, namespace, result.matched_question, user_msg,
         )
         return {
-            "cache_hit":        True,
-            "full_response":    result.answer,
+            "cache_hit": True,
+            "full_response": result.answer,
             "cache_similarity": result.similarity,
         }
 

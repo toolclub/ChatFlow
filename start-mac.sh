@@ -12,9 +12,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_DIR="$SCRIPT_DIR/llm-chat"
+SANDBOX_DIR="$COMPOSE_DIR/sandbox"
 ENV_FILE="$COMPOSE_DIR/.env.prod"
 COMPOSE_FILE="$COMPOSE_DIR/docker-compose.prod.yml"
-DATA_ROOT="/opt/chatflow-data"
+DATA_ROOT="$HOME/chatflow-data"
 
 # ── 颜色输出 ────────────────────────────────────────────────
 GREEN='\033[0;32m'
@@ -59,28 +60,35 @@ fi
 # ── 创建数据目录 ─────────────────────────────────────────────
 info "创建数据持久化目录..."
 
-# 从 .env.prod 读取目录配置（支持自定义路径）
-source_env_var() {
-    local key="$1"
-    local default="$2"
-    grep "^${key}=" "$ENV_FILE" | cut -d= -f2- | tr -d '"' | tr -d "'" || echo "$default"
-}
-
-QDRANT_DIR="$(source_env_var QDRANT_DATA_DIR "$DATA_ROOT/qdrant")"
-POSTGRES_DIR="$(source_env_var POSTGRES_DATA_DIR "$DATA_ROOT/postgres")"
-REDIS_DIR="$(source_env_var REDIS_DATA_DIR "$DATA_ROOT/redis")"
-LOG_DIR="$(source_env_var BACKEND_LOG_HOST_DIR "$DATA_ROOT/logs")"
-
-for dir in "$QDRANT_DIR" "$POSTGRES_DIR" "$REDIS_DIR" "$LOG_DIR"; do
+for dir in \
+    "$DATA_ROOT/qdrant" \
+    "$DATA_ROOT/postgres" \
+    "$DATA_ROOT/redis" \
+    "$DATA_ROOT/logs" \
+    "$DATA_ROOT/secret"; do
     if [[ ! -d "$dir" ]]; then
-        sudo mkdir -p "$dir"
-        sudo chown "$(whoami)" "$dir"
+        mkdir -p "$dir"
         info "创建目录: $dir"
     fi
 done
 
+# ── 启动 Sandbox ─────────────────────────────────────────────
+info "[1/2] 启动 Sandbox..."
+cd "$SANDBOX_DIR"
+if docker compose --profile cluster up -d --build 2>/dev/null; then
+    info "Sandbox 集群启动成功（端口 2222-2224）"
+else
+    warn "集群启动失败，尝试单节点..."
+    if docker compose --profile standalone up -d --build; then
+        info "Sandbox 单节点启动成功（端口 2222）"
+    else
+        warn "Sandbox 启动失败，代码执行功能将不可用"
+    fi
+fi
+echo ""
+
 # ── 拉取 / 构建镜像 ──────────────────────────────────────────
-info "构建并启动生产服务..."
+info "[2/2] 构建并启动生产服务..."
 cd "$COMPOSE_DIR"
 
 docker compose -f docker-compose.prod.yml --env-file .env --env-file .env.prod up -d --build

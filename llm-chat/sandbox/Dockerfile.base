@@ -1,0 +1,252 @@
+# ============================================================
+# fullstack-dev base image
+# Ubuntu 24.04 + Python 3.13 + Java 21 + Node.js 22 + Rust + Maven
+# ============================================================
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+
+# ------------------------------------------------------------
+# 1. 基础系统工具 & 编译依赖
+# ------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl wget git vim nano tree \
+    build-essential gcc g++ make cmake pkg-config \
+    libssl-dev libffi-dev zlib1g-dev \
+    libbz2-dev libreadline-dev libsqlite3-dev \
+    libncursesw5-dev xz-utils tk-dev \
+    libxml2-dev libxmlsec1-dev liblzma-dev \
+    libpq-dev libmysqlclient-dev \
+    ca-certificates gnupg lsb-release \
+    software-properties-common \
+    unzip zip p7zip-full \
+    openssh-server \
+    locales \
+    && locale-gen en_US.UTF-8 \
+    && rm -rf /var/lib/apt/lists/*
+
+# ------------------------------------------------------------
+# 2. Python 3.13 (deadsnakes PPA)
+# ------------------------------------------------------------
+RUN add-apt-repository ppa:deadsnakes/ppa -y \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3.13 \
+        python3.13-dev \
+        python3.13-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# 设置 python3.13 为默认
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.13 1 \
+    && update-alternatives --install /usr/bin/python  python  /usr/bin/python3.13 1
+
+# 安装 pip
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.13 \
+    && pip install --upgrade pip setuptools wheel
+
+# ------------------------------------------------------------
+# 3. Java 21 (OpenJDK)
+# ------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openjdk-21-jdk \
+    && rm -rf /var/lib/apt/lists/*
+
+# 自动检测 JAVA_HOME（兼容 amd64 / arm64）
+RUN JAVA_HOME=$(find /usr/lib/jvm -maxdepth 1 -name 'java-21-openjdk-*' -type d | head -1) \
+    && ln -sf "$JAVA_HOME" /usr/lib/jvm/java-21 \
+    && echo "JAVA_HOME=/usr/lib/jvm/java-21" >> /etc/environment \
+    && echo "export JAVA_HOME=/usr/lib/jvm/java-21" >> /etc/profile.d/java.sh \
+    && echo "export PATH=\$JAVA_HOME/bin:\$PATH" >> /etc/profile.d/java.sh
+
+ENV JAVA_HOME=/usr/lib/jvm/java-21
+ENV PATH=$JAVA_HOME/bin:$PATH
+
+# ------------------------------------------------------------
+# 4. Maven
+# ------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends maven \
+    && rm -rf /var/lib/apt/lists/*
+
+# ------------------------------------------------------------
+# 5. Node.js 22 LTS
+# ------------------------------------------------------------
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# ------------------------------------------------------------
+# 6. Rust (via rustup)
+# ------------------------------------------------------------
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable
+ENV PATH=/root/.cargo/bin:$PATH
+RUN echo 'export PATH=/root/.cargo/bin:$PATH' >> /etc/profile.d/rust.sh
+
+# ------------------------------------------------------------
+# 7. Python 常用库 —— 数据 / 办公 / Web / 工具
+# ------------------------------------------------------------
+
+# 数值计算 & 数据分析
+RUN pip install --no-cache-dir \
+    numpy \
+    pandas \
+    scipy \
+    sympy \
+    statsmodels \
+    scikit-learn \
+    networkx
+
+# 可视化
+RUN pip install --no-cache-dir \
+    matplotlib \
+    seaborn \
+    plotly \
+    pillow
+
+# Excel / CSV / 表格处理
+RUN pip install --no-cache-dir \
+    openpyxl \
+    xlrd \
+    xlwt \
+    xlsxwriter \
+    pyexcel \
+    pyexcel-xlsx \
+    tabulate
+
+# Word / PPT 生成
+RUN pip install --no-cache-dir \
+    python-docx \
+    python-pptx
+
+# PDF 生成 & 读取
+RUN pip install --no-cache-dir \
+    reportlab \
+    fpdf2 \
+    pymupdf \
+    pdfplumber \
+    pypdf2
+
+# Web 请求 & 爬虫
+RUN pip install --no-cache-dir \
+    requests \
+    httpx \
+    aiohttp \
+    websockets \
+    beautifulsoup4 \
+    lxml \
+    scrapy \
+    playwright \
+    selenium
+
+# Web 框架
+RUN pip install --no-cache-dir --ignore-installed blinker \
+    flask \
+    fastapi \
+    uvicorn[standard] \
+    starlette \
+    django \
+    gunicorn
+
+# 数据库 & 缓存
+RUN pip install --no-cache-dir \
+    sqlalchemy \
+    pymysql \
+    psycopg2-binary \
+    redis \
+    motor \
+    pymongo
+
+# 任务队列
+RUN pip install --no-cache-dir \
+    celery \
+    apscheduler \
+    schedule
+
+# 数据验证 & 序列化
+RUN pip install --no-cache-dir \
+    pydantic \
+    pydantic-settings \
+    marshmallow \
+    jsonschema
+
+# 配置 & 环境
+RUN pip install --no-cache-dir \
+    python-dotenv \
+    pyyaml \
+    toml \
+    tomli \
+    configparser
+
+# 时间日期
+RUN pip install --no-cache-dir \
+    arrow \
+    pendulum \
+    pytz \
+    python-dateutil
+
+# 加密 & 安全
+RUN pip install --no-cache-dir \
+    cryptography \
+    pycryptodome \
+    bcrypt \
+    paramiko
+
+# 字符 & 文本处理
+RUN pip install --no-cache-dir \
+    chardet \
+    charset-normalizer \
+    rich \
+    click \
+    typer \
+    colorama \
+    prettytable
+
+# 工具 & 辅助
+RUN pip install --no-cache-dir \
+    tqdm \
+    loguru \
+    psutil \
+    watchdog \
+    python-magic \
+    faker \
+    shortuuid \
+    humanize
+
+# 测试 & 代码质量
+RUN pip install --no-cache-dir \
+    pytest \
+    pytest-cov \
+    pytest-asyncio \
+    black \
+    isort \
+    flake8 \
+    mypy
+
+# Jupyter / 交互式
+RUN pip install --no-cache-dir \
+    jupyter \
+    jupyterlab \
+    ipython \
+    ipykernel
+
+# 安装 Playwright 浏览器
+RUN python -m playwright install chromium --with-deps
+
+# ------------------------------------------------------------
+# 8. 沙箱目录
+# ------------------------------------------------------------
+RUN mkdir -p /sandbox && chmod 777 /sandbox
+
+# ------------------------------------------------------------
+# 9. SSH 配置
+# ------------------------------------------------------------
+RUN mkdir -p /var/run/sshd \
+    && sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config \
+    && sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config \
+    && echo "root:sandbox123" | chpasswd
+
+EXPOSE 22
+
+CMD ["/usr/sbin/sshd", "-D"]

@@ -14,6 +14,9 @@ from typing import Optional
 @dataclass
 class CacheLookupResult:
     """缓存命中结果"""
+
+    def __init__(self): ...
+
     answer: str
     matched_question: str
     similarity: float
@@ -39,9 +42,9 @@ class SemanticCache(ABC):
 
     @abstractmethod
     async def lookup(
-        self,
-        question: str,
-        namespace: str = "global",
+            self,
+            question: str,
+            namespace: str = "global",
     ) -> Optional[CacheLookupResult]:
         """
         查询缓存。
@@ -56,11 +59,11 @@ class SemanticCache(ABC):
 
     @abstractmethod
     async def store(
-        self,
-        question: str,
-        answer: str,
-        namespace: str = "global",
-        ttl_seconds: Optional[int] = None,
+            self,
+            question: str,
+            answer: str,
+            namespace: str = "global",
+            ttl_seconds: Optional[int] = None,
     ) -> None:
         """
         写入缓存。
