@@ -154,6 +154,7 @@ export async function resumeStream(
   onToolCallStart?: (name: string) => void,
   onResumeContext?: (userMessage: string, images: string[]) => void,
   messageId?: string,
+  onToolCallArgs?: (text: string) => void,
 ) {
   let url = `${API_BASE}/api/conversations/${convId}/resume?after_event_id=${lastIndex}`
   if (messageId) url += `&message_id=${encodeURIComponent(messageId)}`
@@ -166,6 +167,7 @@ export async function resumeStream(
   const decoder = new TextDecoder()
   if (!reader) return
 
+  let lastDataTime = Date.now()
   let buffer = ''
   let streamDone = false
 

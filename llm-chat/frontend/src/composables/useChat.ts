@@ -335,7 +335,11 @@ export function useChat() {
           const step = activeStep()
           const toolList = step ? step.toolCalls : (msg().toolCalls ??= [])
           const placeholderIdx = toolList.findIndex(t => t.name === name && !t.done && (t.input as any)?._generating)
-          if (placeholderIdx >= 0) toolList[placeholderIdx] = tc; else toolList.push(tc)
+          if (placeholderIdx >= 0) {
+            const prev = toolList[placeholderIdx]
+            if (prev.output) tc.output = prev.output
+            toolList[placeholderIdx] = tc
+          } else toolList.push(tc)
           s.agentStatus = { ...s.agentStatus, state: 'tool', tool: name }
         },
         // onToolResult
@@ -345,7 +349,8 @@ export function useChat() {
           if (tc) {
             if (name === 'fetch_webpage') tc.fetchStatus = (data.status as 'done' | 'fail') || 'done'
             else if (data.results) tc.results = data.results as any
-            else if (data.output) tc.output = data.output as string
+            // sandbox 工具已有流式终端输出时，不用 tool_result 覆盖（保留进度日志）
+            else if (data.output && (!tc.output || !(data as any).is_sandbox)) tc.output = data.output as string
             tc.done = true
           }
           s.agentStatus = { ...s.agentStatus, state: 'thinking', tool: undefined }
@@ -433,6 +438,13 @@ export function useChat() {
         undefined,
         // messageId — 限定只回放当前轮的事件
         messageId,
+        // onToolCallArgs — token 流式输出
+        (text: string) => {
+          const step = activeStep(); const toolList = step ? step.toolCalls : msg().toolCalls
+          const tc = toolList?.findLast(t => !t.done && (t.input as any)?._generating)
+            || toolList?.findLast(t => !t.done)
+          if (tc) tc.output = (tc.output || '') + text
+        },
       )
     } catch (err: any) {
       if (err?.name === 'AbortError') return
@@ -552,6 +564,9 @@ export function useChat() {
             t => t.name === name && !t.done && (t.input as any)?._generating
           )
           if (placeholderIdx >= 0) {
+            // 保留 _generating 阶段 tool_call_args 积累的流式输出（全流程透明）
+            const prev = toolList[placeholderIdx]
+            if (prev.output) tc.output = prev.output
             toolList[placeholderIdx] = tc
           } else {
             toolList.push(tc)
@@ -870,7 +885,7 @@ export function useChat() {
           const step = activeStep()
           const toolList = step ? step.toolCalls : (msg().toolCalls ??= [])
           const placeholderIdx = toolList.findIndex(t => t.name === name && !t.done && (t.input as any)?._generating)
-          if (placeholderIdx >= 0) toolList[placeholderIdx] = tc; else toolList.push(tc)
+          if (placeholderIdx >= 0) { const prev = toolList[placeholderIdx]; if (prev.output) tc.output = prev.output; toolList[placeholderIdx] = tc } else toolList.push(tc)
           s.agentStatus = { ...s.agentStatus, state: 'tool', tool: name }
           addTrace(s.cognitive, { type: 'tool_call', content: `调用 ${name}: ${JSON.stringify(input).slice(0, 180)}`, toolName: name })
         },

@@ -174,8 +174,11 @@ async def create_ppt(ppt_json: str) -> str:
         on_output=_safe_output,
     )
 
+    # 保留脚本终端输出，供 SandboxFormatter 推送给前端渲染终端 UI
+    script_display = result.to_display()
+
     if result.exit_code != 0:
-        return f"PPT 渲染失败:\n{result.stderr or result.stdout}"
+        return f"{script_display}\n\nPPT 渲染失败:\n{result.stderr or result.stdout}"
 
     # ── 从沙箱读取 .pptx 并保存为 artifact ──
     try:
@@ -223,6 +226,7 @@ async def create_ppt(ppt_json: str) -> str:
             await _notify(f"\n✅ PPT 已生成: {filename} ({size_kb:.1f}KB, {len(slides)} 页)\n")
 
             return (
+                f"{script_display}\n\n"
                 f"PPT 已成功创建！\n"
                 f"文件名: {filename}\n"
                 f"页数: {len(slides)}\n"

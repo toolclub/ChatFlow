@@ -111,6 +111,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      pull: false
     image: chatflow-backend:${APP_VERSION}-prod
     pull_policy: never
     container_name: chatflow-backend-prod
@@ -163,6 +164,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      pull: false
     image: chatflow-frontend:${APP_VERSION}-prod
     pull_policy: never
     container_name: chatflow-frontend-prod

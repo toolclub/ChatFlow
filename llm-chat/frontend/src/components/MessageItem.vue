@@ -889,15 +889,38 @@ function cancelEdit() { isEditing.value = false }
 
                         <!-- create_ppt -->
                         <template v-else-if="item.tc.name === 'create_ppt'">
-                          <div class="term-line">
-                            <span class="term-prompt-sign">$</span>
-                            <span class="term-cmd-text">create_ppt "{{ (item.tc.input as any).ppt_json ? JSON.parse((item.tc.input as any).ppt_json)?.title || 'PPT' : 'PPT' }}"</span>
-                          </div>
-                          <pre v-if="!item.tc.done && item.tc.output" class="term-stream-output">{{ item.tc.output }}</pre>
-                          <template v-if="item.tc.done && item.tc.output">
-                            <template v-for="(line, li) in item.tc.output.split('\n')" :key="`${ii}-${li}`">
-                              <div v-if="line.startsWith('⏱')" class="term-line term-line--meta">{{ line }}</div>
-                              <div v-else-if="line.trim()" class="term-line term-line--out">{{ line }}</div>
+                          <!-- _generating 阶段：模型正在输出 ppt_json token -->
+                          <template v-if="(item.tc.input as any)?._generating">
+                            <div class="term-line term-line--dimmed">
+                              <span class="term-prompt-sign">$</span>
+                              <span>cat &gt; ppt_data.json &lt;&lt; 'EOF'</span>
+                            </div>
+                            <pre v-if="item.tc.output" class="term-stream-output">{{ item.tc.output }}</pre>
+                          </template>
+                          <!-- 参数就绪：显示生成内容 + 执行输出 -->
+                          <template v-else>
+                            <div class="term-line term-line--dimmed">
+                              <span class="term-prompt-sign">$</span>
+                              <span>cat &gt; ppt_data.json &lt;&lt; 'EOF'</span>
+                            </div>
+                            <pre v-if="(item.tc.input as any).ppt_json" class="term-code-inline">{{ (item.tc.input as any).ppt_json }}</pre>
+                            <div v-if="(item.tc.input as any).ppt_json" class="term-line term-line--dimmed"><span>EOF</span></div>
+                            <div class="term-line">
+                              <span class="term-prompt-sign">$</span>
+                              <span class="term-cmd-text">python3 render_ppt.py</span>
+                            </div>
+                            <pre v-if="!item.tc.done && item.tc.output" class="term-stream-output">{{ item.tc.output }}</pre>
+                            <template v-if="item.tc.done && item.tc.output">
+                              <template v-for="(line, li) in item.tc.output.split('\n')" :key="`${ii}-${li}`">
+                                <div v-if="line.startsWith('root@sandbox:')" class="term-line">
+                                  <span class="term-prompt-user">{{ line.split('$')[0] }}$</span>
+                                  <span class="term-cmd-text">{{ line.split('$ ').slice(1).join('$ ') }}</span>
+                                </div>
+                                <div v-else-if="line.startsWith('[stderr]')" class="term-line term-line--err">{{ line.replace('[stderr] ', '') }}</div>
+                                <div v-else-if="line.startsWith('[exit_code')" class="term-line term-line--err">{{ line }}</div>
+                                <div v-else-if="line.startsWith('⏱')" class="term-line term-line--meta">{{ line }}</div>
+                                <div v-else-if="line.trim()" class="term-line term-line--out">{{ line }}</div>
+                              </template>
                             </template>
                           </template>
                         </template>
