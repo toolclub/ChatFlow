@@ -77,7 +77,10 @@ async def update_tool_search_items(tool_exec_id: int, search_items: list) -> Non
 
 
 async def get_tool_executions_for_conv(conv_id: str) -> list[dict]:
-    """获取对话的全部工具调用记录。"""
+    """获取对话的全部工具调用记录（含 display_mode 协议字段）。"""
+    from tools.skill import SkillRegistry
+    registry = SkillRegistry.instance()
+
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(ToolExecutionModel)
@@ -98,13 +101,17 @@ async def get_tool_executions_for_conv(conv_id: str) -> list[dict]:
             "sequence_number": r.sequence_number,
             "duration": r.duration,
             "created_at": r.created_at,
+            "display_mode": registry.get_display_mode(r.tool_name),
         }
         for r in rows
     ]
 
 
 async def get_tool_executions_for_message(message_id: str) -> list[dict]:
-    """获取指定消息的工具调用记录。"""
+    """获取指定消息的工具调用记录（含 display_mode 协议字段）。"""
+    from tools.skill import SkillRegistry
+    registry = SkillRegistry.instance()
+
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(ToolExecutionModel)
@@ -121,6 +128,7 @@ async def get_tool_executions_for_message(message_id: str) -> list[dict]:
             "search_items": r.search_items or [],
             "status": r.status,
             "duration": r.duration,
+            "display_mode": registry.get_display_mode(r.tool_name),
         }
         for r in rows
     ]

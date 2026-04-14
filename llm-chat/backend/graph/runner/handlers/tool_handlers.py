@@ -21,7 +21,9 @@ class ToolStartHandler(EventHandler):
 
     async def handle(self, event: dict, ctx: StreamContext) -> AsyncGenerator[str, None]:
         ev = ToolStartEvent.from_event(event)
-        yield sse({"tool_call": {"name": ev.name, "input": ev.input}})
+        from tools.skill import SkillRegistry
+        display_mode = SkillRegistry.instance().get_display_mode(ev.name)
+        yield sse({"tool_call": {"name": ev.name, "input": ev.input, "display_mode": display_mode}})
 
 
 class ToolEndHandler(EventHandler):

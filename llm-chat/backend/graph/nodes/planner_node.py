@@ -100,16 +100,12 @@ class PlannerNode(BaseNode):
         判断当前请求是否需要规划。
 
         - search / search_code 路由：始终规划
-        - code 路由：消息过长或含多步信号时规划（复杂编程任务）
+        - code 路由：始终规划（代码任务即使消息短也涉及多步：写文件→执行→验证）
         - chat 路由：不规划（直接对话响应更自然）
         - 未指定路由：规划（保守策略）
         """
-        if not route or route in ("search", "search_code"):
+        if not route or route in ("search", "search_code", "code"):
             return True
-        if route == "code":
-            is_long      = len(user_msg.strip()) > cls._COMPLEX_CODE_LENGTH
-            has_signals  = any(sig in user_msg for sig in cls._COMPLEX_CODE_SIGNALS)
-            return is_long or has_signals
         # chat 路由不规划
         return False
 
@@ -306,6 +302,25 @@ class PlannerNode(BaseNode):
                 return resumed
             # 无可恢复计划 → 回退到普通流程（让模型自由续写）
 
+        # ── 网页澄清预检（必须在 _needs_planning 之前） ─────────────────────
+        # 无论哪个路由，只要检测到网页生成意图且缺少风格信息，都返回空计划。
+        # planner 只负责"让路"（返回空 plan），让下游 call_model 触发澄清卡片。
+        # 不设 needs_clarification=True —— clarification_data 只有 call_model 能设，
+        # 如果这里提前标记，call_model 反而会跳过澄清。
+        # 有图片时不拦截：图片本身就是用户提供的视觉风格参考，无需再追问。
+        images = state.get("images", [])
+        from graph.nodes.call_model_node import _needs_webpage_clarification
+        if not images and _needs_webpage_clarification(user_msg):
+            logger.info(
+                "Planner 网页澄清预检命中，返回空计划（由 call_model 触发澄清）| route=%s | user_msg=%.60s",
+                route, user_msg,
+            )
+            return {
+                "plan":               [],
+                "current_step_index": 0,
+                "step_iterations":    0,
+            }
+
         if not self._needs_planning(route, user_msg):
             return {
                 "plan":               [],
@@ -315,7 +330,6 @@ class PlannerNode(BaseNode):
                 "step_results":       [],
             }
 
-        images      = state.get("images", [])
         vision_desc = state.get("vision_description", "")
 
         # ── 规划模型选择 ────────────────────────────────────────────────────
@@ -324,27 +338,6 @@ class PlannerNode(BaseNode):
         model = state.get("tool_model") or state["model"]
         if model == (VISION_MODEL or "") or not model:
             model = SEARCH_MODEL or state["model"]
-
-        # ── 网页澄清预检（search_code 路由兼容方案） ────────────────────────
-        # 问题背景：call_model_node 的澄清检查依赖 `not plan` 条件，
-        # 而 search_code 路由会在 call_model 之前由本节点生成计划，
-        # 导致 `not plan` 为 False，澄清被跳过。
-        # 解决方案：在此处提前拦截，返回空计划，
-        # call_model 看到 `not plan=True` 后会自然触发澄清卡片。
-        #
-        # 有图片时不拦截：图片本身就是用户提供的视觉风格参考，无需再追问。
-        from graph.nodes.call_model_node import _needs_webpage_clarification
-        if not images and _needs_webpage_clarification(user_msg):
-            logger.info(
-                "Planner 网页澄清预检命中，返回空计划以触发澄清 | model=%s | user_msg=%.60s",
-                model, user_msg,
-            )
-            return {
-                "plan":               [],
-                "current_step_index": 0,
-                "step_iterations":    0,
-                "needs_clarification": True,  # 标记已触发澄清，call_model 检查此标记跳过重复触发
-            }
 
         llm = get_chat_llm(model=model, temperature=0.1)
 

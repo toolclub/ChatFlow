@@ -223,7 +223,7 @@ class StreamSession:
         ename = event.get("name", "")
         enode = event.get("metadata", {}).get("langgraph_node", "")
 
-        if etype == "on_chain_end" and enode in ("call_model", "call_model_after_tool"):
+        if etype == "on_chain_end" and enode in ("call_model", "call_model_after_tool", "reflector"):
             output = event.get("data", {}).get("output", {})
             if isinstance(output, dict) and output.get("full_response"):
                 self._partial = output["full_response"]

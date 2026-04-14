@@ -52,10 +52,13 @@ async def maybe_compress(conv_id: str) -> bool:
     if not to_summarise:
         return False
 
-    # 先写入长期记忆（Qdrant）
+    # 先写入长期记忆（Qdrant）— embedding 失败时跳过，不影响压缩主流程
     if LONGTERM_MEMORY_ENABLED:
-        from rag.ingestor import batch_store_pairs
-        await batch_store_pairs(conv_id, to_summarise, conv.mid_term_cursor)
+        try:
+            from rag.ingestor import batch_store_pairs
+            await batch_store_pairs(conv_id, to_summarise, conv.mid_term_cursor)
+        except Exception as exc:
+            logger.warning("长期记忆写入失败（已跳过，不影响压缩）| conv=%s | error=%s", conv_id, exc)
 
     # 构建摘要提示（工具调用记录不混入，避免摘要模型处理大量噪音）
     def _content_for_summary(m: "Message") -> str:

@@ -17,7 +17,7 @@ from graph.runner.utils import sse
 
 
 class ToolCallStartHandler(EventHandler):
-    """工具调用参数开始生成：让前端提前展示终端 loading。"""
+    """工具调用参数开始生成：让前端提前展示终端 loading，携带 display_mode 协议字段。"""
 
     def matches(self, event_type: str, node_name: str, event_name: str) -> bool:
         return event_type == "on_custom_event" and event_name == "tool_call_start"
@@ -28,4 +28,7 @@ class ToolCallStartHandler(EventHandler):
             return
         name = data.get("name", "")
         if name:
-            yield sse({"tool_call_start": {"name": name}})
+            # 从 SkillRegistry 查询渲染模式，前端按此字段决定如何渲染
+            from tools.skill import SkillRegistry
+            display_mode = SkillRegistry.instance().get_display_mode(name)
+            yield sse({"tool_call_start": {"name": name, "display_mode": display_mode}})

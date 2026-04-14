@@ -2,6 +2,12 @@
 内置工具：网络搜索（Tavily）
 纯异步 httpx 调用，不阻塞 event loop。
 """
+
+# ── Skill 元数据（SkillRegistry 自动收集） ──
+GUIDANCE = "实时或最新信息（新闻、价格、天气、版本号等）、不确定的具体事实、不熟悉的产品/技术时必须调用。搜索后只基于实际返回内容作答，不补充猜测。"
+ERROR_HINT = "搜索失败可能是网络问题，可换关键词重试，或用 fetch_webpage 直接访问已知 URL。"
+TAGS = ["search", "realtime"]
+DISPLAY_MODE = "default"
 import json
 import logging
 import os

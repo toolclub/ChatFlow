@@ -18,6 +18,31 @@
 
 ---
 
+## 模型思考流程（`llm_thinking` 事件全链路）
+
+整个会话过程中，模型的思考（thinking/reasoning）通过 `llm_thinking` 自定义事件实时推送到前端，
+前端在消息或步骤的"思考"折叠区展示，用户可随时展开查看。
+
+```
+节点              thinking 来源                    前端展示位置            约束
+─────────────────────────────────────────────────────────────────────────────────
+route_model       路由 LLM 的 reasoning_content    message.thinking       无特殊约束
+planner           规划 LLM 的 reasoning + content  message.thinking       ⚠️ 禁止思考中写代码
+call_model        推理 LLM 的 reasoning_content    step.thinking 或       正常推理
+                                                   message.thinking
+call_model_       工具后 LLM 的 reasoning_content  step.thinking 或       正常推理
+after_tool                                         message.thinking
+reflector         评估 LLM 的 reasoning + content  message.thinking       仅边缘场景调用 LLM
+```
+
+**铁律补充**：
+- planner 节点的 prompt 必须明确禁止模型在思考中写代码（`prompts/nodes/planner.md`），
+  否则模型会在 thinking 阶段生成完整 HTML/代码，浪费 10-30 秒，然后在执行阶段再写一遍。
+- 所有节点的 thinking 和 content 都必须推送 `llm_thinking` 事件，保证全流程可观测。
+- 前端通过 `event.node` 字段区分来自哪个节点（`planner`/`call_model`/`reflector` 等）。
+
+---
+
 ## 关键路径
 
 ### 对话生命周期（`fsm/conversation.py`）
