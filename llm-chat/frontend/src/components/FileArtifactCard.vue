@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { FileArtifact } from '../types'
 import { isPreviewable } from '../types'
+import { Download, View } from '@element-plus/icons-vue'
 
 const props = defineProps<{
   file: FileArtifact
@@ -26,8 +27,20 @@ const LANG_LABEL: Record<string, string> = {
   archive: '压缩包',
 }
 
+/** 根据语言返回 el-tag 的 type */
+const LANG_TAG_TYPE: Record<string, string> = {
+  html: '', javascript: 'warning', typescript: 'warning',
+  python: 'success', go: 'info', rust: 'danger',
+  java: 'warning', pptx: 'warning', pdf: 'danger',
+  vue: 'success', archive: 'info',
+  shell: 'info', json: '', yaml: '', xml: '',
+  css: '', svg: '', ruby: 'danger', markdown: '',
+  sql: 'info', text: 'info',
+}
+
 const icon = LANG_ICON[props.file.language] || '📄'
 const langLabel = LANG_LABEL[props.file.language] || props.file.language
+const langTagType = LANG_TAG_TYPE[props.file.language] || 'info'
 const previewable = isPreviewable(props.file.language)
 const isPpt = props.file.language === 'pptx'
 const isArchive = props.file.language === 'archive'
@@ -72,73 +85,107 @@ function downloadFile(e?: Event) {
 </script>
 
 <template>
-  <div class="artifact-card" :class="{ 'artifact-card--ppt': isPpt }" @click="emit('select', file)">
+  <el-card
+    shadow="hover"
+    class="artifact-card"
+    :class="{ 'artifact-card--ppt': isPpt }"
+    :body-style="{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: '10px' }"
+    @click="emit('select', file)"
+  >
     <div class="artifact-icon" :class="{ 'artifact-icon--ppt': isPpt }">{{ icon }}</div>
     <div class="artifact-info">
       <div class="artifact-name">{{ file.name }}</div>
       <div class="artifact-meta">
-        <span class="artifact-lang">{{ langLabel }}</span>
-        <span class="artifact-sep">·</span>
-        <span class="artifact-size">{{ sizeKb }} KB</span>
-        <span v-if="file.slide_count" class="artifact-sep">·</span>
-        <span v-if="file.slide_count" class="artifact-slides">{{ file.slide_count }} 页</span>
-        <span v-if="previewable" class="artifact-preview-badge">可预览</span>
-        <span v-if="isPpt" class="artifact-download-badge">点击预览</span>
-        <span v-if="isArchive" class="artifact-archive-badge">可下载</span>
+        <el-tag :type="langTagType" size="small" effect="plain" class="lang-tag">
+          {{ langLabel }}
+        </el-tag>
+        <el-tag size="small" type="info" effect="plain" class="size-tag">
+          {{ sizeKb }} KB
+        </el-tag>
+        <el-tag v-if="file.slide_count" size="small" type="info" effect="plain" class="size-tag">
+          {{ file.slide_count }} 页
+        </el-tag>
+        <el-tag v-if="previewable" size="small" effect="light" class="preview-badge">
+          可预览
+        </el-tag>
+        <el-tag v-if="isPpt" size="small" type="warning" effect="light" class="preview-badge">
+          点击预览
+        </el-tag>
+        <el-tag v-if="isArchive" size="small" type="success" effect="light" class="preview-badge">
+          可下载
+        </el-tag>
       </div>
     </div>
-    <!-- 下载按钮（所有有 id 的 artifact 都可下载） -->
-    <div v-if="file.id" class="artifact-dl-btn" title="下载" @click="downloadFile($event)">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-      </svg>
-    </div>
-    <div class="artifact-action">
-      <svg v-if="isArchive" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-      </svg>
-      <svg v-else-if="isPpt" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
-      </svg>
-      <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+    <!-- 下载按钮 -->
+    <el-button
+      v-if="file.id"
+      text
+      :icon="Download"
+      class="dl-btn"
+      title="下载"
+      @click="downloadFile($event)"
+    />
+    <!-- 操作按钮 -->
+    <el-button
+      text
+      :icon="isArchive ? Download : (isPpt ? View : undefined)"
+      class="action-btn"
+      @click.stop="isArchive ? downloadFile($event) : emit('select', file)"
+    >
+      <svg v-if="!isArchive && !isPpt" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
         <path d="M9 18l6-6-6-6"/>
       </svg>
-    </div>
-  </div>
+    </el-button>
+  </el-card>
 </template>
 
 <style scoped>
 .artifact-card {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  background: var(--cf-card, #fff);
-  border: 1.5px solid rgba(0,174,236,0.18);
-  border-radius: var(--cf-radius-md, 14px);
-  cursor: pointer;
-  transition: all 0.25s cubic-bezier(0.34,1.56,0.64,1);
-  box-shadow: 0 1px 6px rgba(0,174,236,0.06);
   max-width: 360px;
   margin: 6px 0;
+  border-radius: 14px !important;
+  border: 1.5px solid rgba(0,174,236,0.18) !important;
+  cursor: pointer;
+  transition: all 0.3s cubic-bezier(0.34,1.56,0.64,1) !important;
+  box-shadow: 0 1px 6px rgba(0,174,236,0.06);
+  animation: artifact-bounce-in 0.45s cubic-bezier(0.34,1.56,0.64,1) both;
 }
+
+@keyframes artifact-bounce-in {
+  0% {
+    opacity: 0;
+    transform: translateY(16px) scale(0.9);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 .artifact-card:hover {
-  border-color: var(--cf-bili-blue, #00AEEC);
-  box-shadow: 0 4px 18px rgba(0,174,236,0.14), 0 0 8px rgba(0,174,236,0.06);
-  transform: translateY(-2px) scale(1.01);
+  border-color: transparent !important;
+  border-image: linear-gradient(135deg, #00AEEC, #FB7299) 1 !important;
+  box-shadow: 0 6px 24px rgba(0,174,236,0.18), 0 0 12px rgba(251,114,153,0.08);
+  transform: translateY(-3px) scale(1.01);
 }
+/* Fix: border-image doesn't work with border-radius, use outline trick */
+.artifact-card:hover {
+  border-color: #00AEEC !important;
+  box-shadow: 0 6px 24px rgba(0,174,236,0.18), 0 0 12px rgba(251,114,153,0.08), inset 0 0 0 0.5px rgba(251,114,153,0.3);
+}
+
 .artifact-card:active {
   transform: translateY(0) scale(0.99);
 }
 
-/* PPT 卡片特殊样式 — 橙色主题 */
+/* PPT 卡片特殊样式 */
 .artifact-card--ppt {
-  border-color: #FFD6A5;
+  border-color: #FFD6A5 !important;
   box-shadow: 0 1px 6px rgba(255,152,0,0.08);
 }
 .artifact-card--ppt:hover {
-  border-color: #FF9800;
-  box-shadow: 0 4px 16px rgba(255,152,0,0.15);
+  border-color: #FF9800 !important;
+  box-shadow: 0 6px 20px rgba(255,152,0,0.18);
 }
 
 .artifact-icon {
@@ -151,6 +198,10 @@ function downloadFile(e?: Event) {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  transition: transform 0.2s cubic-bezier(0.34,1.56,0.64,1);
+}
+.artifact-card:hover .artifact-icon {
+  transform: scale(1.08);
 }
 .artifact-icon--ppt {
   background: linear-gradient(135deg, #FFF3E0 0%, #FFE0B2 100%);
@@ -161,7 +212,7 @@ function downloadFile(e?: Event) {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
 }
 .artifact-name {
   font-size: 13px;
@@ -175,65 +226,51 @@ function downloadFile(e?: Event) {
   display: flex;
   align-items: center;
   gap: 4px;
-  font-size: 11px;
-  color: #9499A0;
-}
-.artifact-lang {
-  font-weight: 500;
-  color: #00AEEC;
-}
-.artifact-card--ppt .artifact-lang {
-  color: #FF9800;
-}
-.artifact-sep { color: #C9CCD0; }
-.artifact-slides { font-weight: 500; }
-.artifact-preview-badge {
-  font-size: 10px;
-  font-weight: 500;
-  color: #FB7299;
-  background: rgba(251,114,153,0.08);
-  padding: 0px 5px;
-  border-radius: 8px;
-  margin-left: 2px;
-}
-.artifact-download-badge {
-  font-size: 10px;
-  font-weight: 500;
-  color: #FF9800;
-  background: rgba(255,152,0,0.08);
-  padding: 0px 5px;
-  border-radius: 8px;
-  margin-left: 2px;
+  flex-wrap: wrap;
 }
 
-.artifact-archive-badge {
-  font-size: 10px;
-  font-weight: 500;
-  color: #00B578;
-  background: rgba(0,181,120,0.08);
-  padding: 0px 5px;
-  border-radius: 8px;
-  margin-left: 2px;
+.lang-tag {
+  font-size: 10px !important;
+  height: 20px !important;
+  padding: 0 6px !important;
+  border-radius: 6px !important;
 }
 
-.artifact-dl-btn {
-  color: var(--cf-text-4, #C9CCD0);
+.size-tag {
+  font-size: 10px !important;
+  height: 20px !important;
+  padding: 0 6px !important;
+  border-radius: 6px !important;
+}
+
+.preview-badge {
+  font-size: 10px !important;
+  height: 20px !important;
+  padding: 0 6px !important;
+  border-radius: 8px !important;
+}
+
+/* 下载按钮 */
+.dl-btn {
+  color: var(--cf-text-4, #C9CCD0) !important;
   flex-shrink: 0;
-  cursor: pointer;
-  padding: 4px;
-  border-radius: 6px;
-  transition: all 0.15s;
+  transition: all 0.2s cubic-bezier(0.34,1.56,0.64,1);
 }
-.artifact-dl-btn:hover {
-  color: var(--cf-bili-blue, #00AEEC);
-  background: rgba(0,174,236,0.08);
+.dl-btn:hover {
+  color: var(--cf-bili-blue, #00AEEC) !important;
+  transform: scale(1.1);
 }
 
-.artifact-action {
-  color: #C9CCD0;
+/* 操作按钮 */
+.action-btn {
+  color: #C9CCD0 !important;
   flex-shrink: 0;
-  transition: color 0.15s;
+  transition: all 0.2s cubic-bezier(0.34,1.56,0.64,1);
 }
-.artifact-card:hover .artifact-action { color: #00AEEC; }
-.artifact-card--ppt:hover .artifact-action { color: #FF9800; }
+.artifact-card:hover .action-btn {
+  color: #00AEEC !important;
+}
+.artifact-card--ppt:hover .action-btn {
+  color: #FF9800 !important;
+}
 </style>

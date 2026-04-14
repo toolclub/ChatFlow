@@ -75,6 +75,9 @@ class ReflectorNodeOutput(TypedDict, total=False):
     messages: list            # continue 时注入的下一步 HumanMessage
     current_step_index: int
     step_iterations: int
+    step_results: list[str]
+    full_response: str        # 兜底 response（工具结果摘要），确保 save_response 不存空
+    forget_mode: bool
 
 
 class CompressNodeOutput(TypedDict, total=False):

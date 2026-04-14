@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import type { ClarificationData, ClarificationItem } from '../types'
+import { ArrowRight } from '@element-plus/icons-vue'
 
 const props = defineProps<{
   data: ClarificationData
@@ -96,114 +97,133 @@ function handleSubmit() {
 </script>
 
 <template>
-  <div class="clarification-card">
-    <!-- 卡片头部 -->
-    <div class="card-header">
-      <div class="card-icon">💬</div>
-      <span class="card-title">{{ data.question }}</span>
-    </div>
-
-    <!-- 问题项列表 -->
-    <div class="card-body">
-      <div v-for="item in effectiveItems" :key="item.id" class="item-block">
-        <div class="item-label">{{ item.label }}</div>
-
-        <!-- 单选 -->
-        <div v-if="item.type === 'single_choice'" class="options-grid">
-          <button
-            v-for="opt in item.options"
-            :key="opt"
-            class="opt-btn"
-            :class="{ selected: isSelected(item.id, opt) }"
-            @click="answers[item.id] = opt"
-          >
-            <span class="opt-radio">
-              <svg v-if="isSelected(item.id, opt)" width="10" height="10" viewBox="0 0 10 10">
-                <circle cx="5" cy="5" r="4" fill="currentColor"/>
-              </svg>
-            </span>
-            {{ opt }}
-          </button>
+  <Transition name="clarify-slide">
+    <el-card class="clarification-card" shadow="hover">
+      <template #header>
+        <div class="card-header">
+          <span class="card-icon">💬</span>
+          <span class="card-title">{{ data.question }}</span>
         </div>
-        <!-- 选了"其他"时显示补充输入框 -->
-        <textarea
-          v-if="item.type === 'single_choice' && selectedIsOther(item.id)"
-          v-model="otherText[item.id]"
-          class="text-input other-input"
-          placeholder="请补充说明你的具体需求..."
-          rows="2"
-        />
+      </template>
 
-        <!-- 多选 -->
-        <div v-else-if="item.type === 'multi_choice'" class="options-grid">
-          <button
-            v-for="opt in item.options"
-            :key="opt"
-            class="opt-btn opt-btn--multi"
-            :class="{ selected: isSelected(item.id, opt) }"
-            @click="toggleMulti(item.id, opt)"
+      <!-- 问题项列表 -->
+      <el-form label-position="top" class="card-body">
+        <el-form-item
+          v-for="item in effectiveItems"
+          :key="item.id"
+          :label="item.label"
+          class="item-block"
+        >
+          <!-- 单选 -->
+          <el-radio-group
+            v-if="item.type === 'single_choice'"
+            v-model="(answers[item.id] as string)"
+            class="options-grid"
           >
-            <span class="opt-check">
-              <svg v-if="isSelected(item.id, opt)" width="10" height="10" viewBox="0 0 10 10">
-                <polyline points="2,5 4,7 8,3" stroke="currentColor" stroke-width="1.8"
-                          stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-              </svg>
-            </span>
-            {{ opt }}
-          </button>
-        </div>
+            <el-radio-button
+              v-for="opt in item.options"
+              :key="opt"
+              :value="opt"
+              class="opt-radio-btn"
+            >
+              {{ opt }}
+            </el-radio-button>
+          </el-radio-group>
+          <!-- 选了"其他"时显示补充输入框 -->
+          <el-input
+            v-if="item.type === 'single_choice' && selectedIsOther(item.id)"
+            v-model="otherText[item.id]"
+            type="textarea"
+            :autosize="{ minRows: 2, maxRows: 4 }"
+            placeholder="请补充说明你的具体需求..."
+            class="other-input"
+          />
 
-        <!-- 文本输入 -->
-        <textarea
-          v-else-if="item.type === 'text'"
-          v-model="(answers[item.id] as string)"
-          class="text-input"
-          :placeholder="item.placeholder || '请输入...'"
-          rows="2"
-        />
+          <!-- 多选 -->
+          <el-checkbox-group
+            v-else-if="item.type === 'multi_choice'"
+            :model-value="(answers[item.id] as string[])"
+            class="options-grid"
+          >
+            <el-checkbox
+              v-for="opt in item.options"
+              :key="opt"
+              :label="opt"
+              :value="opt"
+              :checked="isSelected(item.id, opt)"
+              class="opt-checkbox"
+              @change="toggleMulti(item.id, opt)"
+            />
+          </el-checkbox-group>
+
+          <!-- 文本输入 -->
+          <el-input
+            v-else-if="item.type === 'text'"
+            v-model="(answers[item.id] as string)"
+            type="textarea"
+            :autosize="{ minRows: 2, maxRows: 6 }"
+            :placeholder="item.placeholder || '请输入...'"
+          />
+        </el-form-item>
+      </el-form>
+
+      <!-- 提交按钮 -->
+      <div class="card-footer">
+        <el-button
+          type="primary"
+          round
+          :disabled="!canSubmit"
+          :loading="loading"
+          :icon="loading ? undefined : ArrowRight"
+          @click="handleSubmit"
+        >
+          确认并继续
+        </el-button>
       </div>
-    </div>
-
-    <!-- 提交按钮 -->
-    <div class="card-footer">
-      <button
-        class="submit-btn"
-        :disabled="!canSubmit || loading"
-        @click="handleSubmit"
-      >
-        <svg v-if="loading" class="spin-icon" width="13" height="13" viewBox="0 0 24 24">
-          <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2.5"
-                  stroke-dasharray="28 28" fill="none"/>
-        </svg>
-        <svg v-else width="13" height="13" viewBox="0 0 24 24" fill="none">
-          <path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2"
-                stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        确认并继续
-      </button>
-    </div>
-  </div>
+    </el-card>
+  </Transition>
 </template>
 
 <style scoped>
-.clarification-card {
-  margin-top: 14px;
-  background: #ffffff;
-  border: 1px solid #E3E5E7;
-  border-radius: 14px;
-  overflow: hidden;
-  box-shadow: 0 1px 6px rgba(0,0,0,0.04);
-  max-width: 620px;
+/* ── 卡片入场动画 ── */
+.clarify-slide-enter-active {
+  animation: clarify-bounce-in 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+@keyframes clarify-bounce-in {
+  0% {
+    opacity: 0;
+    transform: translateY(30px) scale(0.96);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
-/* ── 头部 — 浅色柔和 ── */
+.clarification-card {
+  margin-top: 14px;
+  max-width: 620px;
+  border-radius: 14px !important;
+  border: 1px solid #E3E5E7;
+  overflow: hidden;
+  animation: clarify-bounce-in 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.clarification-card :deep(.el-card__header) {
+  padding: 13px 16px 11px;
+  background: #FAFBFC;
+  border-bottom: 1px solid #EBEDF0;
+}
+
+.clarification-card :deep(.el-card__body) {
+  padding: 16px 16px 4px;
+}
+
+/* ── 头部 ── */
 .card-header {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  padding: 13px 16px 11px;
-  background: #FAFBFC;
-  border-bottom: 1px solid #EBEDF0;
 }
 .card-icon {
   font-size: 18px;
@@ -217,145 +237,160 @@ function handleSubmit() {
   line-height: 1.5;
 }
 
-/* ── 内容区 ── */
+/* ── 表单内容区 ── */
 .card-body {
-  padding: 16px 16px 4px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 4px;
 }
-.item-block {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.item-label {
+
+.card-body :deep(.el-form-item__label) {
   font-size: 12.5px;
   font-weight: 600;
   color: #18191C;
+  padding-bottom: 6px;
 }
 
-/* ── 选项网格 — 柔和浅色 ── */
+/* ── 选项网格 ── */
 .options-grid {
   display: flex;
   flex-wrap: wrap;
   gap: 7px;
 }
-.opt-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 14px;
+
+/* 单选按钮样式 */
+.opt-radio-btn {
+  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.opt-radio-btn:hover {
+  transform: translateY(-1px);
+}
+.opt-radio-btn:active {
+  transform: scale(0.96);
+}
+
+.options-grid :deep(.el-radio-button__inner) {
+  border-radius: 20px !important;
   border: 1px solid #E3E5E7;
-  border-radius: 20px;
   background: #FAFBFC;
+  color: #61666D;
+  font-size: 12.5px;
+  font-weight: 500;
+  padding: 7px 14px;
+  box-shadow: none;
+  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.options-grid :deep(.el-radio-button__inner:hover) {
+  color: #18191C;
+  background: #F1F2F3;
+  border-color: #C9CCD0;
+}
+.options-grid :deep(.el-radio-button.is-active .el-radio-button__inner) {
+  background: #F0FAFD;
+  color: #00AEEC;
+  border-color: #00AEEC;
+  font-weight: 600;
+  box-shadow: none;
+}
+/* 去掉 radio-group 的连接样式 */
+.options-grid :deep(.el-radio-button:first-child .el-radio-button__inner) {
+  border-radius: 20px !important;
+  border-left: 1px solid #E3E5E7;
+}
+.options-grid :deep(.el-radio-button.is-active:first-child .el-radio-button__inner) {
+  border-left-color: #00AEEC;
+}
+.options-grid :deep(.el-radio-button:last-child .el-radio-button__inner) {
+  border-radius: 20px !important;
+}
+.options-grid :deep(.el-radio-button + .el-radio-button) {
+  margin-left: 0;
+}
+.options-grid :deep(.el-radio-button__original-radio + .el-radio-button__inner) {
+  border-left-width: 1px;
+}
+
+/* 多选样式 */
+.opt-checkbox {
+  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+  margin-right: 0;
+}
+.opt-checkbox:hover {
+  transform: translateY(-1px);
+}
+.opt-checkbox:active {
+  transform: scale(0.96);
+}
+
+.opt-checkbox :deep(.el-checkbox__inner) {
+  border-radius: 4px;
+  border-color: #C9CCD0;
+  transition: all 0.2s;
+}
+.opt-checkbox :deep(.el-checkbox__input.is-checked .el-checkbox__inner) {
+  background-color: #00AEEC;
+  border-color: #00AEEC;
+}
+.opt-checkbox :deep(.el-checkbox__input.is-checked + .el-checkbox__label) {
+  color: #00AEEC;
+}
+.opt-checkbox :deep(.el-checkbox__label) {
   font-size: 12.5px;
   font-weight: 500;
   color: #61666D;
-  cursor: pointer;
-  transition: all 0.16s cubic-bezier(0.34, 1.56, 0.64, 1);
-  font-family: inherit;
-  line-height: 1.4;
-}
-.opt-btn:hover {
-  border-color: #C9CCD0;
-  background: #F1F2F3;
-  color: #18191C;
-  transform: translateY(-1px);
-}
-.opt-btn.selected {
-  border-color: #00AEEC;
-  background: #F0FAFD;
-  color: #0095CC;
-  font-weight: 600;
 }
 
-/* 单选圆点 / 多选方框 */
-.opt-radio,
-.opt-check {
-  width: 14px; height: 14px;
-  border-radius: 50%;
-  border: 1.5px solid #C9CCD0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  transition: all 0.15s;
-}
-.opt-btn--multi .opt-check {
-  border-radius: 4px;
-}
-.opt-btn.selected .opt-radio,
-.opt-btn.selected .opt-check {
-  background: #00AEEC;
-  border-color: #00AEEC;
-  color: #fff;
-}
-
-/* ── 文本输入 ── */
-.text-input {
-  width: 100%;
-  padding: 8px 12px;
-  border: 1px solid #E3E5E7;
-  border-radius: 10px;
-  font-size: 13px;
-  font-family: inherit;
-  color: #18191C;
-  background: #FAFBFC;
-  resize: vertical;
-  min-height: 62px;
-  outline: none;
-  transition: border-color 0.15s;
-  box-sizing: border-box;
-}
-.text-input:focus {
-  border-color: #00AEEC;
-  background: #fff;
-  box-shadow: 0 0 0 2px rgba(0,174,236,0.08);
-}
-.text-input::placeholder { color: #C9CCD0; }
+/* ── 补充输入框 ── */
 .other-input {
-  margin-top: 4px;
+  margin-top: 8px;
+}
+.other-input :deep(.el-textarea__inner) {
   border-color: #D0EEF9;
   background: #F8FCFE;
+  border-radius: 10px;
+}
+.other-input :deep(.el-textarea__inner:focus) {
+  border-color: #00AEEC;
+  box-shadow: 0 0 0 2px rgba(0,174,236,0.08);
+}
+
+/* 文本输入框通用 */
+.card-body :deep(.el-textarea__inner) {
+  border-radius: 10px;
+  font-size: 13px;
+  color: #18191C;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.card-body :deep(.el-textarea__inner:focus) {
+  border-color: #00AEEC;
+  box-shadow: 0 0 0 2px rgba(0,174,236,0.08);
 }
 
 /* ── 底部 ── */
 .card-footer {
-  padding: 12px 16px 14px;
+  padding: 12px 0 2px;
   display: flex;
   justify-content: flex-end;
 }
-.submit-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 20px;
+.card-footer :deep(.el-button--primary) {
   background: #00AEEC;
-  color: #fff;
-  border: none;
-  border-radius: 20px;
+  border-color: #00AEEC;
   font-size: 13px;
   font-weight: 600;
-  font-family: inherit;
-  cursor: pointer;
-  transition: all 0.18s;
   box-shadow: 0 1px 4px rgba(0,174,236,0.2);
+  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
-.submit-btn:hover:not(:disabled) {
+.card-footer :deep(.el-button--primary:hover) {
   background: #0095CC;
+  border-color: #0095CC;
   box-shadow: 0 2px 8px rgba(0,174,236,0.3);
   transform: translateY(-1px);
 }
-.submit-btn:disabled {
+.card-footer :deep(.el-button--primary.is-disabled) {
   background: #E3E5E7;
+  border-color: #E3E5E7;
   color: #C9CCD0;
   box-shadow: none;
-  cursor: not-allowed;
   transform: none;
 }
-.spin-icon {
-  animation: spin 0.8s linear infinite;
-}
-@keyframes spin { to { transform: rotate(360deg); } }
 </style>

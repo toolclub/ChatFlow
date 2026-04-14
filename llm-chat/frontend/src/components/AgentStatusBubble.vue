@@ -71,83 +71,105 @@ const planSteps = computed(() => props.cognitive.plan)
 </script>
 
 <template>
-  <transition name="bubble-fade" appear>
-    <div v-if="cfg" class="status-bubble">
+  <transition name="bubble-slide" appear>
+    <div v-if="cfg" class="status-bubble-wrap">
+      <el-card class="status-bubble-card" shadow="hover" :body-style="{ padding: 0 }">
+        <!-- 左侧彩色条 -->
+        <div class="accent-bar" :style="{ background: cfg.color }" />
 
-      <!-- 左侧彩色条 -->
-      <div class="accent-bar" :style="{ background: cfg.color }" />
+        <div class="bubble-body">
+          <!-- 阶段行 -->
+          <div class="phase-row">
+            <span class="pulse-dot" :style="{ background: cfg.pulse }" />
+            <el-tag
+              :color="cfg.bg"
+              :style="{ color: cfg.color, borderColor: cfg.color + '30' }"
+              size="small"
+              effect="plain"
+              class="phase-tag"
+            >
+              {{ cfg.label }}
+            </el-tag>
+            <span class="phase-dot-sep">·</span>
+            <span class="phase-desc">{{ desc }}</span>
+            <el-icon class="phase-spin" :style="{ color: cfg.color }"><Loading /></el-icon>
+          </div>
 
-      <div class="bubble-body">
-
-        <!-- 阶段行 -->
-        <div class="phase-row">
-          <span class="pulse-dot" :style="{ background: cfg.pulse }" />
-          <span class="phase-label" :style="{ color: cfg.color }">{{ cfg.label }}</span>
-          <span class="phase-dot-sep">·</span>
-          <span class="phase-desc">{{ desc }}</span>
-          <el-icon class="phase-spin" :style="{ color: cfg.color }"><Loading /></el-icon>
-        </div>
-
-        <!-- 计划步骤（有计划时显示） -->
-        <div v-if="hasPlan" class="plan-list">
-          <div
-            v-for="(step, i) in planSteps"
-            :key="step.id"
-            class="plan-item"
-            :class="step.status"
-          >
-            <!-- 连接线 -->
-            <div class="step-line-wrap">
-              <div class="step-circle" :class="step.status">
-                <el-icon v-if="step.status === 'done'" class="step-icon-done"><Check /></el-icon>
-                <el-icon v-else-if="step.status === 'running'" class="step-icon-spin"><Loading /></el-icon>
-                <el-icon v-else-if="step.status === 'failed'" class="step-icon-fail"><Close /></el-icon>
-                <span v-else class="step-num">{{ i + 1 }}</span>
-              </div>
-              <div v-if="i < planSteps.length - 1" class="step-connector" :class="{ passed: step.status === 'done' }" />
-            </div>
-
-            <!-- 步骤内容 -->
-            <div class="step-content">
-              <span class="step-title" :class="step.status">{{ step.title }}</span>
-              <span v-if="step.description && step.status === 'running'" class="step-desc">
-                {{ step.description }}
-              </span>
-            </div>
+          <!-- 计划步骤（有计划时显示） -->
+          <div v-if="hasPlan" class="plan-steps-wrap">
+            <el-steps direction="vertical" :active="-1" class="bili-steps">
+              <el-step
+                v-for="(step, i) in planSteps"
+                :key="step.id"
+                :title="step.title"
+                :description="step.status === 'running' ? step.description : ''"
+                :status="
+                  step.status === 'done' ? 'finish' :
+                  step.status === 'running' ? 'process' :
+                  step.status === 'failed' ? 'error' :
+                  'wait'
+                "
+                :class="['bili-step', `bili-step--${step.status}`]"
+              >
+                <template #icon>
+                  <div class="step-icon-circle" :class="step.status">
+                    <el-icon v-if="step.status === 'done'" class="step-icon-done"><Check /></el-icon>
+                    <el-icon v-else-if="step.status === 'running'" class="step-icon-spin"><Loading /></el-icon>
+                    <el-icon v-else-if="step.status === 'failed'" class="step-icon-fail"><Close /></el-icon>
+                    <span v-else class="step-num">{{ i + 1 }}</span>
+                  </div>
+                </template>
+              </el-step>
+            </el-steps>
           </div>
         </div>
-
-      </div>
+      </el-card>
     </div>
   </transition>
 </template>
 
 <style scoped>
-/* ── 入场动画 ── */
-.bubble-fade-enter-active { transition: opacity .25s, transform .25s; }
-.bubble-fade-leave-active { transition: opacity .15s; }
-.bubble-fade-enter-from  { opacity: 0; transform: translateY(6px); }
-.bubble-fade-leave-to    { opacity: 0; }
+/* -- Slide-in from right + fade -- */
+.bubble-slide-enter-active {
+  transition: opacity 0.35s cubic-bezier(0.34,1.56,0.64,1),
+              transform 0.35s cubic-bezier(0.34,1.56,0.64,1);
+}
+.bubble-slide-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.bubble-slide-enter-from {
+  opacity: 0;
+  transform: translateX(20px);
+}
+.bubble-slide-leave-to {
+  opacity: 0;
+  transform: translateX(10px);
+}
 
-/* ── 外层卡片 — Bilibili 风格 ── */
-.status-bubble {
-  display: flex;
-  align-items: stretch;
-  background: var(--cf-card, #ffffff);
-  border: 1px solid var(--cf-border-soft, #EBF0F5);
-  border-radius: var(--cf-radius-md, 14px);
-  box-shadow: var(--cf-shadow-xs), 0 0 8px rgba(0,174,236,0.03);
-  overflow: hidden;
+/* -- Outer wrap -- */
+.status-bubble-wrap {
   margin: 2px 0 6px;
   max-width: 520px;
   width: fit-content;
 }
 
+/* -- Card override -- */
+.status-bubble-card {
+  border-radius: 14px !important;
+  border: 1px solid var(--cf-border-soft, #EBF0F5) !important;
+  overflow: hidden;
+  transition: box-shadow 0.3s cubic-bezier(0.34,1.56,0.64,1);
+}
+:deep(.status-bubble-card .el-card__body) {
+  display: flex;
+  align-items: stretch;
+  padding: 0 !important;
+}
+
 .accent-bar {
   width: 3px;
   flex-shrink: 0;
-  border-radius: 0;
-  transition: background .3s;
+  transition: background 0.3s cubic-bezier(0.34,1.56,0.64,1);
 }
 
 .bubble-body {
@@ -159,7 +181,7 @@ const planSteps = computed(() => props.cognitive.plan)
   min-width: 0;
 }
 
-/* ── 阶段行 ── */
+/* -- Phase row -- */
 .phase-row {
   display: flex;
   align-items: center;
@@ -175,16 +197,21 @@ const planSteps = computed(() => props.cognitive.plan)
   animation: pulse-ring 1.8s ease-in-out infinite;
 }
 @keyframes pulse-ring {
-  0%, 100% { opacity: 1;   transform: scale(1); }
-  50%       { opacity: .5; transform: scale(.85); }
+  0%, 100% { opacity: 1;   transform: scale(1); box-shadow: 0 0 0 0 currentColor; }
+  50%       { opacity: .5; transform: scale(.85); box-shadow: 0 0 0 4px transparent; }
 }
 
-.phase-label {
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: .2px;
-  transition: color .3s;
+.phase-tag {
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.3px;
+  height: 22px !important;
+  line-height: 20px !important;
+  padding: 0 8px !important;
+  border-radius: 11px !important;
+  transition: all 0.3s cubic-bezier(0.34,1.56,0.64,1);
 }
+
 .phase-dot-sep {
   color: #d1d5db;
   font-size: 12px;
@@ -204,29 +231,80 @@ const planSteps = computed(() => props.cognitive.plan)
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ── 计划步骤列表 ── */
-.plan-list {
-  display: flex;
-  flex-direction: column;
+/* -- Plan steps with el-steps -- */
+.plan-steps-wrap {
   padding-left: 2px;
 }
 
-.plan-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
+.bili-steps {
+  --el-color-primary: #00AEEC;
+  --el-color-success: #00B578;
+  --el-color-danger: #F25D59;
 }
 
-/* 左侧圆圈 + 连接线 */
-.step-line-wrap {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  flex-shrink: 0;
+:deep(.bili-steps .el-step__head) {
+  padding-right: 8px;
+}
+
+:deep(.bili-steps .el-step__icon) {
   width: 22px;
+  height: 22px;
+  font-size: 10px;
+  border: none !important;
+  background: transparent !important;
 }
 
-.step-circle {
+:deep(.bili-steps .el-step__line) {
+  top: 24px;
+  left: 10px;
+  width: 1.5px !important;
+  background: #e5e7eb;
+  transition: background 0.3s cubic-bezier(0.34,1.56,0.64,1);
+}
+
+:deep(.bili-steps .el-step.is-vertical:not(:last-of-type) .el-step__line) {
+  min-height: 8px;
+}
+
+/* Override finished step line color */
+:deep(.bili-step--done + .bili-step .el-step__line),
+:deep(.bili-step--done .el-step__line) {
+  background: #8AE0C0 !important;
+}
+
+:deep(.bili-steps .el-step__title) {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: #374151;
+  line-height: 1.4;
+  transition: color 0.25s cubic-bezier(0.34,1.56,0.64,1);
+  padding-bottom: 4px;
+}
+
+:deep(.bili-step--done .el-step__title) {
+  color: #9499A0 !important;
+  text-decoration: line-through;
+}
+:deep(.bili-step--running .el-step__title) {
+  color: #00AEEC !important;
+  font-weight: 600;
+}
+:deep(.bili-step--failed .el-step__title) {
+  color: #F25D59 !important;
+}
+
+:deep(.bili-steps .el-step__description) {
+  font-size: 11px;
+  color: #9ca3af;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-bottom: 6px;
+}
+
+/* -- Custom step icon circles -- */
+.step-icon-circle {
   width: 22px;
   height: 22px;
   border-radius: 50%;
@@ -236,54 +314,24 @@ const planSteps = computed(() => props.cognitive.plan)
   font-size: 10px;
   font-weight: 700;
   flex-shrink: 0;
-  transition: all .25s;
+  transition: all 0.25s cubic-bezier(0.34,1.56,0.64,1);
 }
-.step-circle.pending  { background: #F1F2F3; color: #9499A0; border: 1.5px solid #E3E5E7; }
-.step-circle.running  { background: #E3F6FD; color: #00AEEC; border: 1.5px solid #B8E6F9; }
-.step-circle.done     { background: #D5F5E8; color: #00B578; border: 1.5px solid #8AE0C0; }
-.step-circle.failed   { background: #FDE8E7; color: #F25D59; border: 1.5px solid #F9ADAB; }
+.step-icon-circle.pending  { background: #F1F2F3; color: #9499A0; border: 1.5px solid #E3E5E7; }
+.step-icon-circle.running  {
+  background: #E3F6FD; color: #00AEEC; border: 1.5px solid #B8E6F9;
+  animation: step-pulse 2s ease-in-out infinite;
+}
+.step-icon-circle.done     { background: #D5F5E8; color: #00B578; border: 1.5px solid #8AE0C0; }
+.step-icon-circle.failed   { background: #FDE8E7; color: #F25D59; border: 1.5px solid #F9ADAB; }
+
+/* Breathing pulse for running steps */
+@keyframes step-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(0,174,236,0.25); }
+  50%      { box-shadow: 0 0 0 5px rgba(0,174,236,0); }
+}
 
 .step-icon-done { font-size: 11px; }
 .step-icon-spin { font-size: 11px; animation: spin 1.1s linear infinite; }
 .step-icon-fail { font-size: 11px; }
 .step-num       { font-size: 10px; line-height: 1; }
-
-.step-connector {
-  width: 1.5px;
-  flex: 1;
-  min-height: 8px;
-  background: #e5e7eb;
-  margin: 2px 0;
-  transition: background .3s;
-}
-.step-connector.passed { background: #8AE0C0; }
-
-/* 步骤文字 */
-.step-content {
-  display: flex;
-  flex-direction: column;
-  padding: 2px 0 8px;
-  min-width: 0;
-}
-
-.step-title {
-  font-size: 12.5px;
-  font-weight: 500;
-  color: #374151;
-  line-height: 1.4;
-  transition: color .2s;
-}
-.step-title.done    { color: #9499A0; text-decoration: line-through; }
-.step-title.running { color: #00AEEC; font-weight: 600; }
-.step-title.failed  { color: #F25D59; }
-
-.step-desc {
-  font-size: 11px;
-  color: #9ca3af;
-  margin-top: 2px;
-  line-height: 1.4;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 </style>

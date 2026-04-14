@@ -8,6 +8,12 @@ PPT 生成工具 — HTML-first 方案
   4. 从沙箱读取 .pptx → 保存为 artifact → 通知前端
   5. HTML 同时作为前端预览
 """
+
+# ── Skill 元数据（SkillRegistry 自动收集） ──
+GUIDANCE = "用户需要制作 PPT/演示文稿时调用。slides 参数为 HTML 数组，每个元素是一张幻灯片的完整 HTML（960×720，含内联 CSS）。"
+ERROR_HINT = "PPT 生成失败请检查 slides JSON 格式和 HTML 语法，确保每张幻灯片是完整的 HTML 文档。"
+TAGS = ["sandbox", "ppt"]
+DISPLAY_MODE = "terminal"
 import base64
 import json
 import logging

@@ -4,6 +4,12 @@
 
 重要：使用同步 httpx.Client 通过 asyncio.to_thread 执行，不阻塞 event loop。
 """
+
+# ── Skill 元数据（SkillRegistry 自动收集） ──
+GUIDANCE = "搜索结果不够详细时，用此工具读取完整网页正文。只支持 HTML 页面，不支持 PDF/图片等二进制文件。"
+ERROR_HINT = "网页读取失败可能是目标站点限制，可尝试其他 URL 或换用 web_search 搜索相关内容。"
+TAGS = ["search", "web"]
+DISPLAY_MODE = "default"
 import asyncio
 import logging
 import re

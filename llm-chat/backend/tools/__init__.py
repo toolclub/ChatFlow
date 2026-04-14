@@ -1,79 +1,66 @@
 """
-工具注册中心 —— 管理所有可用工具（内置 + MCP + 动态注册）
+工具注册中心 —— 基于 SkillRegistry 的统一管理
 
 ═══════════════════════════════════════════════════════════════
-扩展指南
-═══════════════════════════════════════════════════════════════
+所有注册统一在 main.py lifespan 中按顺序执行：
+  1. discover("tools.builtin")     — 注册内置工具
+  2. discover("tools.sandboxed")   — 沙箱就绪后注册沙箱工具
+  3. MCP 加载后走 register_mcp_tools()
 
-方式一：添加内置工具（推荐）
-  1. 在 tools/builtin/ 目录下新建 my_tool.py：
-         from langchain_core.tools import tool
-
-         @tool
-         def my_tool(param: str) -> str:
-             \"\"\"工具描述\"\"\"
-             return result
-
-  2. 在 tools/builtin/__init__.py 的 BUILTIN_TOOLS 列表中追加 my_tool
-
-方式二：添加 MCP 工具（零代码）
-  在 config.py 的 MCP_SERVERS 字典中添加 MCP 服务器配置，
-  启动时自动加载，无需修改任何 Python 文件。
-
-方式三：动态注册（运行时扩展）
-  调用 register_tool(my_tool_instance) 在应用运行时添加工具。
-  通常用于插件系统或基于用户配置动态激活工具。
-
+扩展指南（只需 1 步）：
+  在对应目录下新建 .py 文件，包含 @tool 函数 + GUIDANCE + ERROR_HINT。
+  目录即分类：
+    tools/builtin/    — 不依赖外部服务，启动时注册
+    tools/sandboxed/  — 依赖沙箱 SSH，就绪后注册
 ═══════════════════════════════════════════════════════════════
 """
 import logging
 
 from langchain_core.tools import BaseTool
 
-from tools.builtin import BUILTIN_TOOLS
-from tools.mcp.loader import get_loaded_mcp_tools
+from tools.skill import SkillRegistry
 
 logger = logging.getLogger("tools")
 
-_extra_tools: list[BaseTool] = []
+_registry = SkillRegistry.instance()
 
 
-def register_tool(tool: BaseTool) -> None:
-    """
-    动态注册额外工具。
-    适用场景：运行时根据用户配置或插件系统动态激活工具。
-    """
-    _extra_tools.append(tool)
-    logger.info("已动态注册工具: %s", tool.name)
+# ── 对外接口 ─────────────────────────────────────────────────────────────────
+
+def discover(package_name: str) -> int:
+    """扫描指定包目录，注册其中的 @tool 函数。"""
+    return _registry.discover(package_name)
+
+
+def register_tool(tool: BaseTool, guidance: str = "", error_hint: str = "") -> None:
+    """手动注册单个工具。"""
+    mod = getattr(tool, "__module__", "")
+    if mod and not guidance:
+        import importlib
+        try:
+            m = importlib.import_module(mod)
+            guidance = getattr(m, "GUIDANCE", "")
+            error_hint = error_hint or getattr(m, "ERROR_HINT", "")
+        except Exception:
+            pass
+    _registry.register(tool, guidance=guidance, error_hint=error_hint)
 
 
 def unregister_tool(tool_name: str) -> bool:
-    """按名称移除已动态注册的工具，返回是否成功找到并移除。"""
-    for i, t in enumerate(_extra_tools):
-        if t.name == tool_name:
-            _extra_tools.pop(i)
-            logger.info("已移除工具: %s", tool_name)
-            return True
-    return False
+    return _registry.unregister(tool_name)
 
 
 def get_all_tools() -> list[BaseTool]:
-    """返回所有可用工具：内置工具 + MCP 工具 + 动态注册工具。"""
-    return BUILTIN_TOOLS + get_loaded_mcp_tools() + _extra_tools
+    return _registry.get_all_tools()
 
 
 def get_tool_names() -> list[str]:
-    """返回所有可用工具的名称列表。"""
-    return [t.name for t in get_all_tools()]
+    return _registry.get_tool_names()
 
 
 def get_tools_info() -> list[dict]:
-    """返回所有工具的详情（供 API 接口使用）。"""
-    result = []
-    for t in BUILTIN_TOOLS:
-        result.append({"name": t.name, "description": t.description or "", "source": "builtin"})
-    for t in get_loaded_mcp_tools():
-        result.append({"name": t.name, "description": t.description or "", "source": "mcp"})
-    for t in _extra_tools:
-        result.append({"name": t.name, "description": t.description or "", "source": "dynamic"})
-    return result
+    return _registry.get_tools_info()
+
+
+def get_tools_guidance() -> str:
+    return _registry.build_guidance()

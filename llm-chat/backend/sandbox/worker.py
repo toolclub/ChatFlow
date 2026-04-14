@@ -32,6 +32,10 @@ class ExecuteResult:
     def success(self) -> bool:
         return self.exit_code == 0
 
+    @property
+    def is_timeout(self) -> bool:
+        return self.exit_code == -1 and "超时" in self.stderr
+
     def to_display(self, max_len: int = 4000) -> str:
         prompt = f"root@sandbox:{self.cwd}$" if self.cwd else "$"
         parts: list[str] = []
@@ -59,6 +63,17 @@ class ExecuteResult:
                 parts.append(f"[stderr] {self.stderr[:1000]}")
         if self.duration > 0:
             parts.append(f"\n⏱ {self.duration:.2f}s | exit={self.exit_code}")
+
+        # 超时时追加恢复建议，告诉模型怎么处理
+        if self.is_timeout:
+            parts.append(
+                "\n💡 恢复建议：命令执行超时，进程已被终止。"
+                "如果是编译/构建类长命令（mvn、gradle、npm install 等），请改用后台执行：\n"
+                "  nohup <命令> > /tmp/build.log 2>&1 &\n"
+                "  sleep 3 && tail -50 /tmp/build.log\n"
+                "这样可以避免超时，并通过 tail 查看进度。"
+            )
+
         return "\n".join(parts)
 
 

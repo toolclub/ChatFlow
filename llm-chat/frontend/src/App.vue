@@ -146,6 +146,7 @@ function onDragStart(e: MouseEvent) {
       @new-chat="chat.newConversation()"
       @select="chat.selectConversation($event)"
       @delete="chat.removeConversation($event)"
+      @batch-delete="chat.batchRemoveConversations($event)"
     />
 
     <!-- 全局加载遮罩（刷新恢复数据时）— Bilibili 颜文字风格 -->

@@ -1,6 +1,12 @@
 """
 内置工具：日期时间查询
 """
+
+# ── Skill 元数据（SkillRegistry 自动收集） ──
+GUIDANCE = "获取当前精确日期和时间（支持时区）。系统提示中已有日期，仅在需要精确时间（时/分/秒）时才调用。"
+ERROR_HINT = "时区格式应为 IANA 格式（如 Asia/Shanghai、America/New_York）。"
+TAGS = ["utility"]
+DISPLAY_MODE = "default"
 from datetime import datetime
 
 from langchain_core.tools import tool

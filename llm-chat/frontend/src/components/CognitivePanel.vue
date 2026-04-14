@@ -298,25 +298,34 @@ function copyFileContent() {
     <!-- Header with tabs -->
     <div class="panel-hd">
       <div class="hd-left">
-        <!-- Tab 切换 -->
-        <button class="hd-tab" :class="{ active: activeTab === 'plan' }" @click="activeTab = 'plan'">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none">
-            <path d="M12 3C12 3 13.2 8.8 18 11C13.2 13.2 12 19 12 19C12 19 10.8 13.2 6 11C10.8 8.8 12 3 12 3Z" fill="currentColor"/>
-          </svg>
-          执行计划
-          <span v-if="loading && cognitive.plan.length > 0" class="hd-progress">
-            {{ doneCount }}/{{ cognitive.plan.length }}
-          </span>
-        </button>
-        <div v-if="selectedFile" class="hd-tab" :class="{ active: activeTab === 'file' }" @click="activeTab = 'file'">
-          <span class="hd-tab-file-icon">📄</span>
-          <span class="hd-tab-filename">{{ selectedFile.name }}</span>
-          <span class="hd-tab-close" @click.stop="emit('closeFile'); activeTab = 'plan'" title="关闭">
-            <svg width="8" height="8" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-              <path d="M12 4L4 12M4 4l8 8"/>
-            </svg>
-          </span>
-        </div>
+        <el-tabs v-model="activeTab" class="panel-tabs" @tab-click="() => {}">
+          <el-tab-pane name="plan">
+            <template #label>
+              <span class="tab-label-inner">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none">
+                  <path d="M12 3C12 3 13.2 8.8 18 11C13.2 13.2 12 19 12 19C12 19 10.8 13.2 6 11C10.8 8.8 12 3 12 3Z" fill="currentColor"/>
+                </svg>
+                执行计划
+                <el-tag v-if="loading && cognitive.plan.length > 0" size="small" effect="plain" type="primary" round class="hd-progress-tag">
+                  {{ doneCount }}/{{ cognitive.plan.length }}
+                </el-tag>
+              </span>
+            </template>
+          </el-tab-pane>
+          <el-tab-pane v-if="selectedFile" name="file">
+            <template #label>
+              <span class="tab-label-inner tab-file-label">
+                <span class="hd-tab-file-icon">📄</span>
+                <span class="hd-tab-filename">{{ selectedFile.name }}</span>
+                <span class="hd-tab-close" @click.stop="emit('closeFile'); activeTab = 'plan'" title="关闭">
+                  <svg width="8" height="8" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                    <path d="M12 4L4 12M4 4l8 8"/>
+                  </svg>
+                </span>
+              </span>
+            </template>
+          </el-tab-pane>
+        </el-tabs>
       </div>
       <el-button size="small" text style="padding:4px;color:#9ca3af" @click="$emit('collapse')">
         <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M11 8L6 3v10l5-5z"/></svg>
@@ -340,16 +349,26 @@ function copyFileContent() {
       <p>搜索/分析任务执行时，计划节点将在此展示</p>
     </div>
 
-    <!-- 加载中但尚无计划：友好状态提示（Bilibili 风格） -->
+    <!-- 加载中但尚无计划：骨架屏 + 友好提示 -->
     <div v-else-if="localPlan.length === 0 && loading" class="loading-hint">
-      <div class="hint-icon-wrap">
-        <svg class="hint-icon" width="28" height="28" viewBox="0 0 32 32" fill="none">
-          <path d="M16 4C16 4 17.5 11 23 14C17.5 17 16 24 16 24C16 24 14.5 17 9 14C14.5 11 16 4 16 4Z" fill="#00aeec"/>
-          <path d="M25 7C25 7 25.6 9.8 27.5 10.7C25.6 11.6 25 14.4 25 14.4C25 14.4 24.4 11.6 22.5 10.7C24.4 9.8 25 7 25 7Z" fill="#00aeec" opacity="0.4"/>
-        </svg>
+      <div class="skeleton-plan-area">
+        <el-skeleton :rows="0" animated class="skeleton-header">
+          <template #template>
+            <el-skeleton-item variant="text" style="width: 40%; height: 14px;" />
+          </template>
+        </el-skeleton>
+        <el-skeleton :rows="3" animated class="skeleton-body" />
+        <el-skeleton :rows="2" animated class="skeleton-body" />
       </div>
-      <p class="hint-title">模型正在回答中</p>
-      <p class="hint-desc">当前问题无需多步计划，正在直接生成回答</p>
+      <div class="hint-bottom">
+        <div class="hint-icon-wrap">
+          <svg class="hint-icon" width="22" height="22" viewBox="0 0 32 32" fill="none">
+            <path d="M16 4C16 4 17.5 11 23 14C17.5 17 16 24 16 24C16 24 14.5 17 9 14C14.5 11 16 4 16 4Z" fill="#00aeec"/>
+          </svg>
+        </div>
+        <p class="hint-title">模型正在回答中</p>
+        <p class="hint-desc">当前问题无需多步计划，正在直接生成回答</p>
+      </div>
     </div>
 
     <!-- ── AntV X6 流程图画布 ── -->
@@ -368,29 +387,34 @@ function copyFileContent() {
         <div v-if="isDirty" class="dirty-banner">
           <div class="dirty-left">
             <span class="dirty-dot"></span>
-            <span class="dirty-label">已修改 · {{ localPlan.length }} 步</span>
+            <el-tag type="warning" effect="light" size="small" round>已修改</el-tag>
+            <span class="dirty-label">{{ localPlan.length }} 步</span>
           </div>
-          <div class="dirty-right">
-            <button class="dirty-undo" @click="resetLocalPlan">撤销</button>
-            <button class="dirty-run" @click="onReexecute">
-              <svg width="9" height="9" viewBox="0 0 10 10" fill="currentColor"><path d="M2 1.5l6 3.5-6 3.5V1.5z"/></svg>
+          <el-button-group class="dirty-right" size="small">
+            <el-button @click="resetLocalPlan">撤销</el-button>
+            <el-button type="primary" @click="onReexecute">
+              <svg width="9" height="9" viewBox="0 0 10 10" fill="currentColor" style="margin-right:4px"><path d="M2 1.5l6 3.5-6 3.5V1.5z"/></svg>
               重新执行
-            </button>
-          </div>
+            </el-button>
+          </el-button-group>
         </div>
       </transition>
     </div>
 
     <!-- Reflection bar -->
     <transition name="fadebar">
-      <div v-if="cognitive.reflection" class="ref-bar">
-        <span>💭</span>
-        <span class="ref-text">{{ cognitive.reflection }}</span>
-        <el-tag v-if="cognitive.reflectorDecision" size="small" effect="light" round
-          :type="{ done:'success', continue:'info', retry:'warning' }[cognitive.reflectorDecision] as any">
-          {{ { done:'完成', continue:'继续', retry:'重试' }[cognitive.reflectorDecision as 'done'|'continue'|'retry'] || cognitive.reflectorDecision }}
-        </el-tag>
-      </div>
+      <el-alert v-if="cognitive.reflection" type="info" :closable="false" class="ref-alert">
+        <template #title>
+          <div class="ref-alert-content">
+            <span class="ref-icon">💭</span>
+            <span class="ref-text">{{ cognitive.reflection }}</span>
+            <el-tag v-if="cognitive.reflectorDecision" size="small" effect="light" round
+              :type="({ done:'success', continue:'info', retry:'warning' } as Record<string, any>)[cognitive.reflectorDecision] ?? 'info'">
+              {{ ({ done:'完成', continue:'继续', retry:'重试' } as Record<string, string>)[cognitive.reflectorDecision] || cognitive.reflectorDecision }}
+            </el-tag>
+          </div>
+        </template>
+      </el-alert>
     </transition>
 
     <!-- 底部面板：实时追踪日志 或 历史工具调用 -->
@@ -408,24 +432,45 @@ function copyFileContent() {
         <!-- 实时追踪（流式推理中） -->
         <template v-if="showLiveTrace">
           <div v-if="!cognitive.traceLog.length" class="trace-empty">暂无记录</div>
-          <div v-for="(e, i) in cognitive.traceLog" :key="i" class="trace-row">
-            <span class="trace-ic" :style="{ color: traceColor(e.type) }">{{ traceIcon(e.type) }}</span>
-            <span class="trace-txt">{{ e.content }}</span>
-          </div>
+          <el-timeline class="trace-timeline">
+            <el-timeline-item
+              v-for="(e, i) in cognitive.traceLog"
+              :key="i"
+              :color="traceColor(e.type)"
+              :hollow="e.type !== 'tool_call'"
+              size="small"
+              class="trace-timeline-item"
+            >
+              <span class="trace-txt">
+                <span class="trace-ic">{{ traceIcon(e.type) }}</span>
+                {{ e.content }}
+              </span>
+            </el-timeline-item>
+          </el-timeline>
         </template>
         <!-- 历史工具事件（刷新后从 DB 加载） -->
         <template v-else>
           <div v-if="!cognitive.historyEvents.length" class="trace-empty">暂无历史记录</div>
-          <div v-for="ev in cognitive.historyEvents" :key="ev.id" class="hist-row">
-            <span class="hist-icon">{{ histToolMeta(ev.tool_name).icon }}</span>
-            <div class="hist-body">
-              <span class="hist-name" :style="{ color: histToolMeta(ev.tool_name).color }">
-                {{ histToolMeta(ev.tool_name).label }}
-              </span>
-              <span v-if="histToolDetail(ev)" class="hist-detail">{{ histToolDetail(ev) }}</span>
-            </div>
-            <span class="hist-time">{{ histFormatTime(ev.created_at) }}</span>
-          </div>
+          <el-timeline class="trace-timeline">
+            <el-timeline-item
+              v-for="ev in cognitive.historyEvents"
+              :key="ev.id"
+              :color="histToolMeta(ev.tool_name).color"
+              size="small"
+              class="trace-timeline-item"
+            >
+              <div class="hist-content">
+                <span class="hist-icon">{{ histToolMeta(ev.tool_name).icon }}</span>
+                <div class="hist-body">
+                  <span class="hist-name" :style="{ color: histToolMeta(ev.tool_name).color }">
+                    {{ histToolMeta(ev.tool_name).label }}
+                  </span>
+                  <span v-if="histToolDetail(ev)" class="hist-detail">{{ histToolDetail(ev) }}</span>
+                </div>
+                <span class="hist-time">{{ histFormatTime(ev.created_at) }}</span>
+              </div>
+            </el-timeline-item>
+          </el-timeline>
         </template>
       </div>
     </div>
@@ -435,19 +480,27 @@ function copyFileContent() {
     <!-- ══ Tab: 文件预览 ══ -->
     <div v-show="activeTab === 'file'" class="tab-content file-tab">
       <template v-if="selectedFile">
-      <!-- 文件信息栏（含下载按钮在右侧） -->
-      <div class="file-info-bar">
-        <span class="file-name-badge">{{ selectedFile.name }}</span>
-        <span class="file-lang-tag">{{ isPptFile ? 'PowerPoint' : selectedFile.language }}</span>
-        <span class="file-size">{{ fileSizeKb }} KB</span>
-        <span v-if="selectedFile.slide_count" class="file-size">· {{ selectedFile.slide_count }} 页</span>
-        <div style="flex:1"></div>
-        <!-- 下载按钮（右上角） -->
-        <button class="file-action-btn file-action-sm" title="下载文件" @click="downloadFile">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-          </svg>
-        </button>
+      <!-- 文件信息栏 -->
+      <div class="file-info-section">
+        <el-descriptions :column="4" size="small" border class="file-descriptions">
+          <el-descriptions-item label="文件名" :span="2">
+            <span class="file-name-badge">{{ selectedFile.name }}</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="语言">
+            <el-tag size="small" type="primary" effect="plain">{{ isPptFile ? 'PowerPoint' : selectedFile.language }}</el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="大小">
+            {{ fileSizeKb }} KB
+            <span v-if="selectedFile.slide_count"> · {{ selectedFile.slide_count }} 页</span>
+          </el-descriptions-item>
+        </el-descriptions>
+        <div class="file-info-actions">
+          <el-button size="small" text title="下载文件" @click="downloadFile">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+          </el-button>
+        </div>
       </div>
 
       <!-- 操作按钮栏（PPT 时只显示预览，非 PPT 显示代码/预览/复制） -->
@@ -535,23 +588,32 @@ function copyFileContent() {
         </button>
       </div>
 
-      <!-- 有幻灯片数据：幻灯片浏览器 -->
+      <!-- 有幻灯片数据：走马灯浏览器 -->
       <div v-if="!fileLoading && isPptFile && pptSlideCount > 0" class="ppt-viewer">
-        <div class="ppt-slide-container">
-          <iframe
-            :srcdoc="pptCurrentSlideHtml"
-            class="ppt-slide-frame"
-            sandbox="allow-scripts"
-          />
-        </div>
-        <div class="ppt-nav">
-          <button class="ppt-nav-btn" :disabled="pptSlideIndex === 0" @click="pptPrev">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
-          </button>
-          <span class="ppt-nav-info">{{ pptSlideIndex + 1 }} / {{ pptSlideCount }}</span>
-          <button class="ppt-nav-btn" :disabled="pptSlideIndex >= pptSlideCount - 1" @click="pptNext">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>
-          </button>
+        <el-carousel
+          :initial-index="pptSlideIndex"
+          :autoplay="false"
+          trigger="click"
+          arrow="always"
+          indicator-position="outside"
+          height="100%"
+          class="ppt-carousel"
+          @change="(idx: number) => { pptSlideIndex = idx }"
+        >
+          <el-carousel-item v-for="(slide, i) in pptSlides" :key="i" class="ppt-carousel-item">
+            <div class="ppt-slide-container">
+              <iframe
+                :srcdoc="slide"
+                class="ppt-slide-frame"
+                sandbox="allow-scripts"
+              />
+            </div>
+          </el-carousel-item>
+        </el-carousel>
+        <div class="ppt-nav-info-bar">
+          <el-tag size="small" effect="plain" type="info" round>
+            {{ pptSlideIndex + 1 }} / {{ pptSlideCount }}
+          </el-tag>
         </div>
       </div>
       </template>
@@ -600,7 +662,6 @@ function copyFileContent() {
   50%       { box-shadow: 0 0 0 4px rgba(0,174,236,0); }
 }
 
-
 .cognitive-panel {
   width: 100%;
   height: 100%;
@@ -618,21 +679,89 @@ function copyFileContent() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 9px 12px;
+  padding: 0 12px 0 0;
   background: rgba(250,250,252,0.92);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   border-bottom: 1px solid #e8eaf2;
   flex-shrink: 0;
 }
-.hd-left { display: flex; align-items: center; gap: 2px; min-width: 0; flex: 1; overflow: hidden; }
-.hd-title { font-size: 12.5px; font-weight: 600; color: #111827; }
-.hd-progress {
-  font-size: 10.5px; font-weight: 600; color: #00AEEC;
-  background: rgba(0,174,236,0.08); padding: 1px 7px; border-radius: 10px;
+.hd-left { display: flex; align-items: center; gap: 0; min-width: 0; flex: 1; overflow: hidden; }
+
+/* el-tabs Bilibili style overrides */
+.panel-tabs {
+  --el-tabs-header-height: 38px;
+}
+:deep(.panel-tabs .el-tabs__header) {
+  margin: 0;
+  border: none;
+}
+:deep(.panel-tabs .el-tabs__nav-wrap::after) {
+  display: none;
+}
+:deep(.panel-tabs .el-tabs__active-bar) {
+  background: #00AEEC;
+  height: 2.5px;
+  border-radius: 2px;
+  transition: transform 0.3s cubic-bezier(0.34,1.56,0.64,1);
+}
+:deep(.panel-tabs .el-tabs__item) {
+  font-size: 12px;
+  font-weight: 500;
+  color: #9499A0;
+  padding: 0 12px;
+  height: 38px;
+  line-height: 38px;
+  transition: color 0.25s cubic-bezier(0.34,1.56,0.64,1);
+}
+:deep(.panel-tabs .el-tabs__item.is-active) {
+  color: #00AEEC;
+  font-weight: 600;
+}
+:deep(.panel-tabs .el-tabs__item:hover) {
+  color: #00AEEC;
 }
 
-/* Goal — Bilibili 风格 */
+.tab-label-inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.tab-file-label {
+  max-width: 150px;
+}
+.hd-progress-tag {
+  font-size: 10px !important;
+  height: 18px !important;
+  line-height: 16px !important;
+  padding: 0 6px !important;
+}
+
+.hd-tab-file-icon { font-size: 11px; }
+.hd-tab-filename {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100px;
+}
+.hd-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: #9499A0;
+  cursor: pointer;
+  padding: 0;
+  margin-left: 2px;
+  transition: all 0.2s cubic-bezier(0.34,1.56,0.64,1);
+  flex-shrink: 0;
+}
+.hd-tab-close:hover { background: rgba(242,93,89,0.1); color: #F25D59; }
+
+/* Goal -- Bilibili style */
 .goal-bar {
   display: flex; align-items: flex-start; gap: 6px;
   padding: 5px 12px;
@@ -655,14 +784,34 @@ function copyFileContent() {
 }
 .empty-state p { font-size: 11px; color: #9ca3af; line-height: 1.6; max-width: 180px; }
 
-/* 加载友好提示（Bilibili 风格） */
+/* Loading skeleton + hint */
 .loading-hint {
   flex: 1; display: flex; flex-direction: column;
-  align-items: center; justify-content: center;
-  gap: 8px; padding: 24px 16px; text-align: center;
+  gap: 0; padding: 0;
+}
+.skeleton-plan-area {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+}
+.skeleton-header {
+  margin-bottom: 4px;
+}
+.skeleton-body {
+  /* let el-skeleton handle it */
+}
+.hint-bottom {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 16px 16px;
+  text-align: center;
 }
 .hint-icon-wrap {
-  width: 48px; height: 48px; border-radius: 14px;
+  width: 40px; height: 40px; border-radius: 12px;
   background: rgba(0, 174, 236, 0.06);
   display: flex; align-items: center; justify-content: center;
 }
@@ -675,14 +824,14 @@ function copyFileContent() {
 }
 .hint-title {
   font-size: 13px; font-weight: 600; color: #18191c;
-  margin: 4px 0 0;
+  margin: 0;
 }
 .hint-desc {
   font-size: 11.5px; color: #9499a0; line-height: 1.5;
-  max-width: 200px;
+  max-width: 200px; margin: 0;
 }
 
-/* ── AntV X6 画布容器 ── */
+/* AntV X6 canvas container */
 .flow-canvas-section {
   flex: 1;
   display: flex;
@@ -692,12 +841,13 @@ function copyFileContent() {
   position: relative;
 }
 
-/* ── Dirty banner — Bilibili 风格 ── */
+/* Dirty banner -- Bilibili style */
 .dirty-banner {
   display: flex; align-items: center; justify-content: space-between;
   padding: 7px 10px;
   background: rgba(0,174,236,0.04); border: 1px solid rgba(0,174,236,0.15);
   border-radius: 10px; margin: 4px 8px 8px; gap: 8px;
+  transition: all 0.3s cubic-bezier(0.34,1.56,0.64,1);
 }
 .dirty-left { display: flex; align-items: center; gap: 6px; }
 .dirty-dot {
@@ -706,29 +856,33 @@ function copyFileContent() {
 }
 @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
 .dirty-label { font-size: 11.5px; color: #0095CC; font-weight: 500; }
-.dirty-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-.dirty-undo {
-  font-size: 11.5px; color: #6b7280; background: none; border: none;
-  cursor: pointer; padding: 3px 6px; border-radius: 5px; font-family: inherit;
-  transition: background 0.12s;
+.dirty-right {
+  flex-shrink: 0;
 }
-.dirty-undo:hover { background: rgba(0,0,0,0.05); color: #374151; }
-.dirty-run {
-  display: flex; align-items: center; gap: 5px;
-  font-size: 11.5px; font-weight: 600; color: #fff;
-  background: linear-gradient(135deg, #00AEEC, #23C1F0); border: none; cursor: pointer;
-  padding: 4px 12px; border-radius: 20px; font-family: inherit;
-  transition: all 0.15s; box-shadow: 0 2px 6px rgba(0,174,236,0.2);
-}
-.dirty-run:hover { box-shadow: 0 4px 12px rgba(0,174,236,0.3); transform: translateY(-1px); }
-.dirty-run:active { transform: translateY(0); }
 
-/* Reflection bar */
-.ref-bar {
-  display: flex; align-items: center; gap: 6px;
-  padding: 6px 12px; background: rgba(245,158,11,0.05);
-  border-top: 1px solid rgba(245,158,11,0.1); flex-shrink: 0;
+/* Reflection alert */
+.ref-alert {
+  flex-shrink: 0;
+  margin: 0;
+  border-radius: 0 !important;
+  background: rgba(245,158,11,0.05) !important;
+  border: none !important;
+  border-top: 1px solid rgba(245,158,11,0.1) !important;
+  padding: 6px 12px !important;
+  transition: all 0.3s cubic-bezier(0.34,1.56,0.64,1);
 }
+:deep(.ref-alert .el-alert__content) {
+  padding: 0;
+}
+:deep(.ref-alert .el-alert__icon) {
+  display: none;
+}
+.ref-alert-content {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ref-icon { font-size: 14px; flex-shrink: 0; }
 .ref-text { flex: 1; font-size: 10.5px; color: #92400e; line-height: 1.4; min-width: 0; }
 
 /* Trace */
@@ -740,7 +894,7 @@ function copyFileContent() {
   max-height: 500px;
   overflow: hidden;
 }
-/* 拖拽调整手柄 */
+/* Resize handle */
 .trace-resize-handle {
   height: 10px;
   cursor: ns-resize;
@@ -749,7 +903,7 @@ function copyFileContent() {
   justify-content: center;
   flex-shrink: 0;
   background: transparent;
-  transition: background 0.15s;
+  transition: background 0.2s cubic-bezier(0.34,1.56,0.64,1);
 }
 .trace-resize-handle:hover { background: rgba(0,174,236,0.04); }
 .trace-resize-bar {
@@ -757,7 +911,7 @@ function copyFileContent() {
   height: 3px;
   background: #E3E5E7;
   border-radius: 99px;
-  transition: background 0.2s, width 0.2s;
+  transition: background 0.25s, width 0.25s cubic-bezier(0.34,1.56,0.64,1);
 }
 .trace-resize-handle:hover .trace-resize-bar {
   background: #00AEEC;
@@ -766,24 +920,38 @@ function copyFileContent() {
 .trace-hd { font-size: 10px; font-weight: 600; color: #9ca3af; padding: 2px 12px 3px; text-transform: uppercase; letter-spacing: 0.06em; }
 .trace-body { flex: 1; overflow-y: auto; padding: 0 8px 6px; }
 .trace-empty { font-size: 11px; color: #d1d5db; text-align: center; padding: 12px 0; }
-.trace-row { display: flex; align-items: flex-start; gap: 4px; padding: 1.5px 3px; border-radius: 3px; }
-.trace-row:hover { background: rgba(0,0,0,0.03); }
-.trace-ic { font-size: 10px; flex-shrink: 0; line-height: 1.7; }
+
+/* Timeline trace */
+.trace-timeline {
+  padding: 4px 0 0 4px;
+}
+:deep(.trace-timeline .el-timeline-item) {
+  padding-bottom: 4px;
+}
+:deep(.trace-timeline .el-timeline-item__wrapper) {
+  padding-left: 18px;
+  top: -2px;
+}
+:deep(.trace-timeline .el-timeline-item__node) {
+  width: 8px;
+  height: 8px;
+  left: -1px;
+}
+:deep(.trace-timeline .el-timeline-item__tail) {
+  left: 2px;
+  border-left-width: 1.5px;
+  border-color: #e5e7eb;
+}
+
+.trace-ic { font-size: 10px; margin-right: 4px; }
 .trace-txt { font-size: 10.5px; color: #4b5563; line-height: 1.65; word-break: break-all; }
 
-/* Dialog footer */
-.dialog-ft { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-
-/* Tool history rows */
-.hist-row {
+/* History timeline items */
+.hist-content {
   display: flex;
   align-items: flex-start;
   gap: 6px;
-  padding: 3px 4px;
-  border-radius: 5px;
-  transition: background 0.1s;
 }
-.hist-row:hover { background: rgba(0,174,236,0.04); }
 .hist-icon { font-size: 12px; flex-shrink: 0; line-height: 1.7; }
 .hist-body {
   flex: 1;
@@ -812,63 +980,20 @@ function copyFileContent() {
   line-height: 1.8;
 }
 
+/* Dialog footer */
+.dialog-ft { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+
 /* Animations */
-.banner-enter-active, .banner-leave-active { transition: all 0.22s ease; }
+.banner-enter-active, .banner-leave-active {
+  transition: all 0.3s cubic-bezier(0.34,1.56,0.64,1);
+}
 .banner-enter-from, .banner-leave-to { opacity: 0; transform: translateY(-6px); }
-.fadebar-enter-active, .fadebar-leave-active { transition: opacity 0.22s; }
+.fadebar-enter-active, .fadebar-leave-active {
+  transition: opacity 0.3s cubic-bezier(0.34,1.56,0.64,1);
+}
 .fadebar-enter-from, .fadebar-leave-to { opacity: 0; }
 
-/* ── Tab 切换按钮 ── */
-.hd-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 10px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: #9499A0;
-  font-size: 12px;
-  font-weight: 500;
-  font-family: inherit;
-  cursor: pointer;
-  transition: all 0.15s;
-  white-space: nowrap;
-  max-width: 150px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.hd-tab:hover { background: rgba(0,174,236,0.05); color: #61666D; }
-.hd-tab.active {
-  background: rgba(0,174,236,0.08);
-  color: #00AEEC;
-  font-weight: 600;
-}
-.hd-tab-file-icon { font-size: 11px; }
-.hd-tab-filename {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 100px;
-}
-.hd-tab-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px; height: 14px;
-  border-radius: 50%;
-  border: none;
-  background: transparent;
-  color: #9499A0;
-  cursor: pointer;
-  padding: 0;
-  margin-left: 2px;
-  transition: all 0.12s;
-  flex-shrink: 0;
-}
-.hd-tab-close:hover { background: rgba(242,93,89,0.1); color: #F25D59; }
-
-/* ── Tab content container ── */
+/* Tab content container */
 .tab-content {
   display: flex;
   flex-direction: column;
@@ -887,8 +1012,8 @@ function copyFileContent() {
   font-size: 12px;
 }
 
-/* ── 文件信息栏 ── */
-.file-info-bar {
+/* File info with el-descriptions */
+.file-info-section {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -896,6 +1021,27 @@ function copyFileContent() {
   background: rgba(0,174,236,0.03);
   border-bottom: 1px solid rgba(0,174,236,0.07);
   flex-shrink: 0;
+}
+.file-descriptions {
+  flex: 1;
+}
+:deep(.file-descriptions .el-descriptions__body) {
+  background: transparent;
+}
+:deep(.file-descriptions .el-descriptions__label) {
+  font-size: 10px;
+  color: #9499A0;
+  padding: 2px 6px;
+  width: auto;
+  min-width: auto;
+  background: rgba(0,174,236,0.04);
+}
+:deep(.file-descriptions .el-descriptions__content) {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+:deep(.file-descriptions .el-descriptions__cell) {
+  border-color: rgba(0,174,236,0.08) !important;
 }
 .file-name-badge {
   font-size: 12px;
@@ -905,24 +1051,11 @@ function copyFileContent() {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.file-lang-tag {
-  font-size: 10px;
-  font-weight: 600;
-  color: #00AEEC;
-  background: rgba(0,174,236,0.08);
-  padding: 1px 6px;
-  border-radius: 8px;
-  flex-shrink: 0;
-  text-transform: uppercase;
-}
-.file-size {
-  font-size: 10.5px;
-  color: #9499A0;
-  margin-left: auto;
+.file-info-actions {
   flex-shrink: 0;
 }
 
-/* ── 操作按钮栏 ── */
+/* Action buttons bar */
 .file-actions-bar {
   display: flex;
   align-items: center;
@@ -944,7 +1077,7 @@ function copyFileContent() {
   font-weight: 500;
   font-family: inherit;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all 0.25s cubic-bezier(0.34,1.56,0.64,1);
 }
 .file-action-btn:hover {
   border-color: #00AEEC;
@@ -962,7 +1095,7 @@ function copyFileContent() {
 }
 .file-actions-spacer { flex: 1; }
 
-/* ── 代码视图 ── */
+/* Code view */
 .file-code-view {
   flex: 1;
   overflow: auto;
@@ -985,7 +1118,7 @@ function copyFileContent() {
   border: none;
 }
 
-/* ── 预览视图 ── */
+/* Preview view */
 .file-preview-view {
   flex: 1;
   overflow: hidden;
@@ -998,7 +1131,7 @@ function copyFileContent() {
   display: block;
 }
 
-/* ══ PPT 无预览数据时的下载视图 ══ */
+/* File loading view */
 .file-loading-view {
   flex: 1; display: flex; flex-direction: column;
   align-items: center; justify-content: center;
@@ -1043,6 +1176,8 @@ function copyFileContent() {
   66% { content: '..'; }
   100% { content: '...'; }
 }
+
+/* PPT empty download view */
 .ppt-empty-view {
   flex: 1; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 10px;
@@ -1055,11 +1190,12 @@ function copyFileContent() {
   display: inline-flex; align-items: center; gap: 6px;
   margin-top: 10px; padding: 10px 24px; border-radius: 10px;
   background: #FF9800; color: #fff; border: none; cursor: pointer;
-  font-size: 14px; font-weight: 600; transition: all 0.15s;
+  font-size: 14px; font-weight: 600;
+  transition: all 0.25s cubic-bezier(0.34,1.56,0.64,1);
 }
 .ppt-empty-download:hover { background: #F57C00; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(255,152,0,0.3); }
 
-/* ══ PPT 幻灯片浏览器 ══ */
+/* PPT carousel viewer */
 .ppt-viewer {
   flex: 1;
   display: flex;
@@ -1067,8 +1203,51 @@ function copyFileContent() {
   overflow: hidden;
   background: #F1F2F3;
 }
-.ppt-slide-container {
+.ppt-carousel {
   flex: 1;
+}
+:deep(.ppt-carousel .el-carousel__container) {
+  height: 100% !important;
+}
+:deep(.ppt-carousel .el-carousel__arrow) {
+  background: rgba(255,255,255,0.9);
+  color: #18191C;
+  border: 1.5px solid #E3E5E7;
+  width: 36px;
+  height: 36px;
+  font-size: 14px;
+  transition: all 0.25s cubic-bezier(0.34,1.56,0.64,1);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+:deep(.ppt-carousel .el-carousel__arrow:hover) {
+  border-color: #00AEEC;
+  color: #00AEEC;
+  box-shadow: 0 2px 12px rgba(0,174,236,0.2);
+}
+:deep(.ppt-carousel .el-carousel__indicators) {
+  bottom: 8px;
+}
+:deep(.ppt-carousel .el-carousel__button) {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #d1d5db;
+  opacity: 1;
+  transition: all 0.25s cubic-bezier(0.34,1.56,0.64,1);
+}
+:deep(.ppt-carousel .el-carousel__indicator.is-active .el-carousel__button) {
+  background: #00AEEC;
+  width: 20px;
+  border-radius: 4px;
+}
+.ppt-carousel-item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ppt-slide-container {
+  width: 100%;
+  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1083,40 +1262,10 @@ function copyFileContent() {
   box-shadow: 0 4px 20px rgba(0,0,0,0.12);
   background: #fff;
 }
-.ppt-nav {
+.ppt-nav-info-bar {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 16px;
-  padding: 10px 0 14px;
-  background: #F1F2F3;
-}
-.ppt-nav-btn {
-  width: 36px; height: 36px;
-  border-radius: 50%;
-  border: 1.5px solid #E3E5E7;
-  background: #fff;
-  color: #18191C;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.15s;
-}
-.ppt-nav-btn:hover:not(:disabled) {
-  border-color: #00AEEC;
-  color: #00AEEC;
-  box-shadow: 0 2px 8px rgba(0,174,236,0.15);
-}
-.ppt-nav-btn:disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
-}
-.ppt-nav-info {
-  font-size: 13px;
-  font-weight: 600;
-  color: #61666D;
-  min-width: 60px;
-  text-align: center;
+  padding: 6px 0 10px;
 }
 </style>

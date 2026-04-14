@@ -2,6 +2,12 @@
 内置工具：安全数学计算器
 使用 AST 解析替代 eval()，只允许基础算术运算。
 """
+
+# ── Skill 元数据（SkillRegistry 自动收集） ──
+GUIDANCE = "需要精确数学计算时使用（加减乘除、幂、取余）。不支持函数调用（sin/cos/log 等），复杂数学请用 execute_code。"
+ERROR_HINT = "表达式格式错误，请简化为基础算术运算（+、-、*、/、**、%）。"
+TAGS = ["utility"]
+DISPLAY_MODE = "default"  # 非终端工具，用默认渲染
 import ast
 import operator
 

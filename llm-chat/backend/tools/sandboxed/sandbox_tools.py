@@ -10,6 +10,28 @@
   - 服务类命令：自动 nohup 后台化 + 端口验证 + 日志查看
   - 普通命令：正常流式执行 + 输出重定向 + 退出码检查
 """
+
+# ── Skill 元数据（SkillRegistry 自动收集） ──
+GUIDANCE = (
+    "沙箱代码执行工具集（execute_code/run_shell/sandbox_write/sandbox_read/sandbox_download）。\n"
+    "写了非平凡代码必须验证：sandbox_write 写文件 → execute_code/run_shell 执行验证。\n"
+    "缺 Python 库先 run_shell pip install。HTML/SVG/CSS 文件写入后前端自动预览，无需启动服务器。\n"
+    "禁止前台启动长驻服务（uvicorn/flask/node 等），必须 nohup 后台化。沙箱有 120s 超时。"
+)
+ERROR_HINT = (
+    "代码执行失败请检查语法和依赖，可 run_shell 查看错误日志后修复重试。"
+    "超时时改用后台执行：nohup <命令> > /tmp/out.log 2>&1 & 然后 tail -50 /tmp/out.log 查看进度。"
+)
+TAGS = ["sandbox", "code"]
+# 渲染模式：terminal=命令终端 file_write=文件写入 file_read=文件读取
+# 单模块多工具时用 DISPLAY_MODES dict，key 是工具函数名
+DISPLAY_MODES = {
+    "execute_code": "terminal",
+    "run_shell": "terminal",
+    "sandbox_write": "file_write",
+    "sandbox_read": "file_read",
+    "sandbox_download": "terminal",
+}
 import json
 import logging
 import re

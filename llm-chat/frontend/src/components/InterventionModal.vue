@@ -61,8 +61,17 @@ function close() {
 
 <template>
   <teleport to="body">
-    <div class="intervention-overlay" @click.self="close">
-      <div class="intervention-modal">
+    <el-dialog
+      :model-value="true"
+      :close-on-click-modal="false"
+      :show-close="false"
+      width="580px"
+      align-center
+      destroy-on-close
+      class="intervention-dialog"
+      @close="close"
+    >
+      <template #header>
         <!-- 标题栏 -->
         <div class="modal-header">
           <div class="modal-title-group">
@@ -74,84 +83,124 @@ function close() {
           </div>
           <el-button :icon="Close" circle text size="small" @click="close" />
         </div>
+      </template>
 
-        <!-- 目标展示 -->
-        <div class="modal-goal">
-          <span class="goal-chip">目标</span>
-          <span class="goal-text">{{ userMessage.slice(0, 120) }}{{ userMessage.length > 120 ? '…' : '' }}</span>
-        </div>
+      <!-- 目标展示 -->
+      <el-alert
+        type="info"
+        :closable="false"
+        class="goal-alert"
+      >
+        <template #title>
+          <div class="goal-alert-content">
+            <el-tag size="small" type="primary" effect="plain" round class="goal-chip">目标</el-tag>
+            <span class="goal-text">{{ userMessage.slice(0, 120) }}{{ userMessage.length > 120 ? '...' : '' }}</span>
+          </div>
+        </template>
+      </el-alert>
 
-        <!-- 计划编辑列表 -->
+      <!-- 计划编辑列表 -->
+      <el-scrollbar class="steps-scrollbar" max-height="50vh">
         <div class="steps-list">
           <transition-group name="step-list">
-            <div
+            <el-card
               v-for="(step, i) in editablePlan"
               :key="step.id"
-              class="step-item"
+              shadow="hover"
+              class="step-card"
+              :body-style="{ padding: '12px' }"
             >
-              <!-- 步骤序号 -->
-              <div class="step-index">{{ i + 1 }}</div>
+              <div class="step-card-inner">
+                <!-- 步骤序号 -->
+                <div class="step-index">{{ i + 1 }}</div>
 
-              <!-- 步骤内容 -->
-              <div class="step-content">
-                <el-input
-                  v-model="step.title"
-                  placeholder="步骤标题（简短）"
-                  size="small"
-                  class="step-title-input"
-                />
-                <el-input
-                  v-model="step.description"
-                  placeholder="步骤描述（可选）"
-                  size="small"
-                  type="textarea"
-                  :rows="2"
-                  resize="none"
-                  class="step-desc-input"
-                />
-              </div>
+                <!-- 步骤内容 -->
+                <div class="step-content">
+                  <el-form label-position="top" :inline="false" size="small" class="step-form">
+                    <el-form-item class="step-form-item">
+                      <el-input
+                        v-model="step.title"
+                        placeholder="步骤标题（简短）"
+                        class="step-title-input"
+                      />
+                    </el-form-item>
+                    <el-form-item class="step-form-item">
+                      <el-input
+                        v-model="step.description"
+                        placeholder="步骤描述（可选）"
+                        type="textarea"
+                        :rows="2"
+                        resize="none"
+                        class="step-desc-input"
+                      />
+                    </el-form-item>
+                  </el-form>
+                </div>
 
-              <!-- 操作按钮 -->
-              <div class="step-actions">
-                <el-button
-                  :icon="Top" circle text size="small"
-                  :disabled="i === 0"
-                  title="上移"
-                  @click="moveUp(i)"
-                />
-                <el-button
-                  :icon="Bottom" circle text size="small"
-                  :disabled="i === editablePlan.length - 1"
-                  title="下移"
-                  @click="moveDown(i)"
-                />
-                <el-button
-                  :icon="Delete" circle text size="small" type="danger"
-                  :disabled="editablePlan.length <= 1"
-                  title="删除"
-                  @click="removeStep(i)"
-                />
+                <!-- 操作按钮 -->
+                <el-button-group class="step-actions" size="small">
+                  <el-tooltip content="上移" placement="top" :show-after="300">
+                    <el-button
+                      :icon="Top" text
+                      :disabled="i === 0"
+                      @click="moveUp(i)"
+                    />
+                  </el-tooltip>
+                  <el-tooltip content="下移" placement="top" :show-after="300">
+                    <el-button
+                      :icon="Bottom" text
+                      :disabled="i === editablePlan.length - 1"
+                      @click="moveDown(i)"
+                    />
+                  </el-tooltip>
+                  <el-popconfirm
+                    title="确定删除此步骤？"
+                    confirm-button-text="删除"
+                    cancel-button-text="取消"
+                    confirm-button-type="danger"
+                    :disabled="editablePlan.length <= 1"
+                    @confirm="removeStep(i)"
+                  >
+                    <template #reference>
+                      <el-button
+                        :icon="Delete" text type="danger"
+                        :disabled="editablePlan.length <= 1"
+                      />
+                    </template>
+                  </el-popconfirm>
+                </el-button-group>
               </div>
 
               <!-- 在此之后插入按钮 -->
               <div class="insert-btn-wrap">
-                <button class="insert-btn" @click="addStep(i)" title="在此后插入步骤">
-                  <el-icon><Plus /></el-icon>
-                </button>
+                <el-tooltip content="在此后插入步骤" placement="bottom" :show-after="300">
+                  <el-button
+                    class="insert-btn"
+                    :icon="Plus"
+                    circle
+                    size="small"
+                    @click="addStep(i)"
+                  />
+                </el-tooltip>
               </div>
-            </div>
+            </el-card>
           </transition-group>
 
           <!-- 添加最后一步 -->
-          <button class="add-step-btn" @click="addStep(editablePlan.length - 1)">
-            <el-icon><Plus /></el-icon>
+          <el-button
+            class="add-step-btn"
+            :icon="Plus"
+            @click="addStep(editablePlan.length - 1)"
+          >
             添加步骤
-          </button>
+          </el-button>
         </div>
+      </el-scrollbar>
 
+      <template #footer>
         <!-- 底部操作 -->
         <div class="modal-footer">
-          <el-tag type="info" effect="light" size="small">
+          <el-tag type="info" effect="light" size="small" round>
             共 {{ editablePlan.filter(s => s.title.trim()).length }} 个步骤
           </el-tag>
           <div class="footer-actions">
@@ -161,34 +210,26 @@ function close() {
             </el-button>
           </div>
         </div>
-      </div>
-    </div>
+      </template>
+    </el-dialog>
   </teleport>
 </template>
 
 <style scoped>
-.intervention-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(4px);
-  z-index: 2000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-}
-
-.intervention-modal {
-  background: #fff;
-  border-radius: 20px;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.15);
-  width: 100%;
-  max-width: 560px;
-  max-height: 80vh;
-  display: flex;
-  flex-direction: column;
+/* Dialog customization */
+:deep(.intervention-dialog) {
+  border-radius: 20px !important;
   overflow: hidden;
+}
+:deep(.intervention-dialog .el-dialog__header) {
+  padding: 0;
+  margin: 0;
+}
+:deep(.intervention-dialog .el-dialog__body) {
+  padding: 0 20px;
+}
+:deep(.intervention-dialog .el-dialog__footer) {
+  padding: 0;
 }
 
 /* 标题栏 */
@@ -217,22 +258,25 @@ function close() {
   margin-top: 2px;
 }
 
-/* 目标 — Bilibili 风格 */
-.modal-goal {
+/* 目标 Alert */
+.goal-alert {
+  margin: 16px 0 12px;
+  border-radius: 12px !important;
+  background: rgba(0, 174, 236, 0.04) !important;
+  border: 1px solid rgba(0, 174, 236, 0.12) !important;
+}
+:deep(.goal-alert .el-alert__icon) {
+  display: none;
+}
+:deep(.goal-alert .el-alert__content) {
+  padding: 0;
+}
+.goal-alert-content {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  padding: 10px 20px;
-  background: rgba(0, 174, 236, 0.03);
-  border-bottom: 1px solid rgba(0, 174, 236, 0.08);
 }
 .goal-chip {
-  font-size: 11px;
-  font-weight: 600;
-  color: #00AEEC;
-  background: rgba(0, 174, 236, 0.08);
-  padding: 1px 7px;
-  border-radius: 20px;
   flex-shrink: 0;
   margin-top: 1px;
 }
@@ -240,53 +284,74 @@ function close() {
   font-size: 12.5px;
   color: #374151;
   line-height: 1.5;
+  font-weight: 400;
 }
 
-/* 步骤列表 */
+/* 步骤列表滚动区 */
+.steps-scrollbar {
+  margin: 0 -20px;
+  padding: 0 20px;
+}
+
 .steps-list {
-  flex: 1;
-  overflow-y: auto;
-  padding: 12px 16px;
   display: flex;
   flex-direction: column;
-  gap: 0;
+  gap: 4px;
+  padding: 4px 0 12px;
 }
 
-.step-item {
+/* 步骤卡片 */
+.step-card {
+  border-radius: 12px !important;
+  border: 1.5px solid #e5e7eb !important;
+  position: relative;
+  transition: border-color 0.25s cubic-bezier(0.34,1.56,0.64,1),
+              box-shadow 0.25s cubic-bezier(0.34,1.56,0.64,1);
+}
+.step-card:hover {
+  border-color: #00AEEC !important;
+}
+
+.step-card-inner {
   display: grid;
   grid-template-columns: 28px 1fr auto;
-  grid-template-rows: auto auto;
   gap: 6px 10px;
-  padding: 10px 10px;
-  border: 1.5px solid #e5e7eb;
-  border-radius: 10px;
-  margin-bottom: 4px;
-  background: #fafafa;
-  position: relative;
-  transition: border-color 0.2s;
 }
-.step-item:hover { border-color: #00AEEC; }
 
 .step-index {
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  background: #f3f4f6;
-  border: 1.5px solid #d1d5db;
+  background: linear-gradient(135deg, #E3F6FD 0%, #f3f4f6 100%);
+  border: 1.5px solid #B8E6F9;
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 12px;
   font-weight: 700;
-  color: #374151;
+  color: #00AEEC;
   flex-shrink: 0;
   margin-top: 2px;
+  transition: all 0.25s cubic-bezier(0.34,1.56,0.64,1);
 }
 
 .step-content {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 0;
+}
+
+.step-form {
+  margin: 0;
+}
+.step-form-item {
+  margin-bottom: 4px !important;
+}
+:deep(.step-form-item:last-child) {
+  margin-bottom: 0 !important;
+}
+:deep(.step-form-item .el-form-item__content) {
+  line-height: normal;
 }
 :deep(.step-title-input .el-input__wrapper) {
   font-weight: 600;
@@ -300,62 +365,54 @@ function close() {
 .step-actions {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 0;
   align-items: center;
 }
 
 /* 插入按钮（步骤之间） */
 .insert-btn-wrap {
-  grid-column: 1 / -1;
   display: flex;
   justify-content: center;
   height: 0;
   overflow: visible;
   position: relative;
   z-index: 1;
+  margin-top: 4px;
 }
 .insert-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  border: 1.5px dashed #B8E6F9;
-  background: #fff;
-  color: #00AEEC;
-  cursor: pointer;
+  width: 22px !important;
+  height: 22px !important;
+  border: 1.5px dashed #B8E6F9 !important;
+  background: #fff !important;
+  color: #00AEEC !important;
   font-size: 12px;
-  transition: all 0.2s;
   transform: translateY(5px);
   opacity: 0;
+  transition: all 0.25s cubic-bezier(0.34,1.56,0.64,1) !important;
 }
-.step-item:hover .insert-btn { opacity: 1; }
+.step-card:hover .insert-btn { opacity: 1; }
 .insert-btn:hover {
-  background: #E3F6FD;
-  border-color: #00AEEC;
+  background: #E3F6FD !important;
+  border-color: #00AEEC !important;
+  transform: translateY(5px) scale(1.1);
 }
 
 /* 添加步骤按钮 */
 .add-step-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 8px;
-  border: 1.5px dashed #d1d5db;
-  border-radius: 10px;
-  background: transparent;
-  color: #9ca3af;
+  width: 100%;
+  border: 1.5px dashed #d1d5db !important;
+  border-radius: 12px !important;
+  color: #9ca3af !important;
   font-size: 13px;
-  cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.25s cubic-bezier(0.34,1.56,0.64,1) !important;
   margin-top: 4px;
+  height: 40px;
+  background: transparent !important;
 }
 .add-step-btn:hover {
-  border-color: #00AEEC;
-  color: #00AEEC;
-  background: #E3F6FD;
+  border-color: #00AEEC !important;
+  color: #00AEEC !important;
+  background: rgba(0, 174, 236, 0.04) !important;
 }
 
 /* 底部操作 */
@@ -373,8 +430,21 @@ function close() {
 }
 
 /* 列表动画 */
-.step-list-enter-active,
-.step-list-leave-active { transition: all 0.2s ease; }
-.step-list-enter-from,
-.step-list-leave-to { opacity: 0; transform: translateY(-8px); }
+.step-list-enter-active {
+  transition: all 0.3s cubic-bezier(0.34,1.56,0.64,1);
+}
+.step-list-leave-active {
+  transition: all 0.2s ease;
+}
+.step-list-enter-from {
+  opacity: 0;
+  transform: translateY(-12px) scale(0.95);
+}
+.step-list-leave-to {
+  opacity: 0;
+  transform: translateX(-20px) scale(0.95);
+}
+.step-list-move {
+  transition: transform 0.3s cubic-bezier(0.34,1.56,0.64,1);
+}
 </style>

@@ -42,6 +42,15 @@ def build_messages(
         f"{base_prompt}\n\n当前日期：{today}。搜索时直接用核心关键词，不要手动添加年份。"
     ]
 
+    # 注入工具使用指南（从 SkillRegistry 自动收集各工具的 GUIDANCE）
+    try:
+        from tools import get_tools_guidance
+        guidance = get_tools_guidance()
+        if guidance:
+            system_parts.append(f"\n{guidance}")
+    except Exception:
+        pass
+
     if not forget_mode:
         # 中期摘要：远期对话的语义压缩
         if conv and conv.mid_term_summary:

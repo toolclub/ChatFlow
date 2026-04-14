@@ -227,29 +227,34 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
 
     <!-- ── 空状态 — Bilibili 可爱风 ── -->
     <div v-if="messages.length === 0" class="empty-view">
-      <div class="hero">
-        <div class="hero-icon-wrap">
-          <svg width="42" height="42" viewBox="0 0 32 32" fill="none">
-            <path d="M16 3C16 3 17.6 11 23.5 14C17.6 17 16 25 16 25C16 25 14.4 17 8.5 14C14.4 11 16 3 16 3Z" fill="#00AEEC"/>
-            <path d="M25.5 6C25.5 6 26.2 9.2 28.3 10.2C26.2 11.2 25.5 14.4 25.5 14.4C25.5 14.4 24.8 11.2 22.7 10.2C24.8 9.2 25.5 6 25.5 6Z" fill="#FB7299" opacity="0.6"/>
-          </svg>
-        </div>
-        <h1 class="hero-title">hi~ 有什么可以帮你的？</h1>
-        <p class="hero-sub">你的 AI 小助手 · 随时为你服务 (｡◕‿◕｡)</p>
-      </div>
+      <el-empty :image-size="0" description="" class="hero-empty">
+        <template #image>
+          <div class="hero-icon-wrap">
+            <svg width="42" height="42" viewBox="0 0 32 32" fill="none">
+              <path d="M16 3C16 3 17.6 11 23.5 14C17.6 17 16 25 16 25C16 25 14.4 17 8.5 14C14.4 11 16 3 16 3Z" fill="#00AEEC"/>
+              <path d="M25.5 6C25.5 6 26.2 9.2 28.3 10.2C26.2 11.2 25.5 14.4 25.5 14.4C25.5 14.4 24.8 11.2 22.7 10.2C24.8 9.2 25.5 6 25.5 6Z" fill="#FB7299" opacity="0.6"/>
+            </svg>
+          </div>
+        </template>
+        <template #description>
+          <h1 class="hero-title">hi~ 有什么可以帮你的？</h1>
+          <p class="hero-sub">你的 AI 小助手 · 随时为你服务</p>
+        </template>
+      </el-empty>
 
       <InputBox :loading="loading" :centered="true" @send="emit('send', $event)" />
 
       <div class="suggestions">
-        <button
+        <el-button
           v-for="s in suggestions"
           :key="s.label"
           class="sug-card"
+          round
           @click="sendSuggestion(s.prompt)"
         >
           <el-icon class="sug-icon"><component :is="s.icon" /></el-icon>
           <span class="sug-label">{{ s.label }}</span>
-        </button>
+        </el-button>
       </div>
     </div>
 
@@ -283,19 +288,19 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
           </template>
 
           <div v-if="canContinue && !loading" class="continue-wrap">
-            <button class="continue-btn" @click="emit('continue')">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0">
+            <el-button type="primary" round class="continue-btn" @click="emit('continue')">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;margin-right:4px">
                 <polyline points="13 17 18 12 13 7"/>
                 <polyline points="6 17 11 12 6 7"/>
               </svg>
               继续
-            </button>
+            </el-button>
             <span class="continue-hint">上次响应被中断，点击从断点继续</span>
-            <button class="continue-dismiss" @click="emit('dismissContinue')" title="忽略">
+            <el-button class="continue-dismiss" circle size="small" @click="emit('dismissContinue')" title="忽略">
               <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                 <path d="M12 4L4 12M4 4l8 8"/>
               </svg>
-            </button>
+            </el-button>
           </div>
         </div>
       </div>
@@ -520,12 +525,14 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   padding: 32px 28px 52px;
   gap: 28px;
 }
-.hero {
-  text-align: center;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
+:deep(.hero-empty) {
+  padding: 0 !important;
+}
+:deep(.hero-empty .el-empty__image) {
+  margin-bottom: 8px;
+}
+:deep(.hero-empty .el-empty__description) {
+  margin-top: 0;
 }
 .hero-icon-wrap {
   width: 80px; height: 80px;
@@ -549,6 +556,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   letter-spacing: -0.3px;
   line-height: 1.3;
   color: #18191C;
+  margin-bottom: 8px;
 }
 .hero-sub {
   font-size: 14px;
@@ -565,29 +573,27 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
   justify-content: center;
   max-width: 680px;
 }
-.sug-card {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 20px;
-  background: #fff;
-  border: 1.5px solid #E3E5E7;
-  border-radius: 20px;
-  font-size: 13.5px;
-  font-weight: 500;
-  color: #18191C;
-  font-family: inherit;
-  cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+:deep(.sug-card) {
+  padding: 10px 20px !important;
+  height: auto !important;
+  background: #fff !important;
+  border: 1.5px solid #E3E5E7 !important;
+  border-radius: 20px !important;
+  font-size: 13.5px !important;
+  font-weight: 500 !important;
+  color: #18191C !important;
+  font-family: inherit !important;
+  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
 }
-.sug-card:hover {
-  border-color: #00AEEC;
-  color: #00AEEC;
-  transform: translateY(-2px);
-  box-shadow: 0 4px 14px rgba(0,174,236,0.12);
+:deep(.sug-card:hover) {
+  border-color: #00AEEC !important;
+  color: #00AEEC !important;
+  transform: translateY(-2px) !important;
+  box-shadow: 0 4px 14px rgba(0,174,236,0.12) !important;
+  background: linear-gradient(135deg, rgba(0,174,236,0.03), rgba(251,114,153,0.02)) !important;
 }
-.sug-card:nth-child(2):hover { border-color: #FB7299; color: #FB7299; box-shadow: 0 4px 14px rgba(251,114,153,0.12); }
-.sug-card:nth-child(4):hover { border-color: #FB7299; color: #FB7299; box-shadow: 0 4px 14px rgba(251,114,153,0.12); }
+:deep(.sug-card:nth-child(2):hover) { border-color: #FB7299 !important; color: #FB7299 !important; box-shadow: 0 4px 14px rgba(251,114,153,0.12) !important; }
+:deep(.sug-card:nth-child(4):hover) { border-color: #FB7299 !important; color: #FB7299 !important; box-shadow: 0 4px 14px rgba(251,114,153,0.12) !important; }
 .sug-icon { font-size: 15px; }
 .sug-label { font-weight: 500; }
 
@@ -633,49 +639,45 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
 :deep(.s-tag--saving)  { color: #61666D !important; border-color: #C9CCD0 !important; }
 :deep(.s-tag--reflect) { color: #00B578 !important; border-color: #8AE0C0 !important; }
 
-/* 继续按钮 — Bilibili 风格 */
+/* 继续按钮 — Bilibili 风格 + 脉冲动画 */
 .continue-wrap {
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 10px 48px 4px;
 }
-.continue-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 6px 16px;
-  border-radius: 20px;
-  border: 1.5px solid #00AEEC;
-  background: #fff;
-  color: #00AEEC;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s;
-  white-space: nowrap;
+:deep(.continue-btn) {
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  padding: 6px 16px !important;
+  height: auto !important;
+  background: #00AEEC !important;
+  border-color: #00AEEC !important;
+  animation: continue-pulse 2s ease-in-out infinite !important;
+  transition: all 0.2s cubic-bezier(0.34,1.56,0.64,1) !important;
 }
-.continue-btn:hover {
-  background: #00AEEC;
-  color: #fff;
-  box-shadow: 0 2px 10px rgba(0,174,236,0.25);
+:deep(.continue-btn:hover) {
+  transform: translateY(-2px) scale(1.03) !important;
+  box-shadow: 0 4px 16px rgba(0,174,236,0.35) !important;
+  animation: none !important;
+}
+@keyframes continue-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(0,174,236,0.4); }
+  50% { box-shadow: 0 0 0 8px rgba(0,174,236,0); }
 }
 .continue-hint {
   font-size: 12px;
   color: var(--cf-text-3);
 }
-.continue-dismiss {
-  width: 22px; height: 22px;
-  border-radius: 50%;
-  border: none;
-  background: transparent;
-  color: var(--cf-text-4);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  transition: all 0.12s;
+:deep(.continue-dismiss) {
+  border: 1px solid var(--cf-border) !important;
+  color: var(--cf-text-4) !important;
+  background: transparent !important;
+  transition: all 0.12s !important;
 }
-.continue-dismiss:hover { background: var(--cf-hover); color: var(--cf-text-2); }
+:deep(.continue-dismiss:hover) {
+  background: var(--cf-hover) !important;
+  color: var(--cf-text-2) !important;
+  border-color: var(--cf-border) !important;
+}
 </style>

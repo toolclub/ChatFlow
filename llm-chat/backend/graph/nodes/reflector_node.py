@@ -66,6 +66,19 @@ class ReflectorNode(BaseNode):
         total         = len(plan)
         full_response = state.get("full_response", "")
 
+        # ── 兜底：full_response 为空但有工具执行结果时，从 ToolMessage 中构建摘要 ──
+        # 典型场景：工具调用上限截断 / 模型只输出 tool_calls 没有 content
+        # 不构建的话 save_response 会存空 content → 刷新后消息丢失
+        _fallback_applied = False
+        if not full_response:
+            full_response = self._build_fallback_response(state)
+            if full_response:
+                _fallback_applied = True
+                logger.info(
+                    "reflector 兜底：从工具结果构建 full_response | conv=%s | len=%d",
+                    state.get("conv_id", ""), len(full_response),
+                )
+
         # ── 快速路径 2：边界保护 → 强制完成 ─────────────────────────────────────
         if current_idx >= total or step_iters >= _MAX_STEP_ITERATIONS:
             updated_plan = self._mark_step(plan, current_idx, "done")
@@ -140,12 +153,16 @@ class ReflectorNode(BaseNode):
             "reflector done (fast) | conv=%s | step=%d/%d",
             state.get("conv_id", ""), current_idx + 1, len(plan),
         )
-        return {
+        result: ReflectorNodeOutput = {
             "reflector_decision": "done",
             "reflection":         "步骤执行完成",
             "plan":               updated_plan,
             "step_results":       step_results,
         }
+        # 兜底 response 写回 state，确保 save_response 不存空内容
+        if full_response and not state.get("full_response"):
+            result["full_response"] = full_response
+        return result
 
     async def _make_continue_result(
         self,
@@ -171,7 +188,7 @@ class ReflectorNode(BaseNode):
             "reflector continue (fast) | conv=%s | step=%d→%d/%d",
             state.get("conv_id", ""), current_idx + 1, next_idx + 1, total,
         )
-        return {
+        result: ReflectorNodeOutput = {
             "reflector_decision": "continue",
             "reflection":         f"步骤 {current_idx + 1} 完成，继续步骤 {next_idx + 1}",
             "plan":               updated_plan,
@@ -180,6 +197,9 @@ class ReflectorNode(BaseNode):
             "step_iterations":    0,
             "step_results":       step_results,
         }
+        if full_response and not state.get("full_response"):
+            result["full_response"] = full_response
+        return result
 
     # ══════════════════════════════════════════════════════════════════════════
     # LLM 评估（仅边缘场景）
@@ -281,6 +301,32 @@ class ReflectorNode(BaseNode):
     # ══════════════════════════════════════════════════════════════════════════
     # 工具方法
     # ══════════════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _build_fallback_response(state: GraphState) -> str:
+        """
+        从 messages 中的 ToolMessage 构建兜底响应摘要。
+
+        当模型只产出了 tool_calls 没有 content 时（如工具上限截断），
+        收集最近的工具执行结果作为 full_response，确保 save_response 不存空内容。
+        """
+        messages = state.get("messages", [])
+        parts: list[str] = []
+
+        # 从最后一条 HumanMessage 开始，收集本步骤的所有工具调用和结果
+        for m in reversed(messages):
+            msg_type = type(m).__name__
+            if msg_type == "HumanMessage":
+                break
+            if msg_type == "AIMessage" and hasattr(m, "content") and m.content:
+                parts.append(str(m.content)[:1000])
+            elif msg_type == "ToolMessage" and hasattr(m, "content") and m.content:
+                parts.append(str(m.content)[:500])
+
+        if not parts:
+            return ""
+        parts.reverse()
+        return "\n\n".join(parts)
 
     @staticmethod
     async def _last_tool_failed(state: GraphState) -> bool:

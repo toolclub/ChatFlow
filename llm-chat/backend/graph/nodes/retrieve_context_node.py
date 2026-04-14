@@ -57,24 +57,27 @@ class RetrieveContextNode(BaseNode):
         long_term: list[str] = []
         forget_mode = False
 
-        # ── 长期记忆检索 ────────────────────────────────────────────────────
+        # ── 长期记忆检索（embedding 失败时降级为无记忆，不阻断主流程） ────────
         if LONGTERM_MEMORY_ENABLED and user_msg:
-            from rag import retriever as rag_retriever
-            long_term = await rag_retriever.search_memories(conv_id, user_msg)
+            try:
+                from rag import retriever as rag_retriever
+                long_term = await rag_retriever.search_memories(conv_id, user_msg)
 
-            # 长期记忆为空时，判断是否与当前话题相关（触发遗忘模式）
-            if not long_term and conv:
-                if conv.mid_term_summary:
-                    relevant = await rag_retriever.is_relevant_to_summary(
-                        user_msg, conv.mid_term_summary
-                    )
-                else:
-                    recent = [m.content for m in conv.messages if m.role == "user"][-2:]
-                    if recent:
-                        relevant = await rag_retriever.is_relevant_to_recent(user_msg, recent)
+                # 长期记忆为空时，判断是否与当前话题相关（触发遗忘模式）
+                if not long_term and conv:
+                    if conv.mid_term_summary:
+                        relevant = await rag_retriever.is_relevant_to_summary(
+                            user_msg, conv.mid_term_summary
+                        )
                     else:
-                        relevant = True
-                forget_mode = not relevant
+                        recent = [m.content for m in conv.messages if m.role == "user"][-2:]
+                        if recent:
+                            relevant = await rag_retriever.is_relevant_to_recent(user_msg, recent)
+                        else:
+                            relevant = True
+                    forget_mode = not relevant
+            except Exception as exc:
+                logger.warning("长期记忆检索失败（已降级为无记忆）| conv=%s | error=%s", conv_id, exc)
 
         # ── 组装历史消息 ────────────────────────────────────────────────────
         history_messages = build_messages(conv, long_term, forget_mode, self._tool_names)

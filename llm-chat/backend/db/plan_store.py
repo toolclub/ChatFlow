@@ -74,25 +74,23 @@ async def save_step_result(
     result 截断到 3000 字符防止 JSONB 过大。
     """
     truncated = result[:3000]
-    # jsonb_set path 格式: {index,field}
-    path_status = f"{{{step_index},status}}"
-    path_result = f"{{{step_index},result}}"
+    # jsonb_set path: 直接嵌入 SQL（step_index 是 int，安全）
+    # 不能用绑定参数传 path，因为 asyncpg 期望 list 而非字符串
+    idx = int(step_index)  # 确保是 int，防注入
 
     try:
         async with AsyncSessionLocal() as session:
             await session.execute(
                 text(
-                    "UPDATE plan_steps"
-                    "   SET steps       = jsonb_set(jsonb_set(steps, :p_status, CAST(:v_status AS jsonb)),"
-                    "                               :p_result, CAST(:v_result AS jsonb)),"
-                    "       current_step = :next_step,"
-                    "       updated_at   = :now"
-                    " WHERE id = :plan_id"
+                    f"UPDATE plan_steps"
+                    f"   SET steps       = jsonb_set(jsonb_set(steps, '{{{idx},status}}', CAST(:v_status AS jsonb)),"
+                    f"                               '{{{idx},result}}', CAST(:v_result AS jsonb)),"
+                    f"       current_step = :next_step,"
+                    f"       updated_at   = :now"
+                    f" WHERE id = :plan_id"
                 ),
                 {
-                    "p_status": path_status,
                     "v_status": json.dumps("done"),
-                    "p_result": path_result,
                     "v_result": json.dumps(truncated),
                     "next_step": new_current_step,
                     "now":       time.time(),
