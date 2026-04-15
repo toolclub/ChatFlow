@@ -10,6 +10,9 @@ export interface SearchItem {
   status: 'loading' | 'done' | 'fail'
 }
 
+/** 渲染模式（后端 DISPLAY_MODE 协议，通过 SSE 事件传递） */
+export type ToolDisplayMode = 'terminal' | 'file_write' | 'file_read' | 'default'
+
 export interface ToolCallRecord {
   name: string
   input: Record<string, unknown>
@@ -19,6 +22,8 @@ export interface ToolCallRecord {
   fetchStatus?: 'loading' | 'done' | 'fail'
   done: boolean
   step_index?: number   // DB 字段：所属计划步骤索引（刷新恢复时用于分发到对应步骤）
+  /** 渲染模式：由后端 SkillRegistry 声明，通过 SSE 协议传递 */
+  displayMode?: ToolDisplayMode
 }
 
 export interface PlanStep {

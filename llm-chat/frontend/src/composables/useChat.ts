@@ -184,6 +184,7 @@ export function useChat() {
               ? (te.status === 'done' ? 'done' : 'loading') : undefined,
             done: te.status !== 'running',  // error/done/timeout 都算完成
             step_index: te.step_index ?? undefined,  // DB 字段，用于步骤分发
+            displayMode: te.display_mode || 'default',  // 协议字段：由后端 SkillRegistry 提供
           }))
         }
 
@@ -328,13 +329,12 @@ export function useChat() {
           target.content = (target.content || '') + chunk
         },
         // onToolCall
-        (name, input) => {
-          const tc = name === 'fetch_webpage'
-            ? { name, input, done: false, fetchStatus: 'loading' as const }
-            : { name, input, done: false }
+        (name, input, displayMode) => {
           const step = activeStep()
           const toolList = step ? step.toolCalls : (msg().toolCalls ??= [])
           const placeholderIdx = toolList.findIndex(t => t.name === name && !t.done && (t.input as any)?._generating)
+          const prevMode = placeholderIdx >= 0 ? toolList[placeholderIdx].displayMode : undefined
+          const tc = { name, input, done: false, displayMode: displayMode || prevMode || 'default', ...(name === 'fetch_webpage' ? { fetchStatus: 'loading' as const } : {}) }
           if (placeholderIdx >= 0) {
             const prev = toolList[placeholderIdx]
             if (prev.output) tc.output = prev.output
@@ -413,10 +413,10 @@ export function useChat() {
         s.abortController.signal,
         // onThinking
         (thinking) => { const step = activeStep(); if (step) step.thinking += thinking; else msg().thinking = (msg().thinking ?? '') + thinking },
-        // onSandboxOutput
+        // onSandboxOutput：按 toolName 精确匹配，兜底最后一个未完成工具
         (toolName, stream, text) => {
           const step = activeStep(); const toolList = step ? step.toolCalls : msg().toolCalls
-          const tc = toolList?.findLast(t => (t.name === 'execute_code' || t.name === 'run_shell' || t.name === 'create_ppt') && !t.done)
+          const tc = toolList?.findLast(t => t.name === toolName && !t.done) || toolList?.findLast(t => !t.done)
           if (tc) tc.output = (tc.output || '') + text
         },
         // onFileArtifact（去重：DB 已加载的 + SSE 重放的可能重复）
@@ -427,8 +427,8 @@ export function useChat() {
           }
         },
         // onToolCallStart
-        (name) => {
-          const placeholder = { name, input: { _generating: true }, done: false }
+        (name, displayMode) => {
+          const placeholder = { name, input: { _generating: true }, done: false, displayMode: displayMode || 'default' }
           const step = activeStep()
           if (step) step.toolCalls.push(placeholder)
           else { if (!msg().toolCalls) msg().toolCalls = []; msg().toolCalls!.push(placeholder) }
@@ -553,16 +553,15 @@ export function useChat() {
           }
         },
         // onToolCall
-        (name, input) => {
-          const tc = name === 'fetch_webpage'
-            ? { name, input, done: false, fetchStatus: 'loading' as const }
-            : { name, input, done: false }
+        (name, input, displayMode) => {
           const step = activeStep()
           const toolList = step ? step.toolCalls : (msg().toolCalls ??= [])
           // 替换 tool_call_start 创建的 placeholder（同名且 _generating 标记）
           const placeholderIdx = toolList.findIndex(
             t => t.name === name && !t.done && (t.input as any)?._generating
           )
+          const prevMode = placeholderIdx >= 0 ? toolList[placeholderIdx].displayMode : undefined
+          const tc = { name, input, done: false, displayMode: displayMode || prevMode || 'default', ...(name === 'fetch_webpage' ? { fetchStatus: 'loading' as const } : {}) }
           if (placeholderIdx >= 0) {
             // 保留 _generating 阶段 tool_call_args 积累的流式输出（全流程透明）
             const prev = toolList[placeholderIdx]
@@ -720,15 +719,12 @@ export function useChat() {
           s.agentStatus = { state: 'idle', model: s.agentStatus.model }
           s.cognitive.isActive = false
         },
-        // onSandboxOutput：沙箱实时终端输出（execute_code/run_shell/create_ppt 执行过程中）
+        // onSandboxOutput：按 toolName 精确匹配，兜底最后一个未完成工具
         (toolName: string, stream: string, text: string) => {
           const step = activeStep()
           const toolList = step ? step.toolCalls : msg().toolCalls
-          const tc = toolList?.findLast(t =>
-            (t.name === 'execute_code' || t.name === 'run_shell' || t.name === 'create_ppt') && !t.done
-          )
+          const tc = toolList?.findLast(t => t.name === toolName && !t.done) || toolList?.findLast(t => !t.done)
           if (!tc) return
-          // 直接赋值确保 Vue 响应式触发（不用 requestAnimationFrame 缓冲，避免 Proxy 引用问题）
           tc.output = (tc.output || '') + text
         },
         // onFileArtifact：沙箱文件产物（sandbox_write 成功后推送，去重）
@@ -741,8 +737,8 @@ export function useChat() {
         },
         // onToolCallStart：工具参数开始生成（LLM 刚开始输出 tool_call arguments）
         // 立即创建一个 placeholder tool call，让前端终端 loading 状态提前展示
-        (name) => {
-          const placeholder = { name, input: { _generating: true }, done: false }
+        (name, displayMode) => {
+          const placeholder = { name, input: { _generating: true }, done: false, displayMode: displayMode || 'default' }
           const step = activeStep()
           if (step) {
             const last = step.toolCalls[step.toolCalls.length - 1]
@@ -880,11 +876,12 @@ export function useChat() {
         convId, originalGoal || '执行修改后的计划', '', [], true,
         modifiedPlan as any,  // force_plan
         (chunk) => { const step = activeStep(); const target = step || msg(); target.content = (target.content || '') + chunk },
-        (name, input) => {
-          const tc = name === 'fetch_webpage' ? { name, input, done: false, fetchStatus: 'loading' as const } : { name, input, done: false }
+        (name, input, displayMode) => {
           const step = activeStep()
           const toolList = step ? step.toolCalls : (msg().toolCalls ??= [])
           const placeholderIdx = toolList.findIndex(t => t.name === name && !t.done && (t.input as any)?._generating)
+          const prevMode = placeholderIdx >= 0 ? toolList[placeholderIdx].displayMode : undefined
+          const tc = { name, input, done: false, displayMode: displayMode || prevMode || 'default', ...(name === 'fetch_webpage' ? { fetchStatus: 'loading' as const } : {}) }
           if (placeholderIdx >= 0) { const prev = toolList[placeholderIdx]; if (prev.output) tc.output = prev.output; toolList[placeholderIdx] = tc } else toolList.push(tc)
           s.agentStatus = { ...s.agentStatus, state: 'tool', tool: name }
           addTrace(s.cognitive, { type: 'tool_call', content: `调用 ${name}: ${JSON.stringify(input).slice(0, 180)}`, toolName: name })
@@ -950,7 +947,7 @@ export function useChat() {
           function flush() { bufMap.forEach((buf, tc) => { tc.output = (tc.output || '') + buf }); bufMap.clear(); rafScheduled = false }
           return (toolName: string, stream: string, text: string) => {
             const step = activeStep(); const toolList = step ? step.toolCalls : msg().toolCalls
-            const tc = toolList?.findLast(t => (t.name === 'execute_code' || t.name === 'run_shell' || t.name === 'create_ppt') && !t.done)
+            const tc = toolList?.findLast(t => t.name === toolName && !t.done) || toolList?.findLast(t => !t.done)
             if (!tc) return; bufMap.set(tc, (bufMap.get(tc) || '') + text)
             if (!rafScheduled) { rafScheduled = true; requestAnimationFrame(flush) }
           }
@@ -962,8 +959,8 @@ export function useChat() {
             addTrace(s.cognitive, { type: 'info', content: `📄 文件已创建: ${artifact.name}` })
           }
         },
-        (name) => {
-          const placeholder = { name, input: { _generating: true }, done: false }
+        (name, displayMode) => {
+          const placeholder = { name, input: { _generating: true }, done: false, displayMode: displayMode || 'default' }
           const step = activeStep()
           if (step) { const last = step.toolCalls[step.toolCalls.length - 1]; if (last && last.name === name && !last.done && (last.input as any)._generating) return; step.toolCalls.push(placeholder) }
           else { if (!msg().toolCalls) msg().toolCalls = []; const last = msg().toolCalls![msg().toolCalls!.length - 1]; if (last && last.name === name && !last.done && (last.input as any)._generating) return; msg().toolCalls!.push(placeholder) }

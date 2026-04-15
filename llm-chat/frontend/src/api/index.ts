@@ -138,7 +138,7 @@ export async function resumeStream(
   convId: string,
   lastIndex: number,
   onChunk: (text: string) => void,
-  onToolCall: (name: string, input: Record<string, unknown>) => void,
+  onToolCall: (name: string, input: Record<string, unknown>, displayMode?: string) => void,
   onToolResult: (name: string, data: Record<string, unknown>) => void,
   onSearchItem: (item: { url: string; title: string; status: string }) => void,
   onStatus: (status: string, model?: string) => void,
@@ -151,10 +151,12 @@ export async function resumeStream(
   onThinking?: (text: string) => void,
   onSandboxOutput?: (toolName: string, stream: string, text: string) => void,
   onFileArtifact?: (artifact: FileArtifact) => void,
-  onToolCallStart?: (name: string) => void,
+  onToolCallStart?: (name: string, displayMode?: string) => void,
   onResumeContext?: (userMessage: string, images: string[]) => void,
   messageId?: string,
   onToolCallArgs?: (text: string) => void,
+  onClarification?: (data: ClarificationData) => void,
+  onInterrupted?: () => void,
 ) {
   let url = `${API_BASE}/api/conversations/${convId}/resume?after_event_id=${lastIndex}`
   if (messageId) url += `&message_id=${encodeURIComponent(messageId)}`
@@ -179,10 +181,10 @@ export async function resumeStream(
       if (data.clarification)   onClarification?.(data.clarification)
       if (data.sandbox_output)  onSandboxOutput?.(data.sandbox_output.tool_name, data.sandbox_output.stream, data.sandbox_output.text)
       if (data.file_artifact)   onFileArtifact?.(data.file_artifact as FileArtifact)
-      if (data.tool_call_start) onToolCallStart?.(data.tool_call_start.name)
+      if (data.tool_call_start) onToolCallStart?.(data.tool_call_start.name, data.tool_call_start.display_mode)
       if (data.tool_call_args)     { lastDataTime = Date.now(); onToolCallArgs?.(data.tool_call_args.text || '') }
       if (data.content)         onChunk(data.content)
-      if (data.tool_call)       onToolCall(data.tool_call.name, data.tool_call.input)
+      if (data.tool_call)       onToolCall(data.tool_call.name, data.tool_call.input, data.tool_call.display_mode)
       if (data.tool_result)     onToolResult(data.tool_result.name, data.tool_result)
       if (data.search_item)     onSearchItem(data.search_item)
       if (data.status)          onStatus(data.status, data.model)
@@ -229,7 +231,7 @@ export async function sendMessage(
   agentMode: boolean,
   forcePlan?: Record<string, unknown>[] | null,
   onChunk: (text: string) => void,
-  onToolCall: (name: string, input: Record<string, unknown>) => void,
+  onToolCall: (name: string, input: Record<string, unknown>, displayMode?: string) => void,
   onToolResult: (name: string, data: Record<string, unknown>) => void,
   onSearchItem: (item: { url: string; title: string; status: string }) => void,
   onStatus: (status: string, model?: string) => void,
@@ -244,7 +246,7 @@ export async function sendMessage(
   onInterrupted?: () => void,
   onSandboxOutput?: (toolName: string, stream: string, text: string) => void,
   onFileArtifact?: (artifact: FileArtifact) => void,
-  onToolCallStart?: (name: string) => void,
+  onToolCallStart?: (name: string, displayMode?: string) => void,
   onToolCallArgs?: (text: string) => void,
 ) {
   const body: Record<string, unknown> = {
@@ -296,10 +298,10 @@ export async function sendMessage(
       if (data.clarification)  onClarification?.(data.clarification)
       if (data.sandbox_output) onSandboxOutput?.(data.sandbox_output.tool_name, data.sandbox_output.stream, data.sandbox_output.text)
       if (data.file_artifact)    onFileArtifact?.(data.file_artifact as FileArtifact)
-      if (data.tool_call_start) onToolCallStart?.(data.tool_call_start.name)
+      if (data.tool_call_start) onToolCallStart?.(data.tool_call_start.name, data.tool_call_start.display_mode)
       if (data.tool_call_args)     { lastDataTime = Date.now(); onToolCallArgs?.(data.tool_call_args.text || '') }
       if (data.content)         onChunk(data.content)
-      if (data.tool_call)      onToolCall(data.tool_call.name, data.tool_call.input)
+      if (data.tool_call)      onToolCall(data.tool_call.name, data.tool_call.input, data.tool_call.display_mode)
       if (data.tool_result)    onToolResult(data.tool_result.name, data.tool_result)
       if (data.search_item)    onSearchItem(data.search_item)
       if (data.status)         onStatus(data.status, data.model)
