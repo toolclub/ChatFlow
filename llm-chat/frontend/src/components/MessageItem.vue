@@ -412,7 +412,34 @@ function isCollapsed(si: number, ti: number) { return collapsed.value[`${si}-${t
 // 工具执行完成后不自动折叠（保持展开，方便用户查看结果）
 
 // ─── 沙箱工具分组：连续沙箱操作合并为一个终端块 ───────────────────────────────
-const SANDBOX_TOOLS = new Set(['execute_code', 'run_shell', 'sandbox_write', 'sandbox_read', 'create_ppt'])
+// 按 displayMode 协议判断是否为终端工具（非 default 的都进终端渲染）
+const TERMINAL_MODES = new Set(['terminal', 'file_write', 'file_read'])
+
+// ─── tool_call_args 流式解码：原始 JSON 转可读代码 ──────────────────────────
+// tool_call_args 流的是原始 JSON 参数片段（如 {"path":"a.html","content":"<!DOCTYPE html>\\n<html>..."}）
+// 其中 \n \t \" 是字面转义字符，需要解码为真正的换行/缩进才能在终端可读
+function decodeStreamOutput(raw: string): string {
+  // 尝试提取 "content": "..." 或 "code": "..." 的值部分
+  const match = raw.match(/"(?:content|code)"\s*:\s*"/)
+  if (match) {
+    const start = raw.indexOf(match[0]) + match[0].length
+    raw = raw.slice(start)
+    // 去掉尾部可能的不完整 JSON（如 "}）
+    if (raw.endsWith('"}')) raw = raw.slice(0, -2)
+    else if (raw.endsWith('"')) raw = raw.slice(0, -1)
+  }
+  return raw
+    .replace(/\\n/g, '\n')
+    .replace(/\\t/g, '\t')
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, '\\')
+}
+
+// ─── 文件内容折叠（cat 写入的大文件） ──────────────────────────────────────
+const fileExpanded = ref<Record<string, boolean>>({})
+function isFileExpanded(si: number, ii: number) { return fileExpanded.value[`${si}-${ii}`] ?? false }
+function toggleFileExpand(si: number, ii: number) { fileExpanded.value[`${si}-${ii}`] = !fileExpanded.value[`${si}-${ii}`] }
+const FILE_COLLAPSE_LINES = 15  // 超过此行数折叠
 
 interface SandboxGroupItem { tc: ToolCallRecord; ti: number }
 type ToolGroup =
@@ -426,7 +453,7 @@ function getToolGroups(toolCalls: ToolCallRecord[]): ToolGroup[] {
     if (buf.length) { groups.push({ type: 'sandbox', tools: [...buf], firstTi: buf[0].ti }); buf = [] }
   }
   toolCalls.forEach((tc, ti) => {
-    if (SANDBOX_TOOLS.has(tc.name)) { buf.push({ tc, ti }) }
+    if (TERMINAL_MODES.has(tc.displayMode || 'default')) { buf.push({ tc, ti }) }
     else { flush(); groups.push({ type: 'single', tc, ti }) }
   })
   flush()
@@ -470,16 +497,17 @@ const fileArtifacts = computed<FileArtifact[]>(() => {
     const myFiles = new Set<string>()
     const collectNames = (toolCalls: ToolCallRecord[]) => {
       for (const tc of toolCalls) {
-        if (tc.name === 'sandbox_write' && tc.done) {
+        // file_write 模式：从 input.path 提取文件名
+        if (tc.displayMode === 'file_write' && tc.done) {
           const path = String((tc.input as any).path || '')
           if (path) myFiles.add(path.split('/').pop() || path)
         }
-        if (tc.name === 'create_ppt' && tc.done && tc.output) {
-          const match = tc.output.match(/文件名:\s*(.+\.pptx)/i)
-            || tc.output.match(/PPT 已生成:\s*(.+\.pptx)/i)
+        // terminal 模式的 output 中可能包含产物文件名
+        if (tc.displayMode === 'terminal' && tc.done && tc.output) {
+          const match = tc.output.match(/文件名:\s*(\S+)/i) || tc.output.match(/已生成:\s*(\S+)/i)
           if (match) myFiles.add(match[1].trim())
         }
-        // sandbox_download 产出的打包文件通过 downloadable 标记直接放行，不在此处匹配
+        // downloadable 产物通过标记直接放行，不在此处匹配
       }
     }
     if (props.message.steps?.length) {
@@ -511,19 +539,15 @@ const fileArtifacts = computed<FileArtifact[]>(() => {
   const myFiles = new Set<string>()
   const extractNames = (toolCalls: ToolCallRecord[]) => {
     for (const tc of toolCalls) {
-      if (tc.name === 'sandbox_write' && tc.done) {
+      if (tc.displayMode === 'file_write' && tc.done) {
         const path = String((tc.input as any).path || '')
         if (path) myFiles.add(path.split('/').pop() || path)
       }
-      if (tc.name === 'create_ppt' && tc.done && tc.output) {
-        const match = tc.output.match(/文件名:\s*(.+\.pptx)/i)
-          || tc.output.match(/PPT 已生成:\s*(.+\.pptx)/i)
+      if (tc.displayMode === 'terminal' && tc.done && tc.output) {
+        const match = tc.output.match(/文件名:\s*(\S+)/i)
+          || tc.output.match(/已生成:\s*(\S+)/i)
+          || tc.output.match(/文件已准备好下载:\s*(\S+)/)
         if (match) myFiles.add(match[1].trim())
-      }
-      // sandbox_download 产出的打包文件（archive）
-      if (tc.name === 'sandbox_download' && tc.done && tc.output) {
-        const m = tc.output.match(/文件已准备好下载:\s*(\S+)/)
-        if (m) myFiles.add(m[1])
       }
     }
   }
@@ -799,29 +823,44 @@ function cancelEdit() { isEditing.value = false }
                         <!-- 操作间分隔线 -->
                         <div v-if="ii > 0" class="term-divider"></div>
 
-                        <!-- sandbox_write -->
-                        <template v-if="item.tc.name === 'sandbox_write'">
-                          <!-- 参数正在生成中（tool_call_start placeholder）→ 显示 loading -->
-                          <template v-if="(item.tc.input as any)._generating">
-                            <div class="term-line term-line--generating">
-                              <span class="term-prompt-sign">$</span>
-                              <span class="term-generating-text">正在生成文件内容</span>
-                              <span class="term-generating-dots">...</span>
-                            </div>
-                          </template>
-                          <template v-else>
-                            <div class="term-line term-line--dimmed">
-                              <span class="term-prompt-sign">$</span>
-                              <span>cat &gt; {{ (item.tc.input as any).path || 'file' }} &lt;&lt; 'EOF'</span>
-                            </div>
-                            <pre v-if="(item.tc.input as any).content" class="term-code-inline">{{ (item.tc.input as any).content }}</pre>
-                            <div v-if="(item.tc.input as any).content" class="term-line term-line--dimmed"><span>EOF</span></div>
-                            <div v-if="item.tc.done && item.tc.output" class="term-line term-line--ok">{{ item.tc.output }}</div>
-                          </template>
+                        <!-- ═══ _generating 阶段：流式参数 + thinking 预览 ═══ -->
+                        <template v-if="(item.tc.input as any)?._generating">
+                          <div class="term-line term-line--generating">
+                            <span class="term-prompt-sign">$</span>
+                            <span class="term-generating-text">{{ item.tc.name }}</span>
+                            <span class="term-generating-dots">...</span>
+                          </div>
+                          <!-- tool_call_args 已到达：解码 JSON 转义后显示可读代码 -->
+                          <pre v-if="item.tc.output" class="term-stream-output" v-auto-scroll>{{ decodeStreamOutput(item.tc.output) }}</pre>
+                          <!-- tool_call_args 未开始，模型在 thinking：显示 thinking 摘要 -->
+                          <div v-else-if="sec.thinking" class="term-thinking-preview">
+                            <div class="term-thinking-hint">💭 模型正在构思中...</div>
+                            <pre class="term-thinking-text">{{ sec.thinking.slice(-500) }}</pre>
+                          </div>
                         </template>
 
-                        <!-- sandbox_read -->
-                        <template v-else-if="item.tc.name === 'sandbox_read'">
+                        <!-- ═══ 完成后渲染：按 displayMode 协议决定模板 ═══ -->
+
+                        <!-- file_write 模式（可折叠） -->
+                        <template v-else-if="item.tc.displayMode === 'file_write'">
+                          <div class="term-line term-line--dimmed term-file-header" @click="toggleFileExpand(si, ii)">
+                            <span class="term-prompt-sign">$</span>
+                            <span>cat &gt; {{ (item.tc.input as any).path || 'file' }} &lt;&lt; 'EOF'</span>
+                            <span v-if="(item.tc.input as any).content && ((item.tc.input as any).content as string).split('\n').length > FILE_COLLAPSE_LINES"
+                              class="term-fold-badge">
+                              {{ isFileExpanded(si, ii) ? '收起' : `${((item.tc.input as any).content as string).split('\n').length} 行 · 展开` }}
+                            </span>
+                          </div>
+                          <div v-if="(item.tc.input as any).content" class="term-file-body" :class="{ collapsed: !isFileExpanded(si, ii) && ((item.tc.input as any).content as string).split('\n').length > FILE_COLLAPSE_LINES }">
+                            <pre class="term-code-inline">{{ (item.tc.input as any).content }}</pre>
+                            <div v-if="!isFileExpanded(si, ii) && ((item.tc.input as any).content as string).split('\n').length > FILE_COLLAPSE_LINES" class="term-file-fade" @click="toggleFileExpand(si, ii)"></div>
+                          </div>
+                          <div v-if="(item.tc.input as any).content" class="term-line term-line--dimmed"><span>EOF</span></div>
+                          <div v-if="item.tc.done && item.tc.output" class="term-line term-line--ok">{{ item.tc.output }}</div>
+                        </template>
+
+                        <!-- file_read 模式 -->
+                        <template v-else-if="item.tc.displayMode === 'file_read'">
                           <div class="term-line">
                             <span class="term-prompt-sign">$</span>
                             <span class="term-cmd-text">cat {{ (item.tc.input as any).path || 'file' }}</span>
@@ -829,8 +868,9 @@ function cancelEdit() { isEditing.value = false }
                           <pre v-if="item.tc.done && item.tc.output" class="term-code-inline">{{ item.tc.output }}</pre>
                         </template>
 
-                        <!-- execute_code -->
-                        <template v-else-if="item.tc.name === 'execute_code'">
+                        <!-- terminal 模式（execute_code / run_shell / create_ppt 等，含默认兜底） -->
+                        <template v-else>
+                          <!-- 代码写入区（execute_code 有 code 参数时） -->
                           <template v-if="(item.tc.input as any).code">
                             <div class="term-line term-line--dimmed">
                               <span class="term-prompt-sign">$</span>
@@ -839,11 +879,23 @@ function cancelEdit() { isEditing.value = false }
                             <pre class="term-code-inline">{{ (item.tc.input as any).code }}</pre>
                             <div class="term-line term-line--dimmed"><span>EOF</span></div>
                           </template>
+                          <!-- PPT JSON 写入区（create_ppt 有 ppt_json 参数时） -->
+                          <template v-else-if="(item.tc.input as any).ppt_json">
+                            <div class="term-line term-line--dimmed">
+                              <span class="term-prompt-sign">$</span>
+                              <span>cat &gt; ppt_data.json &lt;&lt; 'EOF'</span>
+                            </div>
+                            <pre class="term-code-inline">{{ (item.tc.input as any).ppt_json }}</pre>
+                            <div class="term-line term-line--dimmed"><span>EOF</span></div>
+                          </template>
+                          <!-- 命令行 -->
                           <div class="term-line">
                             <span class="term-prompt-sign">$</span>
-                            <span class="term-cmd-text">{{ ({python:'python3 main.py',javascript:'node main.js',java:'javac Main.java && java Main',shell:'bash run.sh'} as any)[(item.tc.input as any).language] || 'run' }}</span>
+                            <span class="term-cmd-text">{{ (item.tc.input as any).command || item.tc.name }}</span>
                           </div>
+                          <!-- 流式输出（未完成时） -->
                           <pre v-if="!item.tc.done && item.tc.output" class="term-stream-output">{{ item.tc.output }}</pre>
+                          <!-- 完成后逐行渲染 -->
                           <template v-if="item.tc.done && item.tc.output">
                             <template v-for="(line, li) in item.tc.output.split('\n')" :key="`${ii}-${li}`">
                               <div v-if="line.startsWith('root@sandbox:')" class="term-line">
@@ -860,78 +912,6 @@ function cancelEdit() { isEditing.value = false }
                               <div v-else-if="line.trim()" class="term-line term-line--out">{{ line }}</div>
                             </template>
                           </template>
-                        </template>
-
-                        <!-- run_shell -->
-                        <template v-else-if="item.tc.name === 'run_shell'">
-                          <div v-if="(item.tc.input as any).command" class="term-line">
-                            <span class="term-prompt-sign">$</span>
-                            <span class="term-cmd-text">{{ (item.tc.input as any).command }}</span>
-                          </div>
-                          <pre v-if="!item.tc.done && item.tc.output" class="term-stream-output">{{ item.tc.output }}</pre>
-                          <template v-if="item.tc.done && item.tc.output">
-                            <template v-for="(line, li) in item.tc.output.split('\n')" :key="`${ii}-${li}`">
-                              <div v-if="line.startsWith('root@sandbox:')" class="term-line">
-                                <span class="term-prompt-user">{{ line.split('$')[0] }}$</span>
-                                <span class="term-cmd-text">{{ line.split('$ ').slice(1).join('$ ') }}</span>
-                              </div>
-                              <div v-else-if="line.startsWith('$ ')" class="term-line">
-                                <span class="term-prompt-sign">$</span>
-                                <span class="term-cmd-text">{{ line.slice(2) }}</span>
-                              </div>
-                              <div v-else-if="line.startsWith('[stderr]')" class="term-line term-line--err">{{ line.replace('[stderr] ', '') }}</div>
-                              <div v-else-if="line.startsWith('[exit_code')" class="term-line term-line--err">{{ line }}</div>
-                              <div v-else-if="line.startsWith('⏱')" class="term-line term-line--meta">{{ line }}</div>
-                              <div v-else-if="line.trim()" class="term-line term-line--out">{{ line }}</div>
-                            </template>
-                          </template>
-                        </template>
-
-                        <!-- create_ppt -->
-                        <template v-else-if="item.tc.name === 'create_ppt'">
-                          <!-- _generating 阶段：模型正在输出 ppt_json token -->
-                          <template v-if="(item.tc.input as any)?._generating">
-                            <div class="term-line term-line--dimmed">
-                              <span class="term-prompt-sign">$</span>
-                              <span>cat &gt; ppt_data.json &lt;&lt; 'EOF'</span>
-                            </div>
-                            <pre v-if="item.tc.output" class="term-stream-output">{{ item.tc.output }}</pre>
-                          </template>
-                          <!-- 参数就绪：显示生成内容 + 执行输出 -->
-                          <template v-else>
-                            <div class="term-line term-line--dimmed">
-                              <span class="term-prompt-sign">$</span>
-                              <span>cat &gt; ppt_data.json &lt;&lt; 'EOF'</span>
-                            </div>
-                            <pre v-if="(item.tc.input as any).ppt_json" class="term-code-inline">{{ (item.tc.input as any).ppt_json }}</pre>
-                            <div v-if="(item.tc.input as any).ppt_json" class="term-line term-line--dimmed"><span>EOF</span></div>
-                            <div class="term-line">
-                              <span class="term-prompt-sign">$</span>
-                              <span class="term-cmd-text">python3 render_ppt.py</span>
-                            </div>
-                            <pre v-if="!item.tc.done && item.tc.output" class="term-stream-output">{{ item.tc.output }}</pre>
-                            <template v-if="item.tc.done && item.tc.output">
-                              <template v-for="(line, li) in item.tc.output.split('\n')" :key="`${ii}-${li}`">
-                                <div v-if="line.startsWith('root@sandbox:')" class="term-line">
-                                  <span class="term-prompt-user">{{ line.split('$')[0] }}$</span>
-                                  <span class="term-cmd-text">{{ line.split('$ ').slice(1).join('$ ') }}</span>
-                                </div>
-                                <div v-else-if="line.startsWith('[stderr]')" class="term-line term-line--err">{{ line.replace('[stderr] ', '') }}</div>
-                                <div v-else-if="line.startsWith('[exit_code')" class="term-line term-line--err">{{ line }}</div>
-                                <div v-else-if="line.startsWith('⏱')" class="term-line term-line--meta">{{ line }}</div>
-                                <div v-else-if="line.trim()" class="term-line term-line--out">{{ line }}</div>
-                              </template>
-                            </template>
-                          </template>
-                        </template>
-
-                        <!-- 兜底：未知的 sandbox 工具 -->
-                        <template v-else>
-                          <div class="term-line">
-                            <span class="term-prompt-sign">$</span>
-                            <span class="term-cmd-text">{{ item.tc.name }} {{ Object.keys(item.tc.input || {}).filter(k => k !== '_generating').join(' ') }}</span>
-                          </div>
-                          <pre v-if="item.tc.output" class="term-stream-output">{{ item.tc.output }}</pre>
                         </template>
                       </template>
 
@@ -1770,6 +1750,88 @@ function cancelEdit() { isEditing.value = false }
 @keyframes generating-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
+}
+
+/* ─── 流式输出限高 + 自动滚动 ─── */
+.term-stream-output {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+/* ─── 文件内容折叠 ─── */
+.term-file-header {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.term-fold-badge {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: #00AEEC;
+  background: rgba(0, 174, 236, 0.08);
+  padding: 1px 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(0, 174, 236, 0.2);
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+.term-fold-badge:hover {
+  background: rgba(0, 174, 236, 0.15);
+  border-color: rgba(0, 174, 236, 0.4);
+}
+.term-file-body {
+  position: relative;
+  transition: max-height 0.3s ease;
+}
+.term-file-body.collapsed {
+  max-height: 240px;
+  overflow: hidden;
+}
+.term-file-fade {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 60px;
+  background: linear-gradient(transparent, var(--cf-card, #fff));
+  cursor: pointer;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 6px;
+  font-size: 11px;
+  color: #00AEEC;
+}
+.term-file-fade::after { content: '点击展开完整内容'; }
+
+/* thinking 预览（模型构思中，tool_call_args 还没到达时显示） */
+.term-thinking-preview {
+  margin: 6px 0;
+  padding: 8px 10px;
+  background: rgba(0, 174, 236, 0.06);
+  border-left: 3px solid rgba(0, 174, 236, 0.3);
+  border-radius: 0 6px 6px 0;
+}
+.term-thinking-hint {
+  font-size: 11.5px;
+  color: #00AEEC;
+  font-weight: 500;
+  margin-bottom: 4px;
+  animation: generating-pulse 2s ease-in-out infinite;
+}
+.term-thinking-text {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--cf-text-4, #999);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 150px;
+  overflow-y: auto;
+  margin: 0;
+  background: none;
 }
 
 /* 闪烁光标 */

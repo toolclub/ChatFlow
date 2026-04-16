@@ -195,6 +195,10 @@ watch(() => props.selectedFile, (f) => {
 // 文件预览模式
 const fileViewMode = ref<'code' | 'preview'>('code')
 
+// iframe 渲染状态（srcdoc 大 HTML 加载需要时间）
+const iframeRendering = ref(false)
+function onIframeLoad() { iframeRendering.value = false }
+
 // 语法高亮后的 HTML
 const highlightedCode = computed(() => {
   if (!props.selectedFile) return ''
@@ -239,6 +243,7 @@ watch(() => props.selectedFile, (f) => {
     fileViewMode.value = 'preview'
   } else if (f && isPreviewable(f.language)) {
     fileViewMode.value = 'preview'
+    iframeRendering.value = true  // 标记 iframe 正在渲染
   } else {
     fileViewMode.value = 'code'
   }
@@ -511,7 +516,7 @@ function copyFileContent() {
           </svg>
           代码
         </button>
-        <button v-if="canPreview" class="file-action-btn" :class="{ active: fileViewMode === 'preview' }" @click="fileViewMode = 'preview'">
+        <button v-if="canPreview" class="file-action-btn" :class="{ active: fileViewMode === 'preview' }" @click="fileViewMode = 'preview'; iframeRendering = true">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
             <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
           </svg>
@@ -536,10 +541,35 @@ function copyFileContent() {
 
       <!-- 预览视图：普通文件（HTML/SVG） -->
       <div v-if="fileViewMode === 'preview' && canPreview && !isPptFile" class="file-preview-view">
+        <!-- iframe 渲染中：小电脑加载动画覆盖在上方 -->
+        <Transition name="fade">
+          <div v-if="iframeRendering" class="iframe-loading-overlay">
+            <div class="bili-loader">
+              <svg class="bili-pc-svg" width="80" height="64" viewBox="0 0 80 64">
+                <rect x="12" y="2" width="56" height="38" rx="4" fill="#E3F6FD" stroke="#00AEEC" stroke-width="2"/>
+                <circle cx="32" cy="18" r="3" fill="#00AEEC"><animate attributeName="r" values="3;2;3" dur="1.5s" repeatCount="indefinite"/></circle>
+                <circle cx="48" cy="18" r="3" fill="#00AEEC"><animate attributeName="r" values="3;2;3" dur="1.5s" begin="0.1s" repeatCount="indefinite"/></circle>
+                <path d="M35 27 Q40 32 45 27" fill="none" stroke="#00AEEC" stroke-width="1.5" stroke-linecap="round"/>
+                <rect x="28" y="40" width="24" height="4" rx="1" fill="#00AEEC"/>
+                <rect x="22" y="44" width="36" height="3" rx="1.5" fill="#00AEEC"/>
+                <g class="bili-leg-left">
+                  <line x1="32" y1="47" x2="28" y2="60" stroke="#00AEEC" stroke-width="2.5" stroke-linecap="round"/>
+                  <ellipse cx="26" cy="61" rx="5" ry="2.5" fill="#00AEEC"/>
+                </g>
+                <g class="bili-leg-right">
+                  <line x1="48" y1="47" x2="52" y2="60" stroke="#00AEEC" stroke-width="2.5" stroke-linecap="round"/>
+                  <ellipse cx="54" cy="61" rx="5" ry="2.5" fill="#00AEEC"/>
+                </g>
+              </svg>
+              <div class="bili-loader-text">页面渲染中<span class="bili-dot-anim"></span></div>
+            </div>
+          </div>
+        </Transition>
         <iframe
           :srcdoc="previewSrcdoc"
           class="file-preview-frame"
           sandbox="allow-scripts allow-forms allow-modals allow-popups"
+          @load="onIframeLoad"
         />
       </div>
 
@@ -1123,6 +1153,7 @@ function copyFileContent() {
   flex: 1;
   overflow: hidden;
   background: #fff;
+  position: relative;
 }
 .file-preview-frame {
   width: 100%;
@@ -1130,6 +1161,19 @@ function copyFileContent() {
   border: none;
   display: block;
 }
+/* iframe 渲染中加载遮罩 */
+.iframe-loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  background: var(--cf-card, #fff);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.fade-enter-active { transition: opacity 0.2s; }
+.fade-leave-active { transition: opacity 0.4s; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
 
 /* File loading view */
 .file-loading-view {

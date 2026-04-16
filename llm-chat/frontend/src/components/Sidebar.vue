@@ -26,22 +26,17 @@ const filteredConversations = computed(() =>
   )
 )
 
-// ── 删除确认（单个） ──
-const pendingDelete = ref<string | null>(null)
-let pendingTimer: number | null = null
-function confirmDelete(id: string) {
-  pendingDelete.value = id
-  if (pendingTimer) clearTimeout(pendingTimer)
-  pendingTimer = window.setTimeout(() => { pendingDelete.value = null }, 3000)
-}
-function doDelete(id: string) {
-  pendingDelete.value = null
-  // 添加退出动画
+// ── 单个删除（el-popconfirm 确认后触发） ──
+const singleDeleting = ref(false)
+async function doDelete(id: string) {
+  singleDeleting.value = true
   deletingIds.value.add(id)
-  setTimeout(() => {
-    emit('delete', id)
-    deletingIds.value.delete(id)
-  }, 300)
+  // 等退出动画完成再通知父组件删除数据
+  await new Promise(r => setTimeout(r, 300))
+  emit('delete', id)
+  // 不清 deletingIds——等 conversations prop 更新后 item 自然消失
+  // Vue 的 TransitionGroup leave 动画会接管
+  singleDeleting.value = false
 }
 
 // ── 批量选择模式 ──
@@ -87,17 +82,16 @@ async function doBatchDelete() {
   showBatchConfirm.value = false
   batchDeleting.value = true
   const ids = [...selectedIds.value]
-  // 逐个添加退出动画
-  ids.forEach((id, i) => {
-    setTimeout(() => deletingIds.value.add(id), i * 50)
-  })
-  // 等动画完成
-  await new Promise(r => setTimeout(r, ids.length * 50 + 350))
+  // 全部标记为 deleting（同时触发退出动画）
+  ids.forEach(id => deletingIds.value.add(id))
+  // 等退出动画完成
+  await new Promise(r => setTimeout(r, 350))
+  // 通知父组件删除数据（API 调用）
   emit('batchDelete', ids)
+  // 清理状态（conversations prop 更新后 item 自然消失）
   selectedIds.value = new Set()
   batchMode.value = false
   batchDeleting.value = false
-  deletingIds.value = new Set()
 }
 
 function cancelBatchConfirm() {
@@ -107,6 +101,16 @@ function cancelBatchConfirm() {
 // 退出批量模式时清空选择
 watch(batchMode, (v) => {
   if (!v) selectedIds.value = new Set()
+})
+
+// conversations 更新后清理残留的 deletingIds（API 返回，数据已删除）
+watch(() => props.conversations, () => {
+  if (deletingIds.value.size > 0) {
+    const existing = new Set(props.conversations.map(c => c.id))
+    for (const id of deletingIds.value) {
+      if (!existing.has(id)) deletingIds.value.delete(id)
+    }
+  }
 })
 
 // ── 退出动画跟踪 ──
@@ -189,7 +193,7 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
       <div v-if="batchMode" class="batch-bar">
         <el-checkbox
           :model-value="allSelected"
-          @change="toggleSelectAll"
+          @change="(_: any) => toggleSelectAll()"
           class="batch-checkbox"
         >全选</el-checkbox>
         <span class="batch-count">已选 {{ selectedIds.size }} 项</span>
