@@ -103,10 +103,9 @@ class StreamSession:
         self._tool_seq = 0
 
         # 思考段累积（spec「模型思考流程」协议）：
-        # segments 按 (node, step_index, phase) 唯一键累积；同 key delta 追加到同段，
-        # 不同 key 各自独立段，顺序 = SSE 到达顺序。
+        # 按接收顺序追加；同 key 且紧邻（栈顶）才合并，否则开新段。
+        # 这保证 retry、reasoning/content 交错等场景下时间顺序不丢失。
         self._thinking_segments: list[dict] = []
-        self._thinking_key_to_idx: dict[tuple, int] = {}
         self._thinking_dirty = False  # 累积后标记，_flush_to_db 检查是否需要写 DB
 
         # 工具调用 DB 持久化（支持多工具并行，按 seq 追踪每个工具的状态）
@@ -351,6 +350,25 @@ class StreamSession:
                 "sse_string": sse_str,
             })
 
+    def _append_thinking_delta(
+        self, node: str, step_index: int | None, phase: str, delta: str,
+    ) -> None:
+        """
+        将一个 thinking delta 追加到 segments 列表。
+        栈顶段 key 相同 → 拼接到同段；否则开新段。
+        保证时间顺序严格 = SSE 到达顺序，retry/交错不会错位合并。
+        """
+        top = self._thinking_segments[-1] if self._thinking_segments else None
+        if top and top["node"] == node and top["step_index"] == step_index and top["phase"] == phase:
+            top["content"] += delta
+        else:
+            self._thinking_segments.append({
+                "node": node, "step_index": step_index,
+                "phase": phase, "content": delta,
+            })
+        self._thinking_buf += delta  # 向后兼容：拼接纯文本
+        self._thinking_dirty = True
+
     async def _track_sse_for_db(self, sse_str: str) -> None:
         """
         从 SSE 字符串提取 thinking/content/tool 用于定期刷新到 DB。
@@ -367,7 +385,9 @@ class StreamSession:
         except (json.JSONDecodeError, ValueError):
             return
 
-        # thinking：结构化 payload（spec 协议），按 (node, step_index, phase) 累积成段
+        # thinking：结构化 payload（spec 协议），按接收顺序追加成段。
+        # 合并规则：仅当**栈顶段** key 与新 delta 相同时才拼接；否则开新段。
+        # 这样 retry、reasoning/content 交错都不会丢失时间顺序。
         thinking_payload = data.get("thinking")
         if isinstance(thinking_payload, dict):
             delta = thinking_payload.get("delta", "")
@@ -375,34 +395,10 @@ class StreamSession:
                 node = thinking_payload.get("node", "")
                 step_index = thinking_payload.get("step_index")
                 phase = thinking_payload.get("phase", "reasoning")
-                key = (node, step_index, phase)
-                idx = self._thinking_key_to_idx.get(key)
-                if idx is None:
-                    self._thinking_segments.append({
-                        "node": node,
-                        "step_index": step_index,
-                        "phase": phase,
-                        "content": delta,
-                    })
-                    self._thinking_key_to_idx[key] = len(self._thinking_segments) - 1
-                else:
-                    self._thinking_segments[idx]["content"] += delta
-                self._thinking_buf += delta  # 向后兼容：拼接纯文本
-                self._thinking_dirty = True
+                self._append_thinking_delta(node, step_index, phase, delta)
         elif isinstance(thinking_payload, str) and thinking_payload:
             # COMPAT: 裸字符串 thinking（legacy/异常路径），归入未知节点段
-            self._thinking_buf += thinking_payload
-            key = ("", None, "reasoning")
-            idx = self._thinking_key_to_idx.get(key)
-            if idx is None:
-                self._thinking_segments.append({
-                    "node": "", "step_index": None,
-                    "phase": "reasoning", "content": thinking_payload,
-                })
-                self._thinking_key_to_idx[key] = len(self._thinking_segments) - 1
-            else:
-                self._thinking_segments[idx]["content"] += thinking_payload
-            self._thinking_dirty = True
+            self._append_thinking_delta("", None, "reasoning", thinking_payload)
         if data.get("content"):
             self._content_buf += data["content"]
 

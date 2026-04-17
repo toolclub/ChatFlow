@@ -6,16 +6,15 @@ import * as api from '../api'
 /**
  * 应用一个 thinking SSE 事件到消息/步骤的结构化段列表（spec 协议）。
  *
- * 规则（纯字段判定，不解析任何字符串）：
+ * 合并规则（纯字段判定，不解析任何字符串）：
  *   1. step_index !== null 且 msg.steps[step_index] 存在 → 进入该 step 的 thinkingSegments
  *   2. 否则 → 进入 msg.thinkingSegments
- *   3. 目标列表中查找 key=(node,step_index,phase) 的最后一段：
- *      - 找到 → append delta 到 content
- *      - 未找到 → push 新段
- *   4. 同时维护纯文本 thinking 以向后兼容（只用于旧 UI 路径）
+ *   3. **只**比较目标列表的栈顶段：key=(node,step_index,phase) 相同才 append；
+ *      否则 push 新段。不回找历史段，保证时间顺序严格 = SSE 到达顺序。
+ *   4. 同时维护纯文本 thinking（COMPAT，旧 UI 路径才读）。
  */
 function applyThinkingEvent(msg: Message, ev: ThinkingEvent): void {
-  let targetList: ThinkingSegment[] | undefined
+  let targetList: ThinkingSegment[]
   const stepIdx = ev.step_index
   if (stepIdx !== null && msg.steps && stepIdx >= 0 && stepIdx < msg.steps.length) {
     const step = msg.steps[stepIdx]
@@ -28,17 +27,9 @@ function applyThinkingEvent(msg: Message, ev: ThinkingEvent): void {
     msg.thinking = (msg.thinking || '') + ev.delta
   }
 
-  // 在目标列表中找最后一段 key 匹配的段
-  let matchIdx = -1
-  for (let i = targetList.length - 1; i >= 0; i--) {
-    const s = targetList[i]
-    if (s.node === ev.node && s.step_index === ev.step_index && s.phase === ev.phase) {
-      matchIdx = i
-      break
-    }
-  }
-  if (matchIdx >= 0) {
-    targetList[matchIdx].content += ev.delta
+  const top = targetList[targetList.length - 1]
+  if (top && top.node === ev.node && top.step_index === ev.step_index && top.phase === ev.phase) {
+    top.content += ev.delta
   } else {
     targetList.push({
       node: ev.node,
