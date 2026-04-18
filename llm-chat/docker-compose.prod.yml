@@ -112,6 +112,10 @@ services:
       context: ./backend
       dockerfile: Dockerfile
       pull: false
+      # 离线/弱网环境可把 BACKEND_BASE_IMAGE 指向本地 tag（如 chatflow-base-python:local），
+      # 避免 BuildKit 去 docker.io 查 metadata。默认用公共名兼容有网环境。
+      args:
+        BASE_IMAGE: ${BACKEND_BASE_IMAGE:-python:3.12-slim}
     image: chatflow-backend:${APP_VERSION}-prod
     pull_policy: never
     container_name: chatflow-backend-prod
@@ -165,6 +169,9 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       pull: false
+      args:
+        NODE_IMAGE: ${FRONTEND_NODE_IMAGE:-node:20-alpine}
+        NGINX_IMAGE: ${FRONTEND_NGINX_IMAGE:-nginx:1.27-alpine}
     image: chatflow-frontend:${APP_VERSION}-prod
     pull_policy: never
     container_name: chatflow-frontend-prod

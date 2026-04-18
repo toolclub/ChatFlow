@@ -57,6 +57,36 @@ if [[ ! -f "$ENV_FILE" ]]; then
     exit 0
 fi
 
+# ── 保证 base 镜像本地化 ──────────────────────────────────────
+# Mac Mini 到 docker.io 网络不稳，BuildKit 查 metadata 会超时。
+# 策略：把公共镜像重 tag 成 chatflow-base-*:local，再让 Dockerfile 用这个名字
+# 构建。本地名在 registry 不存在 → BuildKit 查都不查 → 完全离线构建。
+ensure_local_base() {
+    local src="$1" dst="$2"
+    if docker image inspect "$dst" &>/dev/null; then
+        return 0
+    fi
+    if docker image inspect "$src" &>/dev/null; then
+        docker tag "$src" "$dst"
+        info "已打本地 tag: $src → $dst"
+    else
+        info "本地无 $src，首次拉取（仅此一次，网络失败可手动 docker pull 后重跑）..."
+        if ! docker pull "$src"; then
+            error "$src 拉取失败；请在有网环境 docker pull 后 docker save/load 过来"
+        fi
+        docker tag "$src" "$dst"
+    fi
+}
+
+info "准备本地 base 镜像..."
+ensure_local_base "python:3.12-slim"  "chatflow-base-python:local"
+ensure_local_base "node:20-alpine"    "chatflow-base-node:local"
+ensure_local_base "nginx:1.27-alpine" "chatflow-base-nginx:local"
+
+export BACKEND_BASE_IMAGE="chatflow-base-python:local"
+export FRONTEND_NODE_IMAGE="chatflow-base-node:local"
+export FRONTEND_NGINX_IMAGE="chatflow-base-nginx:local"
+
 # ── 创建数据目录 ─────────────────────────────────────────────
 info "创建数据持久化目录..."
 

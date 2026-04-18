@@ -28,9 +28,11 @@ logger = logging.getLogger("sandbox.manager")
 SANDBOX_ROOT = "/sandbox"
 _HEALTH_CHECK_INTERVAL = 30  # 秒
 
-# Gunicorn 多 worker 下，只让持有此文件锁的那一个进程跑后台循环
-# （健康检查 / 会话清理），避免 N 份循环重复日志 + 浪费 CPU。
-_BG_LOCK_PATH = Path(os.environ.get("LOG_DIR", "/var/log/chatflow")) / ".sandbox-bg.lock"
+# Gunicorn 多 worker 下，只让持有此文件锁的那一个进程跑后台清理循环，
+# 避免 N 份循环重复日志 + 浪费 CPU。
+# 放在容器本地 tmpfs：① flock 跨进程语义可靠（VirtioFS 上 flock 不可靠）
+# ② 容器重启自动清掉，不会留残留锁
+_BG_LOCK_PATH = Path("/tmp/chatflow-sandbox-bg.lock")
 _bg_lock_fd: int | None = None
 
 

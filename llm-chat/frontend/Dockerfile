@@ -1,5 +1,6 @@
 # ── Stage 1: Build ───────────────────────────────────────────────────────────
-FROM node:20-alpine AS builder
+ARG NODE_IMAGE=node:20-alpine
+FROM ${NODE_IMAGE} AS builder
 
 WORKDIR /app
 
@@ -12,7 +13,8 @@ COPY . .
 RUN npx vite build
 
 # ── Stage 2: Serve with Nginx ─────────────────────────────────────────────────
-FROM nginx:1.27-alpine
+ARG NGINX_IMAGE=nginx:1.27-alpine
+FROM ${NGINX_IMAGE}
 
 # 复制构建产物
 COPY --from=builder /app/dist /usr/share/nginx/html
