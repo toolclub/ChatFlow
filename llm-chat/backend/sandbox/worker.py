@@ -214,7 +214,11 @@ class SSHWorker:
         queue: asyncio.Queue = asyncio.Queue()
 
         try:
-            async with conn.create_process(cmd, stderr=asyncssh.PIPE) as proc:
+            # term_type="xterm" 分配 PTY：
+            #   ① channel 关闭时远端 SIGHUP 整个进程组，能干掉 pip 及其子进程
+            #   ② 行缓冲而非块缓冲，流式输出更实时
+            #   ③ 代价：stderr 合并到 stdout（终端场景可接受）
+            async with conn.create_process(cmd, stderr=asyncssh.PIPE, term_type="xterm") as proc:
 
                 async def _reader(stream, name: str) -> None:
                     """持续读取直到 EOF，每块数据放入队列。"""
@@ -228,19 +232,29 @@ class SSHWorker:
                         await queue.put(("stderr", f"[{name} error: {exc}]\n"))
 
                 async def _watchdog() -> None:
-                    """超时后 kill 进程。"""
+                    """超时后 kill 进程 + 强制 SENTINEL 兜底退出。"""
                     await asyncio.sleep(timeout)
-                    if not proc.is_closing():
+                    if proc.is_closing():
+                        return
+                    try:
                         proc.kill()
-                        await queue.put(("stderr", f"\n⚠️ 执行超时（{timeout}秒限制）\n"))
+                    except Exception:
+                        pass
+                    await queue.put(("stderr", f"\n⚠️ 执行超时（{timeout}秒限制）\n"))
+                    # 兜底：即使远端子进程没死、reader 不 EOF，也要让主循环退出，
+                    # 否则 generator 永远不返回 → tool 不返回 → LLM 卡死"推理中"
+                    stdout_task.cancel()
+                    stderr_task.cancel()
+                    await queue.put(_SENTINEL)
 
                 stdout_task = asyncio.create_task(_reader(proc.stdout, "stdout"))
                 stderr_task = asyncio.create_task(_reader(proc.stderr, "stderr"))
                 watchdog_task = asyncio.create_task(_watchdog())
 
                 # 等 reader 们结束后放 sentinel（在后台执行）
+                # return_exceptions=True：watchdog 可能 cancel 掉 reader，不让 gather 抛出
                 async def _wait_readers():
-                    await asyncio.gather(stdout_task, stderr_task)
+                    await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
                     await queue.put(_SENTINEL)
                 waiter_task = asyncio.create_task(_wait_readers())
 

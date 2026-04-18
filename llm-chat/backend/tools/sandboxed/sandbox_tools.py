@@ -115,6 +115,30 @@ _SERVICE_PATTERNS = [
 ]
 _SERVICE_RE = re.compile("|".join(f"({p})" for p in _SERVICE_PATTERNS), re.IGNORECASE)
 
+# ── 安装/构建类命令：会结束但耗时长，需要放宽超时 ──────────────────────────────
+_INSTALL_PATTERNS = [
+    r"\bpip[23]?\s+(install|download|wheel)\b",
+    r"\bpoetry\s+(install|add|update|lock)\b",
+    r"\buv\s+(pip\s+install|sync|add)\b",
+    r"\bconda\s+(install|update|create)\b",
+    r"\bnpm\s+(install|ci|i)\b",
+    r"\byarn\s+(install|add|upgrade)\b",
+    r"\bpnpm\s+(install|add|i)\b",
+    r"\bapt(-get)?\s+(install|update|upgrade)\b",
+    r"\bapk\s+add\b",
+    r"\bbrew\s+(install|upgrade)\b",
+    r"\bgem\s+install\b",
+    r"\bcargo\s+(install|build|update)\b",
+    r"\bgo\s+(install|get|mod\s+download|build)\b",
+    r"\bmvn\s+(install|package|compile)\b",
+    r"\bgradle\s+(build|assemble)\b",
+    r"\b\./gradlew\s+(build|assemble)\b",
+    r"\bdotnet\s+(restore|build|publish)\b",
+    r"\bcomposer\s+(install|require|update)\b",
+]
+_INSTALL_RE = re.compile("|".join(f"({p})" for p in _INSTALL_PATTERNS), re.IGNORECASE)
+_INSTALL_TIMEOUT = 300  # 5 分钟，够装常见全家桶
+
 # ── 端口提取模式 ────────────────────────────────────────────────────────────
 _PORT_PATTERNS = [
     r"(?:--port|:|-p|--bind\s+\S+:)\s*(\d{2,5})",
@@ -136,6 +160,11 @@ _PORT_RE = re.compile("|".join(_PORT_PATTERNS), re.IGNORECASE)
 def _is_service_command(cmd: str) -> bool:
     """检测命令是否为长驻服务类命令。"""
     return bool(_SERVICE_RE.search(cmd))
+
+
+def _is_install_command(cmd: str) -> bool:
+    """检测命令是否为包安装/构建类（允许超时放宽到 _INSTALL_TIMEOUT）。"""
+    return bool(_INSTALL_RE.search(cmd))
 
 
 def _extract_port(cmd: str) -> int | None:
@@ -197,9 +226,15 @@ async def execute_code(language: str, code: str) -> str:
     logger.info("execute_code | conv=%s | lang=%s | code_len=%d", conv_id, language, len(code))
 
     # shell 脚本中包含服务命令时，转给 run_shell 的服务模式处理（防止超时阻塞）
-    if language.lower().strip() in ("shell", "bash", "sh") and _is_service_command(code):
+    is_shell = language.lower().strip() in ("shell", "bash", "sh")
+    if is_shell and _is_service_command(code):
         logger.info("execute_code → 检测到服务命令，转入后台模式 | conv=%s", conv_id)
         return await _run_service_command(conv_id, code, sandbox_manager, adispatch_custom_event)
+
+    # 安装/构建类命令放宽超时
+    timeout = _INSTALL_TIMEOUT if is_shell and _is_install_command(code) else None
+    if timeout:
+        logger.info("execute_code → 检测到安装命令，超时放宽到 %ds | conv=%s", timeout, conv_id)
 
     result = await sandbox_manager.execute_code_streaming(
         conv_id, language, code,
@@ -207,6 +242,7 @@ async def execute_code(language: str, code: str) -> str:
             "sandbox_output",
             {"stream": stream, "text": text, "tool_name": "execute_code"},
         ),
+        timeout=timeout,
     )
     return result.to_display()
 
@@ -240,6 +276,11 @@ async def run_shell(command: str) -> str:
     if _is_service_command(command):
         return await _run_service_command(conv_id, command, sandbox_manager, adispatch_custom_event)
 
+    # ── 安装/构建类命令：放宽超时（pip install、npm install、mvn package 等）──
+    timeout = _INSTALL_TIMEOUT if _is_install_command(command) else None
+    if timeout:
+        logger.info("run_shell → 检测到安装命令，超时放宽到 %ds | conv=%s", timeout, conv_id)
+
     # ── 普通命令：正常流式执行 ──
     result = await sandbox_manager.run_shell_streaming(
         conv_id, command,
@@ -247,6 +288,7 @@ async def run_shell(command: str) -> str:
             "sandbox_output",
             {"stream": stream, "text": text, "tool_name": "run_shell"},
         ),
+        timeout=timeout,
     )
     return result.to_display()
 

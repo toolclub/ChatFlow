@@ -61,7 +61,7 @@ class SandboxManager:
         self._healthy: set[str] = set()
         # conv_id → (worker_id, session_dir)
         self._sessions: dict[str, tuple[str, str]] = {}
-        self._timeout: int = 30
+        self._timeout: int = 120  # 与 config.py 默认值一致；init() 传入值会覆盖
         self._cleanup_hours: int = 12
         self._cleanup_task: asyncio.Task | None = None
         self._health_task: asyncio.Task | None = None
