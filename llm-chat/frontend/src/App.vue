@@ -2,7 +2,6 @@
 import { onMounted, computed, ref, watch } from 'vue'
 import { useChat } from './composables/useChat'
 import type { FileArtifact } from './types'
-import { isDownloadOnly } from './types'
 import Sidebar from './components/Sidebar.vue'
 import ChatView from './components/ChatView.vue'
 import CognitivePanel from './components/CognitivePanel.vue'
@@ -67,24 +66,16 @@ const selectedFile = ref<FileArtifact | null>(null)
 const fileLoading = ref(false)
 
 async function onSelectFile(file: FileArtifact) {
-  // 二进制打包/归档文件（jar/tar/zip...）不支持预览，直接触发下载
-  // 避免把大 base64（可能 >50MB）载进面板后 hljs.highlight 卡死浏览器
-  if (isDownloadOnly(file)) {
-    if (file.id) {
-      const a = document.createElement('a')
-      a.href = `/api/artifacts/${file.id}/download`
-      a.download = file.name
-      a.click()
-    }
-    return
-  }
-
   // 立即打开面板 + 显示 loading 占位（先让用户看到反馈）
   selectedFile.value = file
   panelOpen.value = true
   if (file.language === 'pptx') {
     panelWidth.value = Math.max(panelWidth.value, 520)
   }
+
+  // 二进制打包/归档文件（jar/tar/zip...）面板里只展示下载入口，
+  // 不拉取 base64 内容（可能 >50MB，会把浏览器卡死）
+  if (file.language === 'archive') return
 
   // 如果是元数据模式（无 content），按需从后端加载完整内容
   const needsLoad = !file.content || (file.language === 'pptx' && !file.slides_html?.length)

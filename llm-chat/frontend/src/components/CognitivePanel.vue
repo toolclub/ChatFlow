@@ -229,6 +229,7 @@ const canPreview = computed(() => {
 })
 
 const isPptFile = computed(() => props.selectedFile?.language === 'pptx')
+const isArchiveFile = computed(() => props.selectedFile?.language === 'archive')
 
 // PPT 幻灯片翻页
 const pptSlideIndex = ref(0)
@@ -241,6 +242,9 @@ watch(() => props.selectedFile, (f) => {
   // PPT 文件始终默认预览模式（不该显示 base64 代码）
   if (f && f.language === 'pptx') {
     fileViewMode.value = 'preview'
+  } else if (f && f.language === 'archive') {
+    // 归档文件不渲染 code/preview，只展示下载入口
+    fileViewMode.value = 'code'
   } else if (f && isPreviewable(f.language)) {
     fileViewMode.value = 'preview'
     iframeRendering.value = true  // 标记 iframe 正在渲染
@@ -255,11 +259,19 @@ function pptNext() { if (pptSlideIndex.value < pptSlideCount.value - 1) pptSlide
 const fileSizeKb = computed(() => {
   if (!props.selectedFile) return '0'
   if (props.selectedFile.size) return (props.selectedFile.size / 1024).toFixed(1)
-  return (props.selectedFile.content.length / 1024).toFixed(1)
+  return ((props.selectedFile.content?.length ?? 0) / 1024).toFixed(1)
 })
 
 function downloadFile() {
   if (!props.selectedFile) return
+  // 归档文件：内容未加载到内存（避免 50MB+ base64 卡死浏览器），走后端直链下载
+  if (props.selectedFile.language === 'archive' && props.selectedFile.id) {
+    const a = document.createElement('a')
+    a.href = `/api/artifacts/${props.selectedFile.id}/download`
+    a.download = props.selectedFile.name
+    a.click()
+    return
+  }
   const isBinary = props.selectedFile.binary || ['pptx', 'pdf'].includes(props.selectedFile.language)
   if (isBinary) {
     // base64 → 二进制 → Blob → 下载
@@ -508,8 +520,8 @@ function copyFileContent() {
         </div>
       </div>
 
-      <!-- 操作按钮栏（PPT 时只显示预览，非 PPT 显示代码/预览/复制） -->
-      <div v-if="!isPptFile" class="file-actions-bar">
+      <!-- 操作按钮栏（PPT/归档不显示，归档只展示下载入口） -->
+      <div v-if="!isPptFile && !isArchiveFile" class="file-actions-bar">
         <button class="file-action-btn" :class="{ active: fileViewMode === 'code' }" @click="fileViewMode = 'code'">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
             <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
@@ -534,13 +546,13 @@ function copyFileContent() {
         </button>
       </div>
 
-      <!-- 代码视图（PPT 不显示代码，base64 没有意义） -->
-      <div v-if="fileViewMode === 'code' && !isPptFile" class="file-code-view">
+      <!-- 代码视图（PPT/归档不显示代码，base64 没有意义） -->
+      <div v-if="fileViewMode === 'code' && !isPptFile && !isArchiveFile" class="file-code-view">
         <pre class="file-code-pre"><code class="hljs" v-html="highlightedCode"></code></pre>
       </div>
 
       <!-- 预览视图：普通文件（HTML/SVG） -->
-      <div v-if="fileViewMode === 'preview' && canPreview && !isPptFile" class="file-preview-view">
+      <div v-if="fileViewMode === 'preview' && canPreview && !isPptFile && !isArchiveFile" class="file-preview-view">
         <!-- iframe 渲染中：小电脑加载动画覆盖在上方 -->
         <Transition name="fade">
           <div v-if="iframeRendering" class="iframe-loading-overlay">
@@ -602,6 +614,19 @@ function copyFileContent() {
           </svg>
           <div class="bili-loader-text">正在加载中<span class="bili-dot-anim"></span></div>
         </div>
+      </div>
+
+      <!-- 归档/二进制包视图：内容是 base64，不预览，仅提供下载 -->
+      <div v-if="isArchiveFile" class="ppt-empty-view">
+        <div class="ppt-empty-icon">📦</div>
+        <div class="ppt-empty-text">归档文件不支持预览</div>
+        <div class="ppt-empty-sub">{{ selectedFile?.name }} · {{ fileSizeKb }} KB</div>
+        <button class="ppt-empty-download" @click="downloadFile">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          下载文件
+        </button>
       </div>
 
       <!-- PPT 视图（不依赖 fileViewMode，PPT 始终进入此分支） -->

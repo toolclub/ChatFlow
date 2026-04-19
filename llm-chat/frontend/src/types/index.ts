@@ -195,13 +195,6 @@ export function detectLanguage(path: string): string {
   return map[ext] || 'text'
 }
 
-/** 仅下载、不走侧栏预览的文件（二进制打包/归档/用户上传） */
-export function isDownloadOnly(file: { language: string; binary?: boolean }): boolean {
-  if (file.language === 'archive') return true
-  // PPTX 和 PDF 仍走预览面板（有专门的幻灯片/iframe 展示）
-  return false
-}
-
 /** 该语言是否可在 iframe 中预览 */
 export function isPreviewable(lang: string): boolean {
   return ['html', 'svg'].includes(lang)

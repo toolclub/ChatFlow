@@ -128,11 +128,11 @@ function downloadFile(e?: Event) {
     <!-- 操作按钮 -->
     <el-button
       text
-      :icon="isArchive ? Download : (isPpt ? View : undefined)"
+      :icon="isPpt ? View : undefined"
       class="action-btn"
-      @click.stop="isArchive ? downloadFile($event) : emit('select', file)"
+      @click.stop="emit('select', file)"
     >
-      <svg v-if="!isArchive && !isPpt" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+      <svg v-if="!isPpt" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
         <path d="M9 18l6-6-6-6"/>
       </svg>
     </el-button>
