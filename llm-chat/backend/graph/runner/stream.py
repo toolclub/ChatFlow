@@ -59,6 +59,7 @@ class StreamSession:
         agent_mode: bool = True,
         force_plan: list[dict] | None = None,
         stop_event: asyncio.Event | None = None,
+        file_ids: list[int] | None = None,
     ):
         self.conv_id = conv_id
         self.user_message = user_message
@@ -69,9 +70,12 @@ class StreamSession:
         self.agent_mode = agent_mode
         self.force_plan = force_plan or []
         self.stop_event = stop_event
+        self.file_ids = file_ids or []
 
         # 业务 ID
         self.assistant_message_id = str(uuid.uuid4())[:8]
+        # user 消息业务 ID（用于 artifacts 绑定，必须先生成再写 DB）
+        self.user_message_id = str(uuid.uuid4())[:8]
 
         # DB 行 ID（写入后填充）
         self.user_db_id: int = 0
@@ -145,8 +149,22 @@ class StreamSession:
         try:
             self.user_db_id = await memory_store.create_message_immediate(
                 self.conv_id, "user", self.user_message,
+                message_id=self.user_message_id,
                 images=self.images,
             )
+            # 把上传的 artifacts 绑定到该 user 消息（只更新 source='uploaded' + message_id=''）
+            if self.file_ids:
+                try:
+                    from db.artifact_store import bind_artifacts_to_message
+                    bound = await bind_artifacts_to_message(
+                        self.file_ids, self.conv_id, self.user_message_id,
+                    )
+                    logger.info(
+                        "artifacts 绑定 | conv=%s | user_msg=%s | ids=%s | bound=%d",
+                        self.conv_id, self.user_message_id, self.file_ids, bound,
+                    )
+                except Exception as exc:
+                    logger.warning("artifacts 绑定失败: %s", exc)
             self.assistant_db_id = await memory_store.create_message_immediate(
                 self.conv_id, "assistant", "",
                 message_id=self.assistant_message_id,
@@ -686,6 +704,8 @@ class StreamSession:
             "pre_user_db_id": self.user_db_id,
             "pre_assistant_db_id": self.assistant_db_id,
             "assistant_message_id": self.assistant_message_id,
+            "user_message_id": self.user_message_id,
+            "file_ids": self.file_ids,
             "force_plan": self.force_plan, "plan": [], "plan_id": "",
             "plan_goal": "", "current_step_index": 0,
             "step_iterations": 0, "reflector_decision": "",
@@ -702,11 +722,13 @@ async def stream_response(
     temperature: float = 0.7, client_id: str = "", images: list[str] | None = None,
     agent_mode: bool = True, force_plan: list[dict] | None = None,
     stop_event: asyncio.Event | None = None,
+    file_ids: list[int] | None = None,
 ) -> AsyncGenerator[str, None]:
     session = StreamSession(
         conv_id=conv_id, user_message=user_message, model=model,
         temperature=temperature, client_id=client_id, images=images,
         agent_mode=agent_mode, force_plan=force_plan, stop_event=stop_event,
+        file_ids=file_ids,
     )
     async for chunk in session.stream():
         yield chunk

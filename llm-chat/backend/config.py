@@ -110,6 +110,10 @@ class Settings(BaseSettings):
     sandbox_timeout: int = 120       # 单次执行超时（秒），mvn/gradle 构建需要 60~120s
     sandbox_cleanup_hours: int = 12  # session 目录过期清理（小时）
 
+    # ── 文件上传 ─────────────────────────────────────────────────────────────
+    upload_max_file_size: int = 50 * 1024 * 1024   # 单文件 50MB
+    upload_max_files_per_message: int = 10         # 单条消息最多带几个文件
+
     # ── 服务端口 ──────────────────────────────────────────────────────────────
     backend_host: str
     backend_port: int
@@ -201,6 +205,9 @@ SANDBOX_ENABLED           = settings.sandbox_enabled
 SANDBOX_WORKERS           = settings.sandbox_workers
 SANDBOX_TIMEOUT           = settings.sandbox_timeout
 SANDBOX_CLEANUP_HOURS     = settings.sandbox_cleanup_hours
+
+UPLOAD_MAX_FILE_SIZE          = settings.upload_max_file_size
+UPLOAD_MAX_FILES_PER_MESSAGE  = settings.upload_max_files_per_message
 
 BACKEND_HOST              = settings.backend_host
 BACKEND_PORT              = settings.backend_port

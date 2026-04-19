@@ -1,19 +1,36 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import type { SendPayload } from '../types'
+import type { SendPayload, UploadedFile } from '../types'
 import { Picture, Promotion, Loading } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
+import { uploadFile as apiUploadFile } from '../api'
 
 const props = defineProps<{
   loading: boolean
   centered?: boolean
+  currentConvId?: string | null
 }>()
 
-const emit = defineEmits<{ send: [payload: SendPayload] }>()
+const emit = defineEmits<{
+  send: [payload: SendPayload]
+  ensureConv: []   // 请求父组件先创建对话（上传需要 conv_id）
+}>()
 
 const input = ref('')
 const pendingImages = ref<string[]>([])
+// 文件附件（非图片）—— 调用 /api/files/upload 后得到的元数据
+// 状态：uploading → ready（上传完成，有 id）→ 发送时带 file_ids
+interface PendingFile extends UploadedFile {
+  uploading?: boolean
+  error?: string
+  _localId: string
+}
+const pendingFiles = ref<PendingFile[]>([])
 const fileInputRef = ref<HTMLInputElement>()
+const attachInputRef = ref<HTMLInputElement>()
 const textareaRef = ref<HTMLTextAreaElement>()
+const MAX_FILES_PER_MSG = 10
+const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024  // 与后端 UPLOAD_MAX_FILE_SIZE 对齐
 
 // ── Agent 模式开关 ──
 const AGENT_MODE_KEY = 'cf_agent_mode'
@@ -524,7 +541,12 @@ function togglePptPanel() {
   pptPanelOpen.value = !pptPanelOpen.value
 }
 
-const canSend = () => (input.value.trim() || pendingImages.value.length > 0) && !props.loading
+const hasAttachments = () =>
+  pendingImages.value.length > 0 ||
+  pendingFiles.value.some(f => !f.uploading && !f.error)
+const hasUploading = () => pendingFiles.value.some(f => f.uploading)
+const canSend = () =>
+  (input.value.trim() || hasAttachments()) && !props.loading && !hasUploading()
 
 function handleSend() {
   if (!canSend()) return
@@ -532,9 +554,22 @@ function handleSend() {
   if (selectedPptTheme.value) {
     text = `[PPT模式 | 主题: ${selectedPptTheme.value.id} (${selectedPptTheme.value.label})]\n${text}\n请使用 create_ppt 工具，参考附带的主题风格图片生成 PPT。`
   }
-  emit('send', { text, images: [...pendingImages.value], agentMode: agentMode.value })
+  // 只发送"已上传成功"的文件（有 id，且未标记 error/uploading）
+  const readyFiles: UploadedFile[] = pendingFiles.value
+    .filter(f => !f.uploading && !f.error && f.id)
+    .map(f => ({
+      id: f.id, name: f.name, size: f.size,
+      path: f.path, language: f.language, mime: f.mime,
+    }))
+  emit('send', {
+    text,
+    images: [...pendingImages.value],
+    agentMode: agentMode.value,
+    files: readyFiles,
+  })
   input.value = ''
   pendingImages.value = []
+  pendingFiles.value = []
   selectedPptTheme.value = null
   if (textareaRef.value) textareaRef.value.style.height = 'auto'
 }
@@ -580,28 +615,91 @@ async function addImageFile(file: File) {
   reader.readAsDataURL(file)
 }
 
+/** 非图片文件：调用 /api/files/upload 上传到沙箱 + artifacts。 */
+async function addAttachmentFile(file: File) {
+  // 前端尺寸校验（后端也会再校验一次）
+  if (file.size > MAX_FILE_SIZE_BYTES) {
+    ElMessage.warning(`文件过大（>${MAX_FILE_SIZE_BYTES / 1024 / 1024}MB）：${file.name}`)
+    return
+  }
+  if (pendingFiles.value.length >= MAX_FILES_PER_MSG) {
+    ElMessage.warning(`单次最多附 ${MAX_FILES_PER_MSG} 个文件`)
+    return
+  }
+  // 需要当前对话 ID 才能上传；若没有，请求父组件创建，并轮询等待 prop 更新
+  if (!props.currentConvId) {
+    emit('ensureConv')
+    const deadline = Date.now() + 8000
+    while (!props.currentConvId && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+  }
+  const convId = props.currentConvId
+  if (!convId) {
+    ElMessage.error('无法上传：对话未就绪，请稍候重试')
+    return
+  }
+  const _localId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const entry: PendingFile = {
+    _localId, id: 0, name: file.name, size: file.size, uploading: true,
+  }
+  pendingFiles.value.push(entry)
+  try {
+    const meta = await apiUploadFile(convId, file)
+    const idx = pendingFiles.value.findIndex(f => f._localId === _localId)
+    if (idx >= 0) {
+      pendingFiles.value[idx] = { ...entry, ...meta, uploading: false, error: undefined }
+    }
+  } catch (exc: any) {
+    const idx = pendingFiles.value.findIndex(f => f._localId === _localId)
+    if (idx >= 0) {
+      pendingFiles.value[idx] = { ...entry, uploading: false, error: exc?.message || '上传失败' }
+    }
+    ElMessage.error(`上传失败：${file.name} — ${exc?.message || ''}`)
+  }
+}
+
+function routeIncomingFile(file: File) {
+  if (file.type.startsWith('image/')) addImageFile(file)
+  else addAttachmentFile(file)
+}
+
 function handlePaste(e: ClipboardEvent) {
   for (const item of Array.from(e.clipboardData?.items || [])) {
-    if (item.type.startsWith('image/')) { e.preventDefault(); const f = item.getAsFile(); if (f) addImageFile(f) }
+    if (item.kind !== 'file') continue
+    const f = item.getAsFile()
+    if (!f) continue
+    e.preventDefault()
+    routeIncomingFile(f)
   }
 }
 function handleFileSelect(e: Event) {
-  for (const f of Array.from((e.target as HTMLInputElement).files || [])) addImageFile(f)
-  if (fileInputRef.value) fileInputRef.value.value = ''
+  const target = e.target as HTMLInputElement
+  for (const f of Array.from(target.files || [])) routeIncomingFile(f)
+  target.value = ''
 }
 function handleDrop(e: DragEvent) {
   e.preventDefault()
-  for (const f of Array.from(e.dataTransfer?.files || [])) addImageFile(f)
+  for (const f of Array.from(e.dataTransfer?.files || [])) routeIncomingFile(f)
 }
 function removeImage(i: number) { pendingImages.value.splice(i, 1) }
+function removePendingFile(localId: string) {
+  const idx = pendingFiles.value.findIndex(f => f._localId === localId)
+  if (idx >= 0) pendingFiles.value.splice(idx, 1)
+}
+function fmtFileSize(n: number): string {
+  if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + 'MB'
+  if (n >= 1024) return (n / 1024).toFixed(1) + 'KB'
+  return n + 'B'
+}
 </script>
 
 <template>
   <div class="input-root" :class="{ centered }" @dragover.prevent @drop="handleDrop">
     <div class="input-card" :class="{ 'is-loading': loading }">
 
-      <!-- 已选主题标签 + 图片预览 -->
-      <div v-if="selectedPptTheme || pendingImages.length > 0" class="attachments-bar">
+      <!-- 已选主题标签 + 图片预览 + 附件文件 -->
+      <div v-if="selectedPptTheme || pendingImages.length > 0 || pendingFiles.length > 0" class="attachments-bar">
         <!-- PPT 主题标签 -->
         <div v-if="selectedPptTheme" class="ppt-tag">
           <span class="ppt-tag-label">📊 {{ selectedPptTheme.label }}</span>
@@ -613,6 +711,24 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
         <div v-for="(img, i) in pendingImages" :key="i" class="img-thumb">
           <img :src="img" alt="图片" />
           <button class="img-remove" @click="removeImage(i)" title="移除">
+            <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <!-- 文件附件（非图片）-->
+        <div
+          v-for="f in pendingFiles" :key="f._localId"
+          class="file-chip"
+          :class="{ 'file-chip--uploading': f.uploading, 'file-chip--error': !!f.error }"
+          :title="f.error ? f.error : (f.path || f.name)"
+        >
+          <el-icon v-if="f.uploading" class="file-chip-ico spin"><Loading /></el-icon>
+          <svg v-else class="file-chip-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+          </svg>
+          <span class="file-chip-name">{{ f.name }}</span>
+          <span class="file-chip-size">{{ fmtFileSize(f.size) }}</span>
+          <button class="file-chip-close" @click="removePendingFile(f._localId)" title="移除">
             <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
           </button>
         </div>
@@ -630,9 +746,17 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
       <div class="toolbar">
         <div class="tl">
           <input ref="fileInputRef" type="file" accept="image/*" multiple style="display:none" @change="handleFileSelect" />
+          <input ref="attachInputRef" type="file" multiple style="display:none" @change="handleFileSelect" />
           <el-tooltip content="上传图片 / 粘贴截图 (Ctrl+V)" placement="top" :show-after="400">
             <button class="tool-btn" @click="fileInputRef?.click()" :disabled="loading">
               <el-icon><Picture /></el-icon>
+            </button>
+          </el-tooltip>
+          <el-tooltip content="上传文件（代码 / 文档 / 压缩包等）" placement="top" :show-after="400">
+            <button class="tool-btn" @click="attachInputRef?.click()" :disabled="loading">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.49"/>
+              </svg>
             </button>
           </el-tooltip>
 
@@ -762,6 +886,34 @@ function removeImage(i: number) { pendingImages.value.splice(i, 1) }
   display: flex; align-items: center; justify-content: center; padding: 0;
 }
 .img-remove:hover { background: rgba(242,93,89,0.9); }
+
+/* 文件附件 chip */
+.file-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 32px; padding: 0 8px 0 10px;
+  background: #F4F5F7; border: 1.5px solid var(--cf-border, #DFE3E8);
+  border-radius: 10px; font-size: 12px; color: var(--cf-text-2, #61666D);
+  max-width: 240px;
+  transition: all 0.15s;
+}
+.file-chip:hover { background: #EBECEF; }
+.file-chip-ico { color: #00AEEC; flex-shrink: 0; }
+.file-chip-name {
+  max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-weight: 500; color: var(--cf-text-1, #18191C);
+}
+.file-chip-size { color: var(--cf-text-4, #9499A0); font-variant-numeric: tabular-nums; }
+.file-chip-close {
+  width: 16px; height: 16px; border-radius: 50%; border: none; background: transparent;
+  color: var(--cf-text-3, #9499A0); cursor: pointer;
+  display: flex; align-items: center; justify-content: center; padding: 0;
+  transition: all 0.1s;
+}
+.file-chip-close:hover { background: rgba(0,0,0,0.08); color: #F25D59; }
+.file-chip--uploading { opacity: 0.7; border-style: dashed; }
+.file-chip--uploading .file-chip-ico { color: #FB7299; }
+.file-chip--error { border-color: #F25D59; background: #FFF4F3; color: #F25D59; }
+.file-chip--error .file-chip-ico { color: #F25D59; }
 
 .textarea-area { padding: 14px 18px 6px; }
 .the-textarea {

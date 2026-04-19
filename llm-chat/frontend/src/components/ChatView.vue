@@ -15,6 +15,7 @@ const props = defineProps<{
   panelOpen?: boolean
   convTitle?: string
   canContinue?: boolean
+  currentConvId?: string | null
 }>()
 
 const emit = defineEmits<{
@@ -27,6 +28,7 @@ const emit = defineEmits<{
   regenerate: []
   editMessage: [payload: { index: number; content: string }]
   selectFile: [file: FileArtifact]
+  ensureConv: []
 }>()
 
 const messagesContainer = ref<HTMLDivElement>()
@@ -242,7 +244,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
         </template>
       </el-empty>
 
-      <InputBox :loading="loading" :centered="true" @send="emit('send', $event)" />
+      <InputBox :loading="loading" :centered="true" :currentConvId="currentConvId" @send="emit('send', $event)" @ensureConv="emit('ensureConv')" />
 
       <div class="suggestions">
         <el-button
@@ -306,7 +308,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
       </div>
 
       <div class="bottom-input">
-        <InputBox :loading="loading" @send="emit('send', $event)" />
+        <InputBox :loading="loading" :currentConvId="currentConvId" @send="emit('send', $event)" @ensureConv="emit('ensureConv')" />
       </div>
     </div>
 

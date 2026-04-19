@@ -122,7 +122,7 @@ pytest tests/ -m smoke         # 冒烟拨测（端到端）
 
 | 用例 | 操作 | 期望 | 标记 |
 |------|------|------|------|
-| 保存新产物 | `save_artifact(conv_id, "test.py", ...)` | 返回 dict 含 id > 0 | integration |
+| 保存新产物 | `save_artifact(conv_id, "test.py", ...)` | 返回 dict 含 id > 0，source="generated" | integration |
 | 同路径覆盖 | 两次 save 同 path | 第二次更新不新增 | integration |
 | detect_language | `detect_language("main.py")` | "python" | unit |
 | detect_language 无后缀 | `detect_language("Makefile")` | "text" | unit |
@@ -130,6 +130,10 @@ pytest tests/ -m smoke         # 冒烟拨测（端到端）
 | get_artifact_content PPT 解包 | 存入 PPT JSON | 返回含 slides_html | integration |
 | get_artifact_content archive 解包 | 存入 archive JSON | 返回含 binary_b64，无 slides_html | integration |
 | save_artifact 返回正确 id | INSERT 新记录 | id > 0（flush 后获取） | integration |
+| save_artifact source=uploaded | `save_artifact(..., source="uploaded")` | DB 行 source="uploaded" | integration |
+| meta_list 包含 source | `get_artifact_meta_list(conv_id)` | 返回 dict 含 source 字段 | integration |
+| bind_artifacts_to_message | `bind_artifacts_to_message([id1,id2], conv_id, msg_id)` | 仅匹配 conv_id 且 source='uploaded' 的行被 UPDATE | integration |
+| bind 跨 conv 拒绝 | bind 其他 conv 的 artifact id | 不影响其他 conv 的行 | integration |
 
 ### T-DB-03: redis_state
 
@@ -323,6 +327,52 @@ pytest tests/ -m smoke         # 冒烟拨测（端到端）
 | 绝对路径 | "/etc/passwd" | 前导 / 被去除 | unit |
 | 超大文件 | 60MB 文件 | 返回"超过 50MB 限制" | integration |
 
+### T-SANDBOX-04: write_binary (SFTP)
+
+| 用例 | 操作 | 期望 | 标记 |
+|------|------|------|------|
+| 写小二进制 | `worker.write_binary(path, b"\\x00\\x01\\xff")` | 远端文件字节完全相同 | integration |
+| 写大二进制 (10MB) | 随机 10MB | stat 大小匹配，md5 一致 | integration |
+| 父目录不存在自动创建 | path=`/tmp/a/b/c.bin` | 自动 mkdir -p，写入成功 | integration |
+| upload_binary 去重 | 同 conv 同名上传两次 | 第二次自动后缀 `(1)` | integration |
+| upload_binary 路径越权 | filename=`../etc/passwd` | basename 提取，不逃出 uploads/ | unit |
+| upload_binary 超限 | 60MB 文件 | 抛 ValueError "超过…限制" | unit |
+
+---
+
+## 六-B、文件上传 (routers/files_router.py)
+
+### T-UPLOAD-01: 用户文件上传端点
+
+| 用例 | 操作 | 期望 | 标记 |
+|------|------|------|------|
+| 正常上传 | `POST /api/files/upload` form: conv_id + file | 200，返回 `{id,name,path,size,language,source:"uploaded"}` | integration |
+| conv 不存在 | conv_id 未在 DB | 404 | integration |
+| 文件过大 | 60MB | 413 (Request Entity Too Large) | integration |
+| 空文件名 | filename="" | 400 | unit |
+| 中文文件名 | "测试报告.pdf" | 写入沙箱成功，DB name 是 UTF-8 | integration |
+| 同名上传 | 同 conv 同名两次 | 第二次返回 path 含 `(1)` | integration |
+| 沙箱不可用 | 所有 worker 不健康 | 503 | integration |
+| message_id 初始为空 | 上传后查 DB | message_id="", source="uploaded" | integration |
+
+### T-UPLOAD-02: ChatRequest.file_ids 绑定与注入
+
+| 用例 | 操作 | 期望 | 标记 |
+|------|------|------|------|
+| 发送带 file_ids | 上传两个文件 → POST chat with `file_ids=[id1,id2]` | 用户消息持久化后，两 artifact.message_id=user_msg.id | integration |
+| 跨 conv file_ids | file_ids 含别的 conv 的 id | 不绑定（bind 函数过滤 conv_id） | integration |
+| 上传清单注入 HumanMessage | file_ids 非空 | LLM 接收的消息体包含 `[用户上传…]` 前缀，列出文件名+路径 | integration |
+| file_ids 为空 | 空列表 | 不注入清单，行为与原版一致 | unit |
+| 上传后无消息 | 上传不发送 | artifact 留 message_id="" 直到 session 过期清理 | integration |
+
+### T-UPLOAD-03: 端到端 smoke
+
+| 用例 | 操作 | 期望 | 标记 |
+|------|------|------|------|
+| 拖入 zip → 模型解压 | 上传 archive.zip → 提示"解压看一下" | 模型 run_shell `unzip` 成功 | smoke |
+| 刷新后看到上传卡片 | 发送后 F5 | full-state 返回 artifacts 含 source="uploaded" 项，前端在 user 消息旁渲染 | smoke |
+| 图片+文件混合发送 | pendingImages + pendingFiles 同时非空 | images 走多模态路径，files 走沙箱路径，互不干扰 | smoke |
+
 ---
 
 ## 七、LLM 客户端 (llm/)
@@ -401,3 +451,4 @@ pytest tests/ -m smoke         # 冒烟拨测（端到端）
 | 新增工具 | T-SANDBOX-03 + T-SMOKE-03 |
 | 新增 SSE 事件 | T-FSM-05 + T-STREAM-03 |
 | 新增 DB 字段 | T-DB-04 (迁移幂等) |
+| 文件上传相关 | T-DB-02 + T-SANDBOX-04 + T-UPLOAD-* |

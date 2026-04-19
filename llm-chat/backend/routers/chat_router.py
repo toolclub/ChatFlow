@@ -43,13 +43,14 @@ async def chat(req: ChatRequest, request: Request):
     img_bytes = sum(len(img) for img in req.images)
     logger.info(
         "POST /api/chat | conv=%s | client=%s | model=%s | msg_len=%d"
-        " | images=%d | img_total_kb=%.1f",
+        " | images=%d | img_total_kb=%.1f | files=%d",
         req.conversation_id,
         client_id[:8] if client_id else "-",
         req.model or CHAT_MODEL,
         len(req.message),
         len(req.images),
         img_bytes / 1024,
+        len(req.file_ids),
     )
 
     conv = memory_store.get(req.conversation_id)
@@ -83,6 +84,7 @@ async def chat(req: ChatRequest, request: Request):
                 agent_mode=req.agent_mode,
                 force_plan=req.force_plan,
                 stop_event=stop_event,
+                file_ids=req.file_ids,
             ):
                 if await request.is_disconnected():
                     break

@@ -27,6 +27,7 @@ logger = logging.getLogger("sandbox.manager")
 
 SANDBOX_ROOT = "/sandbox"
 _HEALTH_CHECK_INTERVAL = 30  # 秒
+_UPLOADS_SUBDIR = "uploads"  # 用户上传统一落到 session_dir/uploads/，模型路径可预测
 
 # Gunicorn 多 worker 下，只让持有此文件锁的那一个进程跑后台清理循环，
 # 避免 N 份循环重复日志 + 浪费 CPU。
@@ -590,6 +591,76 @@ class SandboxManager:
             stderr="", exit_code=0, duration=0,
             cwd=session_dir, commands=commands,
         )
+
+    async def upload_binary(
+        self, conv_id: str, filename: str, data: bytes,
+        max_size: int = 50 * 1024 * 1024,
+    ) -> dict:
+        """用户上传的二进制文件落到 session_dir/uploads/。
+
+        分布式语义：
+          - worker 由 _get_worker_for_session 决定（DB 持久化亲和性，刷新/跨进程都对）
+          - 重名解决依据是远端文件系统（test -e），不是进程内 dict，不会因为
+            多 worker 并发上传同名文件而错误判断
+          - 路径净化：只取 basename，禁止 ..，防上传越权写入沙箱其他位置
+
+        返回：{filename, abs_path, rel_path, size}
+            rel_path 形如 "uploads/foo.zip"，给模型用 sandbox 相对路径
+            abs_path 形如 "/sandbox/sess_xxx/uploads/foo.zip"，落到 DB.path
+        """
+        if not filename or not filename.strip():
+            raise ValueError("filename 不能为空")
+        size = len(data)
+        if size > max_size:
+            raise ValueError(f"文件过大（{size // 1024 // 1024}MB），超过 {max_size // 1024 // 1024}MB 限制")
+        if not self._healthy:
+            raise RuntimeError("沙箱不可用：所有 Worker 均不健康")
+
+        # 路径净化：basename + 替换危险字符（保留中文、空格、常见标点）
+        import os as _os
+        safe_name = _os.path.basename(filename.replace("\\", "/")).strip()
+        if not safe_name or safe_name in (".", ".."):
+            raise ValueError(f"非法文件名: {filename!r}")
+        # 保险：禁掉 / \0
+        safe_name = safe_name.replace("\0", "").replace("/", "_")
+
+        worker, session_dir = await self._get_worker_for_session(conv_id)
+        upload_dir = f"{session_dir}/{_UPLOADS_SUBDIR}"
+        await worker.exec_command(f"mkdir -p {upload_dir}")
+
+        # 同名去重：test -e 是真值唯一来源（远端 FS）
+        # 不缓存到内存，避免分布式下多 worker 同名碰撞
+        import shlex as _shlex
+        final_name = safe_name
+        if "." in safe_name:
+            stem, ext = safe_name.rsplit(".", 1)
+            ext = "." + ext
+        else:
+            stem, ext = safe_name, ""
+        for i in range(1, 100):
+            check = await worker.exec_command(
+                f"test -e {_shlex.quote(f'{upload_dir}/{final_name}')} && echo Y || echo N",
+                timeout=5,
+            )
+            if "N" in check.stdout:
+                break
+            final_name = f"{stem} ({i}){ext}"
+        else:
+            raise RuntimeError(f"同名文件 100 次去重失败: {safe_name}")
+
+        abs_path = f"{upload_dir}/{final_name}"
+        await worker.write_binary(abs_path, data)
+
+        logger.info(
+            "upload_binary | conv=%s | worker=%s | name=%s | size=%d",
+            conv_id, worker.worker_id, final_name, size,
+        )
+        return {
+            "filename": final_name,
+            "abs_path": abs_path,
+            "rel_path": f"{_UPLOADS_SUBDIR}/{final_name}",
+            "size": size,
+        }
 
     async def read_file(self, conv_id: str, path: str) -> ExecuteResult:
         if not self._healthy:

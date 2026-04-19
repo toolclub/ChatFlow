@@ -2,6 +2,7 @@
 import { onMounted, computed, ref, watch } from 'vue'
 import { useChat } from './composables/useChat'
 import type { FileArtifact } from './types'
+import { isDownloadOnly } from './types'
 import Sidebar from './components/Sidebar.vue'
 import ChatView from './components/ChatView.vue'
 import CognitivePanel from './components/CognitivePanel.vue'
@@ -66,6 +67,18 @@ const selectedFile = ref<FileArtifact | null>(null)
 const fileLoading = ref(false)
 
 async function onSelectFile(file: FileArtifact) {
+  // 二进制打包/归档文件（jar/tar/zip...）不支持预览，直接触发下载
+  // 避免把大 base64（可能 >50MB）载进面板后 hljs.highlight 卡死浏览器
+  if (isDownloadOnly(file)) {
+    if (file.id) {
+      const a = document.createElement('a')
+      a.href = `/api/artifacts/${file.id}/download`
+      a.download = file.name
+      a.click()
+    }
+    return
+  }
+
   // 立即打开面板 + 显示 loading 占位（先让用户看到反馈）
   selectedFile.value = file
   panelOpen.value = true
@@ -169,6 +182,7 @@ function onDragStart(e: MouseEvent) {
         :panel-open="panelOpen"
         :conv-title="currentConvTitle"
         :can-continue="chat.canContinue.value"
+        :current-conv-id="chat.currentConvId.value"
         :class="showCognitivePanel ? 'chat-with-panel' : 'chat-full'"
         @send="chat.send($event)"
         @stop="chat.stopConversation()"
@@ -179,6 +193,7 @@ function onDragStart(e: MouseEvent) {
         @regenerate="chat.regenerate()"
         @edit-message="chat.editMessage($event.index, $event.content)"
         @select-file="onSelectFile($event)"
+        @ensure-conv="chat.newConversation()"
       />
 
       <!-- 右侧：认知面板（内含拖拽手柄） -->

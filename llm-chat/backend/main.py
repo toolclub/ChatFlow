@@ -141,11 +141,13 @@ from routers.conversation_router import router as conversation_router
 from routers.chat_router import router as chat_router
 from routers.tool_router import router as tool_router
 from routers.model_router import router as model_router
+from routers.files_router import router as files_router
 
 app.include_router(conversation_router)
 app.include_router(chat_router)
 app.include_router(tool_router)
 app.include_router(model_router)
+app.include_router(files_router)
 
 # ── 入口 ──────────────────────────────────────────────────────────────────────
 

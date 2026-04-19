@@ -1,4 +1,4 @@
-import type { ClarificationData, FileArtifact, PlanStep, ThinkingEvent, ToolHistoryEvent } from '../types'
+import type { ClarificationData, FileArtifact, PlanStep, ThinkingEvent, ToolHistoryEvent, UploadedFile } from '../types'
 
 /** 归一化 SSE thinking 字段：协议要求 dict，COMPAT 降级到裸字符串。 */
 function normalizeThinking(raw: unknown): ThinkingEvent | null {
@@ -133,6 +133,24 @@ export async function fetchConvArtifacts(convId: string): Promise<FileArtifact[]
   })
   const data = await res.json()
   return data.artifacts || []
+}
+
+/** 上传单个文件到对话沙箱（multipart/form-data）。返回 artifact 元数据。 */
+export async function uploadFile(convId: string, file: File): Promise<UploadedFile> {
+  const form = new FormData()
+  form.append('conv_id', convId)
+  form.append('file', file)
+  const res = await fetch(`${API_BASE}/api/files/upload`, {
+    method: 'POST',
+    headers: { 'X-Client-ID': getClientId() },  // 注意：不设 Content-Type，让浏览器自动带 boundary
+    body: form,
+  })
+  if (!res.ok) {
+    let detail = ''
+    try { detail = (await res.json()).detail || '' } catch {}
+    throw new Error(detail || `上传失败 (HTTP ${res.status})`)
+  }
+  return res.json()
 }
 
 /** 按需加载单个产物的完整内容（含二进制、slides_html） */
@@ -278,6 +296,7 @@ export async function sendMessage(
   onFileArtifact?: (artifact: FileArtifact) => void,
   onToolCallStart?: (name: string, displayMode?: string) => void,
   onToolCallArgs?: (text: string) => void,
+  fileIds?: number[],
 ) {
   const body: Record<string, unknown> = {
     conversation_id: conversationId,
@@ -290,6 +309,9 @@ export async function sendMessage(
   }
   if (forcePlan?.length) {
     body.force_plan = forcePlan
+  }
+  if (fileIds?.length) {
+    body.file_ids = fileIds
   }
 
   const res = await fetch(`${API_BASE}/api/chat`, {

@@ -176,13 +176,17 @@ class ArtifactModel(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     conv_id = Column(String(36), nullable=False, index=True)
-    message_id = Column(String(36), nullable=False, default="", comment="关联的 assistant 消息 ID")
+    message_id = Column(String(36), nullable=False, default="", comment="关联的消息 ID（generated→assistant，uploaded→user）")
     name = Column(String(255), nullable=False)
     path = Column(String(512), nullable=False)
     language = Column(String(50), nullable=False, default="text")
     content = Column(Text, nullable=False)
     size = Column(Integer, nullable=False, default=0, comment="原始文件大小(bytes)")
     slide_count = Column(Integer, nullable=False, default=0, comment="PPT 页数")
+    # source：'generated'=沙箱工具产出（默认，向后兼容）  'uploaded'=用户从前端拖入
+    # 为什么不分表：所有读路径（meta_list/download/full-state）已按 conv_id+message_id 索引，
+    # 加一列就能复用，避免 N+1 查询和前端两套渲染
+    source = Column(String(16), nullable=False, default="generated", comment="generated|uploaded")
     created_at = Column(Float, nullable=False)
 
     __table_args__ = (

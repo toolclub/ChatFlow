@@ -15,10 +15,32 @@ import logging
 from langchain_core.messages import HumanMessage
 
 from config import LONGTERM_MEMORY_ENABLED
+from db.artifact_store import get_artifacts_by_ids
 from graph.nodes.base import BaseNode
 from graph.state import GraphState
 from memory import store as memory_store
 from memory.context_builder import build_messages
+
+
+def _fmt_size(n: int) -> str:
+    if n >= 1024 * 1024:
+        return f"{n / 1024 / 1024:.1f}MB"
+    if n >= 1024:
+        return f"{n / 1024:.1f}KB"
+    return f"{n}B"
+
+
+async def _build_file_preamble(conv_id: str, file_ids: list[int]) -> str:
+    """根据已绑定的 artifacts 生成文件清单前缀（注入到 HumanMessage）。"""
+    if not file_ids:
+        return ""
+    rows = await get_artifacts_by_ids(file_ids, conv_id)
+    if not rows:
+        return ""
+    lines = [f"[用户已上传 {len(rows)} 个文件到沙箱，可用 run_shell / 文件工具直接读取]"]
+    for r in rows:
+        lines.append(f"- {r['name']} ({_fmt_size(r.get('size') or 0)})  路径: {r['path']}")
+    return "\n".join(lines)
 
 logger = logging.getLogger("graph.nodes.retrieve_context")
 
@@ -91,6 +113,21 @@ class RetrieveContextNode(BaseNode):
         # 回退到多模态消息格式，由路由决策的视觉模型直接处理。
         images            = state.get("images", [])
         vision_description = state.get("vision_description", "")
+        file_ids          = state.get("file_ids", []) or []
+
+        # 上传文件清单前缀（由 StreamSession 绑定后写入 state）
+        file_preamble = await _build_file_preamble(conv_id, file_ids)
+        if file_preamble:
+            logger.info(
+                "retrieve_context 注入文件清单 | conv=%s | count=%d",
+                conv_id, len(file_ids),
+            )
+
+        def _prepend_preamble(text: str) -> str:
+            """把文件清单前缀拼到文本最前面。"""
+            if not file_preamble:
+                return text
+            return f"{file_preamble}\n\n{text}" if text else file_preamble
 
         if vision_description:
             # 主路径：将图片描述注入为文字上下文，主模型做推理
@@ -98,7 +135,7 @@ class RetrieveContextNode(BaseNode):
                 combined = f"[图片内容]\n{vision_description}\n\n{user_msg}"
             else:
                 combined = vision_description
-            history_messages.append(HumanMessage(content=combined))
+            history_messages.append(HumanMessage(content=_prepend_preamble(combined)))
             logger.info(
                 "retrieve_context 注入图片描述 | conv=%s | desc_len=%d",
                 conv_id, len(vision_description),
@@ -113,11 +150,12 @@ class RetrieveContextNode(BaseNode):
                     conv_id, url[:40], len(url),
                 )
                 multimodal_content.append({"type": "image_url", "image_url": {"url": url}})
-            if user_msg:
-                multimodal_content.append({"type": "text", "text": user_msg})
+            text_part = _prepend_preamble(user_msg)
+            if text_part:
+                multimodal_content.append({"type": "text", "text": text_part})
             history_messages.append(HumanMessage(content=multimodal_content))
         else:
-            history_messages.append(HumanMessage(content=user_msg))
+            history_messages.append(HumanMessage(content=_prepend_preamble(user_msg)))
 
         return {
             "messages":          history_messages,

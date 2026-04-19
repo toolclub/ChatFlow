@@ -286,3 +286,23 @@ class SSHWorker:
         import base64
         encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
         await self.exec_command(f"echo '{encoded}' | base64 -d > {remote_path}", timeout=10)
+
+    async def write_binary(self, remote_path: str, data: bytes) -> None:
+        """通过 SFTP 写入任意字节流（用户上传的 zip/pdf/二进制）。
+
+        为什么不复用 write_file 的 base64+shell 路径：
+          - shell 命令行有长度上限（ARG_MAX 一般 2MB），50MB 直接炸
+          - base64 让传输膨胀 33%，多一次 fork 解码
+          - SFTP 是 SSH 内置子系统，asyncssh 直接支持，二进制原生
+        父目录不存在自动 mkdir -p（单次 SSH 命令，避免 SFTP 多层目录创建的兼容差异）。
+        """
+        import shlex
+        # 1. 确保父目录存在（SFTP makedirs 在不同 SSH 服务器实现差异大，用 shell 更稳）
+        parent = remote_path.rsplit("/", 1)[0] if "/" in remote_path else ""
+        if parent:
+            await self.exec_command(f"mkdir -p {shlex.quote(parent)}", timeout=10)
+        # 2. SFTP 写入
+        conn = await self._get_conn()
+        async with conn.start_sftp_client() as sftp:
+            async with sftp.open(remote_path, "wb") as f:
+                await f.write(data)

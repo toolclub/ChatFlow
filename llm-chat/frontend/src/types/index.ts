@@ -80,6 +80,15 @@ export interface ClarificationData {
   items: ClarificationItem[]
 }
 
+export interface UploadedFile {
+  id: number
+  name: string
+  size: number
+  path?: string
+  language?: string
+  mime?: string
+}
+
 export interface Message {
   role: 'user' | 'assistant'
   content: string
@@ -87,6 +96,7 @@ export interface Message {
   thinkingSegments?: ThinkingSegment[]      // 结构化段（权威数据源，优先渲染）
   steps?: StepRecord[]
   images?: string[]
+  files?: UploadedFile[]               // 用户上传的文件（user 消息，source='uploaded'）
   timestamp?: number
   message_id?: string                  // DB 业务 ID（用于 plan.message_id 精确匹配）
   toolCalls?: ToolCallRecord[]
@@ -115,6 +125,7 @@ export interface SendPayload {
   images: string[]
   agentMode: boolean
   forcePlan?: PlanStep[]    // 用户编辑后的强制计划（跳过 planner LLM 规划）
+  files?: UploadedFile[]    // 用户已上传的文件（在发送前调用 /api/files/upload 得到 id）
 }
 
 export interface AgentStatus {
@@ -178,8 +189,17 @@ export function detectLanguage(path: string): string {
     xml: 'xml', md: 'markdown', sql: 'sql', vue: 'vue',
     txt: 'text', csv: 'text', log: 'text',
     pptx: 'pptx', ppt: 'pptx', pdf: 'pdf',
+    tar: 'archive', gz: 'archive', tgz: 'archive', zip: 'archive',
+    jar: 'archive', war: 'archive', ear: 'archive',
   }
   return map[ext] || 'text'
+}
+
+/** 仅下载、不走侧栏预览的文件（二进制打包/归档/用户上传） */
+export function isDownloadOnly(file: { language: string; binary?: boolean }): boolean {
+  if (file.language === 'archive') return true
+  // PPTX 和 PDF 仍走预览面板（有专门的幻灯片/iframe 展示）
+  return false
 }
 
 /** 该语言是否可在 iframe 中预览 */

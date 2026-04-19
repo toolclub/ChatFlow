@@ -16,7 +16,7 @@ artifact_store：文件产物的 DB 持久化层
 import logging
 import time
 
-from sqlalchemy import select
+from sqlalchemy import select, update as sa_update
 
 from db.database import AsyncSessionLocal
 from db.models import ArtifactModel
@@ -36,6 +36,7 @@ _EXT_MAP = {
     "txt": "text", "csv": "text", "log": "text",
     "pptx": "pptx", "ppt": "pptx", "pdf": "pdf",
     "tar": "archive", "gz": "archive", "zip": "archive", "tgz": "archive",
+    "jar": "archive", "war": "archive", "ear": "archive",
 }
 
 
@@ -53,14 +54,18 @@ async def save_artifact(
     message_id: str = "",
     size: int = 0,
     slide_count: int = 0,
+    source: str = "generated",
 ) -> dict:
-    """保存文件产物（upsert），返回产物元数据 dict。"""
+    """保存文件产物（upsert），返回产物元数据 dict。
+
+    source: 'generated'（沙箱工具产出，默认）| 'uploaded'（用户上传）
+    """
     lang = language or detect_language(path)
     now = time.time()
     artifact_data = {
         "name": name, "path": path, "language": lang,
         "message_id": message_id, "size": size,
-        "slide_count": slide_count, "created_at": now,
+        "slide_count": slide_count, "source": source, "created_at": now,
     }
     try:
         async with AsyncSessionLocal() as session:
@@ -77,6 +82,7 @@ async def save_artifact(
                 row.message_id = message_id or row.message_id
                 row.size = size or row.size
                 row.slide_count = slide_count or row.slide_count
+                row.source = source or row.source
                 row.created_at = now
                 await session.commit()
                 artifact_data["id"] = row.id
@@ -85,7 +91,7 @@ async def save_artifact(
                     conv_id=conv_id, message_id=message_id,
                     name=name, path=path, language=lang,
                     content=content, size=size, slide_count=slide_count,
-                    created_at=now,
+                    source=source, created_at=now,
                 )
                 session.add(new_row)
                 await session.flush()  # flush 拿到自增 ID
@@ -94,6 +100,79 @@ async def save_artifact(
     except Exception:
         logger.exception("save_artifact failed | conv=%s path=%s", conv_id, path)
     return artifact_data
+
+
+async def bind_artifacts_to_message(
+    artifact_ids: list[int], conv_id: str, message_id: str,
+) -> int:
+    """把待绑定的上传 artifacts 关联到具体的 user 消息 ID。
+
+    安全约束（防越权）：
+      - 只更新 conv_id 匹配的行 → 跨对话 ID 被忽略
+      - 只更新 source='uploaded' 行 → 不会污染工具产出
+      - 只更新 message_id='' 行 → 已绑定的不重复改
+
+    返回实际更新的行数。失败返回 0（异常已记录日志）。
+    """
+    if not artifact_ids:
+        return 0
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                sa_update(ArtifactModel)
+                .where(
+                    ArtifactModel.id.in_(artifact_ids),
+                    ArtifactModel.conv_id == conv_id,
+                    ArtifactModel.source == "uploaded",
+                    ArtifactModel.message_id == "",
+                )
+                .values(message_id=message_id)
+            )
+            await session.commit()
+            return result.rowcount or 0
+    except Exception:
+        logger.exception(
+            "bind_artifacts_to_message failed | conv=%s msg=%s ids=%s",
+            conv_id, message_id, artifact_ids,
+        )
+        return 0
+
+
+async def get_artifacts_by_ids(
+    artifact_ids: list[int], conv_id: str,
+) -> list[dict]:
+    """按 ID 批量获取 artifacts 元数据（不含 content），约束 conv_id 防越权。
+
+    用于 chat ingress 在注入 HumanMessage 前缀时取文件清单。
+    """
+    if not artifact_ids:
+        return []
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(
+                    ArtifactModel.id, ArtifactModel.name, ArtifactModel.path,
+                    ArtifactModel.language, ArtifactModel.size,
+                    ArtifactModel.source, ArtifactModel.message_id,
+                )
+                .where(
+                    ArtifactModel.id.in_(artifact_ids),
+                    ArtifactModel.conv_id == conv_id,
+                )
+                .order_by(ArtifactModel.id)
+            )
+            rows = result.all()
+        return [
+            {
+                "id": r.id, "name": r.name, "path": r.path,
+                "language": r.language, "size": r.size,
+                "source": r.source, "message_id": r.message_id,
+            }
+            for r in rows
+        ]
+    except Exception:
+        logger.exception("get_artifacts_by_ids failed | conv=%s ids=%s", conv_id, artifact_ids)
+        return []
 
 
 async def get_artifact_meta_list(conv_id: str) -> list[dict]:
@@ -110,7 +189,7 @@ async def get_artifact_meta_list(conv_id: str) -> list[dict]:
                     ArtifactModel.message_id, ArtifactModel.name,
                     ArtifactModel.path, ArtifactModel.language,
                     ArtifactModel.size, ArtifactModel.slide_count,
-                    ArtifactModel.created_at,
+                    ArtifactModel.source, ArtifactModel.created_at,
                 )
                 .where(ArtifactModel.conv_id == conv_id)
                 .order_by(ArtifactModel.created_at)
@@ -125,6 +204,7 @@ async def get_artifact_meta_list(conv_id: str) -> list[dict]:
                 "language": r.language,
                 "size": r.size,
                 "slide_count": r.slide_count,
+                "source": r.source,
                 "binary": r.language in ("pptx", "pdf", "archive"),
                 "created_at": r.created_at,
             }
@@ -141,6 +221,7 @@ async def get_artifact_content(artifact_id: int) -> dict | None:
 
     用于前端点击下载/预览时按需加载。
     PPT 自动解包 JSON（binary_b64 + slides_html）。
+    用户上传文件（source='uploaded'）一律按二进制处理。
     """
     import json as _json
     try:
@@ -156,6 +237,7 @@ async def get_artifact_content(artifact_id: int) -> dict | None:
             "content": row.content,
             "size": row.size,
             "slide_count": row.slide_count,
+            "source": row.source,
             "created_at": row.created_at,
         }
         # PPT：解包 JSON（slides_html + theme）
@@ -175,6 +257,16 @@ async def get_artifact_content(artifact_id: int) -> dict | None:
                 packed = _json.loads(row.content)
                 item["content"] = packed.get("binary_b64", "")
                 item["size"] = packed.get("original_size", row.size)
+                item["binary"] = True
+            except _json.JSONDecodeError:
+                pass
+        # 用户上传：无论扩展名一律二进制（保留原始字节，下载即原文件）
+        elif row.source == "uploaded" and row.content.startswith("{"):
+            try:
+                packed = _json.loads(row.content)
+                item["content"] = packed.get("binary_b64", "")
+                item["size"] = packed.get("original_size", row.size)
+                item["mime"] = packed.get("mime", "application/octet-stream")
                 item["binary"] = True
             except _json.JSONDecodeError:
                 pass

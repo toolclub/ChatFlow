@@ -14,6 +14,9 @@ class ChatRequest(BaseModel):
     images: list[str] = []            # base64 编码的图片列表（已去除 data: 前缀）
     agent_mode: bool = True           # True=完整 Agent 图；False=简单直接对话图
     force_plan: Optional[list[dict]] = None  # 用户编辑后的强制计划，跳过 planner LLM 规划
+    # 用户上传的文件（已通过 POST /api/files/upload 落到沙箱），这里只带 ID
+    # 后端会 bind_artifacts_to_message 关联到 user 消息，并把清单注入到 HumanMessage 前缀
+    file_ids: list[int] = []
 
 
 class CreateConversationRequest(BaseModel):

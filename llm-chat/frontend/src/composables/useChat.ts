@@ -250,8 +250,17 @@ export function useChat() {
         }
 
         // artifacts 元数据从 message 关联恢复（DB 外键，不再依赖正则）
+        // source='uploaded'（用户上传）→ msg.files；其他（generated）→ msg.artifacts
         if (m.artifacts?.length) {
-          msg.artifacts = m.artifacts
+          const uploaded = m.artifacts.filter((a: any) => a.source === 'uploaded')
+          const generated = m.artifacts.filter((a: any) => a.source !== 'uploaded')
+          if (uploaded.length) {
+            msg.files = uploaded.map((a: any) => ({
+              id: a.id, name: a.name, size: a.size || 0,
+              path: a.path, language: a.language,
+            }))
+          }
+          if (generated.length) msg.artifacts = generated
         }
 
         return msg
@@ -263,6 +272,7 @@ export function useChat() {
       const seen = new Set<string>()
       const allArtifacts: any[] = []
       // 来源1：每条 message 上关联的 artifacts（新数据，有 message_id）
+      // 注意：用户上传的文件（source='uploaded'）已分流到 msg.files，不进认知面板
       for (const m of s.messages) {
         if (m.artifacts?.length) {
           for (const a of m.artifacts) {
@@ -271,8 +281,9 @@ export function useChat() {
           }
         }
       }
-      // 来源2：顶层 orphan artifacts（旧数据，无 message_id）
+      // 来源2：顶层 orphan artifacts（旧数据，无 message_id）— 同样过滤 uploaded
       for (const a of (fullState.artifacts || [])) {
+        if ((a as any).source === 'uploaded') continue
         const key = a.path || a.name
         if (!seen.has(key)) { seen.add(key); allArtifacts.push(a) }
       }
@@ -569,11 +580,11 @@ export function useChat() {
   // 下一次 send 附加的 force_plan（由 applyModifiedPlan 设置，send 消费后清空）
   const _nextForcePlan = ref<PlanStep[] | null>(null)
 
-  async function send({ text, images, agentMode, forcePlan }: SendPayload) {
+  async function send({ text, images, agentMode, forcePlan, files }: SendPayload) {
     // forcePlan 参数优先，其次用 _nextForcePlan（兼容两种调用方式）
     const activeForcePlan = forcePlan || _nextForcePlan.value
     _nextForcePlan.value = null
-    if (!text.trim() && images.length === 0) return
+    if (!text.trim() && images.length === 0 && (!files || files.length === 0)) return
     if (!currentConvId.value) {
       const data = await api.createConversation(text.slice(0, 30) || '图片对话')
       currentConvId.value = data.id
@@ -587,6 +598,7 @@ export function useChat() {
       role: 'user',
       content: text,
       images: images.length > 0 ? images : undefined,
+      files: files && files.length > 0 ? files : undefined,
     }
     if (_nextWorkflowPlan.value) {
       userMsg.workflowPlan = _nextWorkflowPlan.value
@@ -847,6 +859,8 @@ export function useChat() {
             || toolList?.findLast(t => !t.done)
           if (tc) tc.output = (tc.output || '') + text
         },
+        // fileIds：用户上传的文件 artifact ID 列表（后端 bind_artifacts_to_message 用）
+        files && files.length > 0 ? files.map(f => f.id) : undefined,
       )
     } catch (err: any) {
       if (err?.name === 'AbortError') return

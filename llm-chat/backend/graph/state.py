@@ -68,3 +68,7 @@ class GraphState(TypedDict):
     pre_user_db_id: int          # 预写的 user 消息 DB ID
     pre_assistant_db_id: int     # 预写的 assistant 消息 DB ID
     assistant_message_id: str    # assistant 消息的业务 ID（用于 plan_steps.message_id 关联）
+    user_message_id: str         # user 消息的业务 ID（用于 artifacts 绑定）
+
+    # ── 用户上传的文件 artifact ID（已绑定到当前 user 消息，注入到 HumanMessage 前缀） ──
+    file_ids: list[int]

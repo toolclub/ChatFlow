@@ -82,6 +82,10 @@ _MIGRATIONS = [
 
     # ── messages 补字段（结构化思考段：全披露、不覆盖） ──
     "ALTER TABLE messages ADD COLUMN IF NOT EXISTS thinking_segments JSONB NOT NULL DEFAULT '[]'",
+
+    # ── artifacts 补字段（区分用户上传 vs 工具产出） ──
+    "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS source VARCHAR(16) NOT NULL DEFAULT 'generated'",
+    "CREATE INDEX IF NOT EXISTS ix_artifacts_conv_source ON artifacts(conv_id, source)",
 ]
 
 

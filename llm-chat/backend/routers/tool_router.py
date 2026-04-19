@@ -42,9 +42,10 @@ async def download_artifact(artifact_id: int):
     name = data.get("name", "download")
     content = data.get("content", "")
     language = data.get("language", "text")
+    is_uploaded = data.get("source") == "uploaded"
 
-    # 二进制类型（pptx/archive）：从 binary_b64 解码
-    if data.get("binary") or language in ("archive", "pptx", "pdf"):
+    # 二进制类型（pptx/archive/pdf/用户上传）：从 binary_b64 解码
+    if data.get("binary") or language in ("archive", "pptx", "pdf") or is_uploaded:
         binary_b64 = content
         if content.startswith("{"):
             try:
@@ -57,12 +58,25 @@ async def download_artifact(artifact_id: int):
         except Exception:
             return {"error": "文件解码失败"}
 
+        # 用户上传：优先用上传时记录的 mime；否则按 language + 扩展名映射
         mime_map = {
             "archive": "application/gzip",
             "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
             "pdf": "application/pdf",
         }
-        mime = mime_map.get(language, "application/octet-stream")
+        # archive 下细分：jar/war/ear 有独立 mime，避免下载工具误判扩展名
+        ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+        archive_mime_by_ext = {
+            "jar": "application/java-archive",
+            "war": "application/java-archive",
+            "ear": "application/java-archive",
+            "zip": "application/zip",
+        }
+        mime = (
+            data.get("mime")
+            or archive_mime_by_ext.get(ext)
+            or mime_map.get(language, "application/octet-stream")
+        )
         return Response(
             content=raw_bytes,
             media_type=mime,

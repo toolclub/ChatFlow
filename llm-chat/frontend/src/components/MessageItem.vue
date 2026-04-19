@@ -662,6 +662,12 @@ function submitEdit() {
   isEditing.value = false
 }
 function cancelEdit() { isEditing.value = false }
+
+function fmtFileSize(n: number): string {
+  if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + 'MB'
+  if (n >= 1024) return (n / 1024).toFixed(1) + 'KB'
+  return n + 'B'
+}
 </script>
 
 <template>
@@ -680,6 +686,22 @@ function cancelEdit() { isEditing.value = false }
             fit="cover"
             class="user-img"
           />
+        </div>
+        <div v-if="message.files?.length" class="user-files">
+          <a
+            v-for="f in message.files" :key="f.id"
+            class="user-file-card"
+            :href="`/api/artifacts/${f.id}/download`"
+            :download="f.name"
+            :title="f.path || f.name"
+          >
+            <svg class="user-file-ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+            </svg>
+            <span class="user-file-name">{{ f.name }}</span>
+            <span class="user-file-size">{{ fmtFileSize(f.size) }}</span>
+          </a>
         </div>
 
         <!-- Workflow plan card -->
@@ -1145,6 +1167,25 @@ function cancelEdit() { isEditing.value = false }
   border: 1.5px solid var(--cf-border);
   cursor: zoom-in;
 }
+.user-files { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; max-width: 520px; }
+.user-file-card {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 8px 12px;
+  background: #F4F5F7;
+  border: 1.5px solid var(--cf-border, #DFE3E8);
+  border-radius: 12px;
+  font-size: 13px; color: var(--cf-text-1, #18191C);
+  text-decoration: none;
+  max-width: 260px;
+  transition: all 0.15s;
+}
+.user-file-card:hover { background: #EBECEF; border-color: #00AEEC; }
+.user-file-ico { color: #00AEEC; flex-shrink: 0; }
+.user-file-name {
+  max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-weight: 500;
+}
+.user-file-size { color: var(--cf-text-4, #9499A0); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 .user-bubble {
   background: #E3F6FD;
   color: #18191C;
