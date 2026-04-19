@@ -175,7 +175,11 @@ export interface FileArtifact {
   slides_html?: string[] // PPT 每页的 HTML 预览
 }
 
-/** 从文件路径推断语言 */
+/**
+ * 从文件路径推断"语言"——这是 sandbox 工具产出物的协议标识，
+ * 用于认知面板（CognitivePanel）渲染策略。**不是**用户上传预览的派发依据；
+ * 上传预览走 src/preview/ 模块，按文件名后缀独立决策。
+ */
 export function detectLanguage(path: string): string {
   const ext = path.split('.').pop()?.toLowerCase() ?? ''
   const map: Record<string, string> = {
@@ -187,62 +191,22 @@ export function detectLanguage(path: string): string {
     sh: 'shell', bash: 'shell', zsh: 'shell',
     json: 'json', yaml: 'yaml', yml: 'yaml', toml: 'toml',
     xml: 'xml', md: 'markdown', sql: 'sql', vue: 'vue',
-    txt: 'text', log: 'text',
-    csv: 'spreadsheet', xlsx: 'spreadsheet', xls: 'spreadsheet',
-    pdf: 'pdf',
-    png: 'image', jpg: 'image', jpeg: 'image', gif: 'image',
-    webp: 'image', bmp: 'image', ico: 'image',
-    // 浏览器原生可放
-    mp4: 'video', webm: 'video', ogv: 'video', m4v: 'video',
-    mp3: 'audio', wav: 'audio', ogg: 'audio', flac: 'audio',
-    m4a: 'audio', aac: 'audio', opus: 'audio',
-    // 仅 sandbox PPT 走预览，上传 PPT 走 office 桶
-    pptx: 'pptx', ppt: 'pptx',
-    // Office 文档（除 Excel 外，浏览器都不行）
-    doc: 'office', docx: 'office', odt: 'office', rtf: 'office',
-    pages: 'office', key: 'office', odp: 'office',
-    ods: 'office', numbers: 'office',
-    // 归档/打包
+    txt: 'text', csv: 'text', log: 'text',
+    pptx: 'pptx', ppt: 'pptx', pdf: 'pdf',
     tar: 'archive', gz: 'archive', tgz: 'archive', zip: 'archive',
     jar: 'archive', war: 'archive', ear: 'archive',
-    '7z': 'archive', rar: 'archive', bz2: 'archive', xz: 'archive', zst: 'archive',
-    deb: 'archive', rpm: 'archive', apk: 'archive', ipa: 'archive',
-    dmg: 'archive', iso: 'archive', msi: 'archive', whl: 'archive', pkg: 'archive',
-    // 可执行 / 编译产物
-    exe: 'binary', dll: 'binary', sys: 'binary',
-    so: 'binary', dylib: 'binary', wasm: 'binary',
-    class: 'binary', pyc: 'binary', pyo: 'binary', dex: 'binary',
-    bin: 'binary', elf: 'binary',
-    // 设计稿
-    psd: 'design', psb: 'design', ai: 'design', sketch: 'design',
-    fig: 'design', xd: 'design', indd: 'design', cdr: 'design',
   }
   return map[ext] || 'text'
 }
 
-/** 该语言是否可在 iframe 中预览 */
+/** 该语言是否可在 iframe 中预览（认知面板用） */
 export function isPreviewable(lang: string): boolean {
   return ['html', 'svg'].includes(lang)
 }
 
-/** 该文件是否可下载（二进制文件） */
+/** 该文件是否可下载（二进制文件，认知面板用） */
 export function isDownloadable(lang: string): boolean {
   return ['pptx', 'pdf'].includes(lang)
-}
-
-/** 该文件是否为图片 */
-export function isImageFile(lang: string): boolean {
-  return lang === 'image'
-}
-
-/** 该文件是否为表格（csv/xlsx/xls） */
-export function isSpreadsheetFile(lang: string): boolean {
-  return lang === 'spreadsheet'
-}
-
-/** 用户上传文件能否走预览模态（archive 仅下载，其余皆可预览） */
-export function canPreviewUpload(lang: string): boolean {
-  return lang !== 'archive'
 }
 
 export function makeEmptyCognitiveState(): CognitiveState {

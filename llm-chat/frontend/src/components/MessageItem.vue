@@ -356,12 +356,11 @@ const previewLang = ref('html')
 
 // ─── 用户上传文件预览模态 ────────────────────────────────────────────────────
 const uploadPreviewVisible = ref(false)
-const uploadPreviewFile = ref<{ id: number; name: string; size: number; language: string; path?: string } | null>(null)
+const uploadPreviewFile = ref<{ id: number; name: string; size: number; path?: string } | null>(null)
 function openUploadPreview(f: any) {
-  // 一律走模态：能预览就渲染，不能就显示颜文字提示（archive/pptx 在模态里 0 请求）
+  // 一律走模态：渲染器派发由 src/preview 模块按文件名决定，命中即渲染、否则颜文字
   uploadPreviewFile.value = {
-    id: f.id, name: f.name, size: f.size || 0,
-    language: f.language || 'text', path: f.path,
+    id: f.id, name: f.name, size: f.size || 0, path: f.path,
   }
   uploadPreviewVisible.value = true
 }

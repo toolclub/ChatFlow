@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import type { SendPayload, UploadedFile } from '../types'
-import { detectLanguage } from '../types'
 import { Picture, Promotion, Loading } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { uploadFile as apiUploadFile } from '../api'
@@ -697,13 +696,12 @@ function fmtFileSize(n: number): string {
 
 // ── 上传文件预览模态（input 阶段，发送前/后都可点 chip 预览） ────────────────
 const previewVisible = ref(false)
-const previewFile = ref<{ id: number; name: string; size: number; language: string; path?: string } | null>(null)
+const previewFile = ref<{ id: number; name: string; size: number; path?: string } | null>(null)
 function openPendingPreview(f: PendingFile) {
   if (f.uploading || f.error || !f.id) return  // 仅就绪后可预览
+  // 注：不传 language —— 渲染器派发完全靠文件名后缀，与后端 detect_language 解耦
   previewFile.value = {
-    id: f.id, name: f.name, size: f.size || 0,
-    language: f.language || detectLanguage(f.path || f.name),
-    path: f.path,
+    id: f.id, name: f.name, size: f.size || 0, path: f.path,
   }
   previewVisible.value = true
 }
