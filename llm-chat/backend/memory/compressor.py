@@ -13,7 +13,11 @@
 """
 import logging
 
-from config import LONGTERM_MEMORY_ENABLED, SUMMARY_SYSTEM_PROMPT
+from config import (
+    FACT_EXTRACTION_ENABLED,
+    LONGTERM_MEMORY_ENABLED,
+    SUMMARY_SYSTEM_PROMPT,
+)
 from prompts import load_prompt as _lp
 
 _compressor_instruction = _lp("nodes/compressor")
@@ -53,10 +57,14 @@ async def maybe_compress(conv_id: str) -> bool:
         return False
 
     # 先写入长期记忆（Qdrant）— embedding 失败时跳过，不影响压缩主流程
-    if LONGTERM_MEMORY_ENABLED:
+    # 新架构（FACT_EXTRACTION_ENABLED）下事实已在每轮 extract_memory 节点写入，
+    # 这里不再重复批量写 Q&A 对，避免长期记忆表噪音过多。
+    if LONGTERM_MEMORY_ENABLED and not FACT_EXTRACTION_ENABLED:
         try:
             from rag.ingestor import batch_store_pairs
-            await batch_store_pairs(conv_id, to_summarise, conv.mid_term_cursor)
+            await batch_store_pairs(
+                conv_id, to_summarise, conv.mid_term_cursor, user_id=conv.client_id,
+            )
         except Exception as exc:
             logger.warning("长期记忆写入失败（已跳过，不影响压缩）| conv=%s | error=%s", conv_id, exc)
 

@@ -71,15 +71,9 @@ function toggleSelectAll() {
   }
 }
 
-// 批量删除确认
-const showBatchConfirm = ref(false)
-function confirmBatchDelete() {
-  if (selectedIds.value.size === 0) return
-  showBatchConfirm.value = true
-}
-
+// 批量删除：el-popconfirm 触发后直接进 doBatchDelete
 async function doBatchDelete() {
-  showBatchConfirm.value = false
+  if (selectedIds.value.size === 0) return
   batchDeleting.value = true
   const ids = [...selectedIds.value]
   // 全部标记为 deleting（同时触发退出动画）
@@ -92,10 +86,6 @@ async function doBatchDelete() {
   selectedIds.value = new Set()
   batchMode.value = false
   batchDeleting.value = false
-}
-
-function cancelBatchConfirm() {
-  showBatchConfirm.value = false
 }
 
 // 退出批量模式时清空选择
@@ -197,17 +187,31 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
           class="batch-checkbox"
         >全选</el-checkbox>
         <span class="batch-count">已选 {{ selectedIds.size }} 项</span>
-        <el-button-group class="batch-btn-group">
-          <el-button
-            type="danger"
-            size="small"
-            round
-            :icon="Delete"
-            :disabled="selectedIds.size === 0 || batchDeleting"
-            @click="confirmBatchDelete"
-            class="batch-delete-btn"
-          >删除</el-button>
-        </el-button-group>
+        <div class="batch-btn-group">
+          <el-popconfirm
+            :title="`确定删除这 ${selectedIds.size} 个对话吗？`"
+            :confirm-button-text="batchDeleting ? '删除中…' : '删掉'"
+            cancel-button-text="再想想"
+            confirm-button-type="danger"
+            icon-color="#FB7299"
+            :width="240"
+            placement="bottom-end"
+            popper-class="cf-bili-popconfirm"
+            :hide-after="0"
+            @confirm="doBatchDelete"
+          >
+            <template #reference>
+              <el-button
+                type="danger"
+                size="small"
+                round
+                :icon="Delete"
+                :disabled="selectedIds.size === 0 || batchDeleting"
+                class="batch-delete-btn"
+              >删除</el-button>
+            </template>
+          </el-popconfirm>
+        </div>
       </div>
     </Transition>
 
@@ -292,36 +296,6 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
         </div>
       </TransitionGroup>
     </div>
-
-    <!-- 批量删除确认弹窗 -->
-    <el-dialog
-      v-model="showBatchConfirm"
-      title="确认删除"
-      width="360px"
-      :close-on-click-modal="true"
-      :close-on-press-escape="true"
-      align-center
-      class="batch-delete-dialog"
-      @close="cancelBatchConfirm"
-    >
-      <div class="dialog-body">
-        <el-result icon="warning" title="" sub-title="">
-          <template #sub-title>
-            <span class="dialog-desc">
-              将永久删除 <strong>{{ selectedIds.size }}</strong> 个对话及其所有消息、文件产物和执行记录，此操作不可恢复。
-            </span>
-          </template>
-        </el-result>
-      </div>
-      <template #footer>
-        <div class="dialog-footer">
-          <el-button @click="cancelBatchConfirm" round>取消</el-button>
-          <el-button type="danger" round :loading="batchDeleting" @click="doBatchDelete">
-            {{ batchDeleting ? '删除中...' : '确认删除' }}
-          </el-button>
-        </div>
-      </template>
-    </el-dialog>
 
     <!-- 底部：运行状态 -->
     <div class="sidebar-footer">
@@ -692,52 +666,6 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
   50%       { opacity: 0.8; box-shadow: 0 0 0 5px rgba(0,174,236,0); }
 }
 
-/* ── 批量删除 el-dialog 样式 ── */
-:deep(.batch-delete-dialog .el-dialog) {
-  border-radius: 20px;
-  overflow: hidden;
-  box-shadow: 0 20px 60px rgba(0,0,0,0.15);
-}
-:deep(.batch-delete-dialog .el-dialog__header) {
-  padding: 18px 24px 12px;
-  font-weight: 700;
-  border-bottom: 1px solid var(--cf-border-soft);
-}
-:deep(.batch-delete-dialog .el-dialog__body) {
-  padding: 0 !important;
-}
-.dialog-body {
-  text-align: center;
-  padding: 8px 0;
-}
-:deep(.dialog-body .el-result) {
-  padding: 16px 20px;
-}
-:deep(.dialog-body .el-result__icon svg) {
-  width: 48px;
-  height: 48px;
-}
-.dialog-desc {
-  font-size: 13px;
-  color: var(--cf-text-3);
-  line-height: 1.6;
-}
-.dialog-desc strong { color: #F25D59; font-weight: 700; }
-.dialog-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-}
-:deep(.dialog-footer .el-button--danger) {
-  background: linear-gradient(135deg, #F25D59, #FB7299) !important;
-  border: none !important;
-  transition: all 0.2s !important;
-}
-:deep(.dialog-footer .el-button--danger:hover) {
-  transform: translateY(-1px);
-  box-shadow: 0 4px 14px rgba(242,93,89,0.35);
-}
-
 /* ── Footer ── */
 .sidebar-footer {
   padding: 12px;
@@ -789,5 +717,92 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
   background: var(--cf-hover);
   color: var(--cf-text-1);
   border-color: var(--cf-border);
+}
+</style>
+
+<!-- Bilibili 风格 Popconfirm：popper 被 Teleport 到 body，必须使用 unscoped 样式 -->
+<style>
+.cf-bili-popconfirm.el-popper {
+  border-radius: 16px !important;
+  border: 1.5px solid rgba(251, 114, 153, 0.22) !important;
+  background: linear-gradient(135deg, #ffffff 0%, #fdf4f7 100%) !important;
+  box-shadow:
+    0 10px 32px rgba(251, 114, 153, 0.22),
+    0 2px 8px rgba(0, 0, 0, 0.04) !important;
+  padding: 14px 16px 12px !important;
+  animation: cfBiliPop 0.22s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes cfBiliPop {
+  0%   { opacity: 0; transform: translateY(-6px) scale(0.92); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+.cf-bili-popconfirm .el-popconfirm__main {
+  gap: 10px !important;
+  padding-bottom: 6px !important;
+  color: #3b2a30;
+  font-size: 13px;
+  line-height: 1.55;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+.cf-bili-popconfirm .el-popconfirm__icon {
+  font-size: 18px !important;
+  filter: drop-shadow(0 1px 2px rgba(251, 114, 153, 0.35));
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.cf-bili-popconfirm .el-popconfirm__action {
+  display: flex !important;
+  gap: 8px !important;
+  justify-content: flex-end !important;
+  margin-top: 6px !important;
+}
+.cf-bili-popconfirm .el-button {
+  border-radius: 14px !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  height: 28px !important;
+  padding: 0 14px !important;
+  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+}
+.cf-bili-popconfirm .el-button--danger {
+  background: linear-gradient(135deg, #FB7299 0%, #F25D59 100%) !important;
+  border: none !important;
+  color: #fff !important;
+  box-shadow: 0 2px 8px rgba(251, 114, 153, 0.28) !important;
+}
+.cf-bili-popconfirm .el-button--danger:hover {
+  transform: translateY(-1px) scale(1.04);
+  box-shadow: 0 6px 16px rgba(251, 114, 153, 0.4) !important;
+}
+.cf-bili-popconfirm .el-button--danger:active {
+  transform: translateY(0) scale(0.98);
+}
+.cf-bili-popconfirm .el-button:not(.el-button--danger) {
+  background: #F6F1F3 !important;
+  border: 1px solid transparent !important;
+  color: #7a6770 !important;
+}
+.cf-bili-popconfirm .el-button:not(.el-button--danger):hover {
+  background: #EDE3E8 !important;
+  color: #00AEEC !important;
+}
+.cf-bili-popconfirm .el-popper__arrow::before {
+  background: linear-gradient(135deg, #fdf4f7, #ffffff) !important;
+  border-color: rgba(251, 114, 153, 0.22) !important;
+}
+body.dark .cf-bili-popconfirm.el-popper {
+  background: linear-gradient(135deg, #2a1e24 0%, #1f1419 100%) !important;
+  border-color: rgba(251, 114, 153, 0.35) !important;
+}
+body.dark .cf-bili-popconfirm .el-popconfirm__main {
+  color: #f5e7ec;
+}
+body.dark .cf-bili-popconfirm .el-button:not(.el-button--danger) {
+  background: #3a2a30 !important;
+  color: #c9b5bc !important;
+}
+body.dark .cf-bili-popconfirm .el-popper__arrow::before {
+  background: linear-gradient(135deg, #1f1419, #2a1e24) !important;
 }
 </style>

@@ -82,6 +82,14 @@ class Settings(BaseSettings):
     longterm_score_threshold: float
     summary_relevance_threshold: float
 
+    # ── 事实级长期记忆（Mem0 风格，独立开关，默认跟随 longterm_memory_enabled） ──
+    # fact_extraction_enabled=false 时保留旧的批量 Q&A 写入逻辑（COMPAT）
+    fact_extraction_enabled: bool = True
+    fact_min_confidence: float = 0.7          # 抽取置信度过滤阈值
+    fact_max_per_turn: int = 6                # 单轮最多抽取条数
+    fact_update_sim_threshold: float = 0.80   # ≥ 此分数才交给 LLM 判 UPDATE/DELETE/NONE
+    fact_update_candidate_top_k: int = 3      # 召回多少条候选给 updater 仲裁
+
     # ── 语义缓存（Redis Search） ──────────────────────────────────────────────
     semantic_cache_enabled: bool
     redis_url: str
@@ -186,6 +194,12 @@ EMBEDDING_DIM             = settings.embedding_dim
 LONGTERM_TOP_K            = settings.longterm_top_k
 LONGTERM_SCORE_THRESHOLD  = settings.longterm_score_threshold
 SUMMARY_RELEVANCE_THRESHOLD = settings.summary_relevance_threshold
+
+FACT_EXTRACTION_ENABLED       = settings.fact_extraction_enabled
+FACT_MIN_CONFIDENCE           = settings.fact_min_confidence
+FACT_MAX_PER_TURN             = settings.fact_max_per_turn
+FACT_UPDATE_SIM_THRESHOLD     = settings.fact_update_sim_threshold
+FACT_UPDATE_CANDIDATE_TOP_K   = settings.fact_update_candidate_top_k
 
 SEMANTIC_CACHE_ENABLED           = settings.semantic_cache_enabled
 REDIS_URL                        = settings.redis_url

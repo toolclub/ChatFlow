@@ -189,6 +189,34 @@ pytest tests/ -m smoke         # 冒烟拨测（端到端）
 | forget_mode | forget_mode=True | 窗口缩短，不注入远期记忆 | unit |
 | 长期记忆去重 | 记忆与近期消息重叠 >55% | 被过滤 | unit |
 
+### T-MEM-04: 事实抽取 (rag/extractor.py)
+
+| 用例 | 操作 | 期望 | 标记 |
+|------|------|------|------|
+| 抽取过滤低置信度 | LLM 返回 confidence=0.3 条目 | 不写入 | unit |
+| 抽取截断过长 fact | fact 字段 400 字 | 截断到 MAX_FACT_LEN | unit |
+| 非法 type 降级 knowledge | type="random" | type=knowledge | unit |
+| 无 user/assistant 直接返回 | 任一为空 | 返回 [] | unit |
+| LLM 返回非 JSON | raw="对不起..." | 返回 [] 并 warning | unit |
+| ```json 围栏容错 | raw 首尾有 ```json | 解析成功 | unit |
+| core_memory 渲染 | user_profile=["前端工程师"] | prompt 含 [身份] 前端工程师 | unit |
+| 最多 MAX_FACTS_PER_TURN 条 | LLM 返回 12 条 | 只保留前 N 条 | unit |
+
+### T-MEM-05: 事实更新决策器 (rag/updater.py)
+
+| 用例 | 操作 | 期望 | 标记 |
+|------|------|------|------|
+| 无候选直接 ADD | search 返回空 | Decision.ADD | unit |
+| 最高分低于阈值 ADD | max_score=0.5 (阈值 0.80) | Decision.ADD | unit |
+| 全部候选已 superseded 仍 ADD | live_candidates=[] | Decision.ADD | unit |
+| 仲裁 UPDATE 先写新后标记旧 | LLM 返回 UPDATE + target_id | upsert_fact → mark_superseded，顺序不可逆 | unit |
+| target_id 不在候选列表 降级 ADD | LLM 返回 target_id=999 | Decision.ADD + warning | unit |
+| 非法 decision 降级 ADD | decision="WTF" | Decision.ADD + warning | unit |
+| LLM 调用失败 降级 ADD | llm.ainvoke 抛异常 | Decision.ADD | unit |
+| 空 fact 直接 NONE | fact="" | Decision.NONE | unit |
+| DELETE 决策 删除目标 | LLM 返回 DELETE | delete_point 被调用 | unit |
+| UPDATE 过程失败 不留记忆空洞 | mark_superseded 失败 | 旧 fact 仍可检索（不静默丢失） | unit |
+
 ---
 
 ## 四、图节点 (graph/nodes/)
@@ -252,7 +280,31 @@ pytest tests/ -m smoke         # 冒烟拨测（端到端）
 | 缓存跳过工具响应 | tool_events 非空 | 不写缓存 | unit |
 | 缓存 TTL | chat 路由 | TTL=24h | unit |
 | 澄清 DB-first | state.clarification_data 有值 | 发 clarification 事件 | unit |
-| 澄清 COMPAT | full_response 含 [NEED_CLARIFICATION] | 解析 JSON | unit |
+| 澄清工具路径 | request_clarification 已写入 contextvar 槽 | save_response 从槽读 data → 发 clarification 事件，并消费清空槽 | unit |
+| 澄清槽 Task 隔离 | 在子 Task 中对 slot dict 做 in-place 变更 | 父 Task（save_response）读到变更后的值（验证共享引用语义） | unit |
+
+### T-NODE-07: extract_memory (fire-and-forget)
+
+| 用例 | 条件 | 期望 | 标记 |
+|------|------|------|------|
+| 关闭抽取 | FACT_EXTRACTION_ENABLED=False | 直接返回 {} | unit |
+| 澄清轮跳过 | needs_clarification=True | 直接返回 {} | unit |
+| 空 user/response 跳过 | user_msg="" 或 full_response="" | 直接返回 {} | unit |
+| 后台异常不传播 | extractor 抛 RuntimeError | 节点 execute 仍返回 {}，logger.warning | unit |
+| Task 强引用保留 | 并发 100 轮调用 | _pending 中的 Task 不被 GC 提前回收 | unit |
+| conv 不在缓存 | memory_store.get(conv_id) is None | 静默跳过，不抛 | unit |
+
+### T-TOOL-01: request_clarification (tools/builtin/clarification.py)
+
+| 用例 | 操作 | 期望 | 标记 |
+|------|------|------|------|
+| 合法输入 | 1 个 single_choice 3 选项 | slot["data"] 含 question+items | unit |
+| 选项不足降级 | options=["A"] | 该项被过滤，若没有合法项则返回警告字符串 | unit |
+| 非法 type 过滤 | type="dropdown" | 该项被过滤 | unit |
+| 超长 question 截断 | 500 字 | 截断到 200 字 | unit |
+| items 超过 4 个截断 | 6 个合法项 | 只保留前 4 | unit |
+| 空 question 拒绝 | question="" | 返回 ⚠️ 字符串，不写入槽 | unit |
+| 未初始化 slot 兜底 | contextvar 为 None（非 HTTP 路径） | 返回警告，不抛 | unit |
 
 ---
 

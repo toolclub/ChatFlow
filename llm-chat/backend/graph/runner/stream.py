@@ -209,9 +209,13 @@ class StreamSession:
     # ══════════════════════════════════════════════════════════════════════════
 
     async def _run_graph(self) -> None:
-        from sandbox.context import current_conv_id, current_message_id
+        from sandbox.context import current_clarification, current_conv_id, current_message_id
         current_conv_id.set(self.conv_id)
         current_message_id.set(self.assistant_message_id)
+        # 每轮入口放入一个新的可变 dict 作为澄清槽。
+        # 只在这里 .set() 一次，后续工具 / save_response 都通过 in-place 变更
+        # 同一 dict 共享数据（见 sandbox/context.py 注释关于 Task 隔离的说明）。
+        current_clarification.set({})
 
         graph = get_graph(self.model) if self.agent_mode else get_simple_graph(self.model)
         state = self._build_initial_state()

@@ -83,7 +83,11 @@ class RetrieveContextNode(BaseNode):
         if LONGTERM_MEMORY_ENABLED and user_msg:
             try:
                 from rag import retriever as rag_retriever
-                long_term = await rag_retriever.search_memories(conv_id, user_msg)
+                # user_id 非空时跨对话检索，否则退化为本会话检索
+                user_id = state.get("client_id", "") or (conv.client_id if conv else "")
+                long_term = await rag_retriever.search_memories(
+                    conv_id, user_msg, user_id=user_id,
+                )
 
                 # 长期记忆为空时，判断是否与当前话题相关（触发遗忘模式）
                 if not long_term and conv:

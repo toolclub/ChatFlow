@@ -576,15 +576,45 @@ async def sandbox_download(path: str = ".") -> str:
     if not content_b64:
         return "文件读取失败（内容为空）"
 
-    # 保存到 artifacts 表
+    # ── 保存到 artifacts 表 ──────────────────────────────────────────────────
+    # 关键 bug 修复：单文件下载与 sandbox_write 使用同一 path 做 UPSERT。
+    # 原逻辑一律存 JSON{binary_b64,...}，会覆盖 sandbox_write 先前保存的
+    # 原始 HTML/JS/TXT 内容，导致刷新后前端把 JSON 当 HTML 渲染，出现
+    # 一堆 base64 乱码。
+    #
+    # 正确做法：文本可安全 UTF-8 解码时保存原始文本（与 sandbox_write 一致，
+    #         UPSERT 等价于幂等更新）；二进制或解码失败再走 JSON 打包。
+    import base64 as _b64
     import json
-    packed_content = json.dumps({
-        "binary_b64": content_b64,
-        "original_size": file_size,
-    }, ensure_ascii=False)
+    raw_bytes: bytes | None = None
+    saved_content: str
+    is_binary_payload: bool
+
+    if language in ("pptx", "pdf", "archive"):
+        # 明确二进制：直接 JSON 打包
+        saved_content = json.dumps(
+            {"binary_b64": content_b64, "original_size": file_size},
+            ensure_ascii=False,
+        )
+        is_binary_payload = True
+    else:
+        try:
+            raw_bytes = _b64.b64decode(content_b64)
+            decoded = raw_bytes.decode("utf-8")
+            # NUL 字节：PostgreSQL UTF-8 列不支持，且几乎必然是二进制
+            if "\x00" in decoded:
+                raise UnicodeDecodeError("utf-8", b"", 0, 1, "NUL in decoded text")
+            saved_content = decoded
+            is_binary_payload = False
+        except (UnicodeDecodeError, ValueError):
+            saved_content = json.dumps(
+                {"binary_b64": content_b64, "original_size": file_size},
+                ensure_ascii=False,
+            )
+            is_binary_payload = True
 
     artifact = await save_artifact(
-        conv_id, display_name, path, packed_content,
+        conv_id, display_name, path, saved_content,
         language=language, message_id=msg_id, size=file_size,
     )
 
@@ -595,7 +625,7 @@ async def sandbox_download(path: str = ".") -> str:
         "path": path,
         "language": language,
         "size": file_size,
-        "binary": True,
+        "binary": is_binary_payload,
         "downloadable": True,
         "message_id": msg_id,
     })

@@ -68,6 +68,7 @@ from graph.nodes import (
     CallModelAfterToolNode,
     CallModelNode,
     CompressNode,
+    ExtractMemoryNode,
     PlannerNode,
     ReflectorNode,
     RetrieveContextNode,
@@ -103,6 +104,7 @@ def build_graph(tools: list[BaseTool], model: str = CHAT_MODEL) -> Any:
     call_model_tool_node   = CallModelAfterToolNode(tools)
     reflector_node         = ReflectorNode()
     save_response_node     = SaveResponseNode()
+    extract_memory_node    = ExtractMemoryNode()
     compress_node          = CompressNode()
 
     graph = StateGraph(GraphState) # type: ignore[arg-type]
@@ -116,6 +118,7 @@ def build_graph(tools: list[BaseTool], model: str = CHAT_MODEL) -> Any:
     graph.add_node("call_model_after_tool",  call_model_tool_node.execute) # type: ignore[arg-type]
     graph.add_node("reflector",              reflector_node.execute) # type: ignore[arg-type]
     graph.add_node("save_response",          save_response_node.execute) # type: ignore[arg-type]
+    graph.add_node("extract_memory",         extract_memory_node.execute) # type: ignore[arg-type]
     graph.add_node("compress_memory",        compress_node.execute) # type: ignore[arg-type]
 
     # ── 工具节点（LangGraph 内置，依赖 LangChain 消息格式） ──────────────────
@@ -157,7 +160,9 @@ def build_graph(tools: list[BaseTool], model: str = CHAT_MODEL) -> Any:
     # ── 线性边 ─────────────────────────────────────────────────────────────
     graph.add_edge("retrieve_context",  "planner")
     graph.add_edge("planner",           "call_model")
-    graph.add_edge("save_response",     "compress_memory")
+    # save_response → extract_memory（事实抽取，fire-and-forget）→ compress_memory
+    graph.add_edge("save_response",     "extract_memory")
+    graph.add_edge("extract_memory",    "compress_memory")
     graph.add_edge("compress_memory",   END)
 
     # ── 入口：semantic_cache_check 始终是第一个节点 ──────────────────────────
@@ -213,6 +218,7 @@ def build_simple_graph(tools: list[BaseTool], model: str = CHAT_MODEL) -> Any:
     call_model_node      = CallModelNode(tools)
     call_model_tool_node = CallModelAfterToolNode(tools)
     save_response_node   = SaveResponseNode()
+    extract_memory_node  = ExtractMemoryNode()
     compress_node        = CompressNode()
 
     graph = StateGraph(GraphState)  # type: ignore[arg-type]
@@ -223,6 +229,7 @@ def build_simple_graph(tools: list[BaseTool], model: str = CHAT_MODEL) -> Any:
     graph.add_node("call_model",            call_model_node.execute)      # type: ignore[arg-type]
     graph.add_node("call_model_after_tool", call_model_tool_node.execute) # type: ignore[arg-type]
     graph.add_node("save_response",         save_response_node.execute)   # type: ignore[arg-type]
+    graph.add_node("extract_memory",        extract_memory_node.execute)  # type: ignore[arg-type]
     graph.add_node("compress_memory",       compress_node.execute)        # type: ignore[arg-type]
 
     if tools:
@@ -255,7 +262,8 @@ def build_simple_graph(tools: list[BaseTool], model: str = CHAT_MODEL) -> Any:
     )
     graph.add_edge("vision_node",      "retrieve_context")
     graph.add_edge("retrieve_context", "call_model")
-    graph.add_edge("save_response",    "compress_memory")
+    graph.add_edge("save_response",    "extract_memory")
+    graph.add_edge("extract_memory",   "compress_memory")
     graph.add_edge("compress_memory",  END)
 
     return graph.compile()

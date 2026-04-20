@@ -22,6 +22,7 @@ from graph.nodes.cache_node import SemanticCacheNode
 from graph.nodes.call_model_after_tool_node import CallModelAfterToolNode
 from graph.nodes.call_model_node import CallModelNode
 from graph.nodes.compress_node import CompressNode
+from graph.nodes.extract_memory_node import ExtractMemoryNode
 from graph.nodes.planner_node import PlannerNode
 from graph.nodes.reflector_node import ReflectorNode
 from graph.nodes.retrieve_context_node import RetrieveContextNode
@@ -40,4 +41,5 @@ __all__ = [
     "ReflectorNode",
     "SaveResponseNode",
     "CompressNode",
+    "ExtractMemoryNode",
 ]

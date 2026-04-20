@@ -25,6 +25,7 @@ from config import (
 from graph.nodes.base import BaseNode
 from graph.state import GraphState
 from memory import store as memory_store
+from sandbox.context import current_clarification
 
 logger = logging.getLogger("graph.nodes.save_response")
 
@@ -58,10 +59,8 @@ class SaveResponseNode(BaseNode):
         user_msg  = state["user_message"]
         images    = state.get("images", [])
 
-        # 原始 full_response（含 think 块），用于澄清标记检测
-        raw_response  = state.get("full_response", "")
         # 移除 think 块后的 full_response（用于保存和日志）
-        full_response = self._strip_think_blocks(raw_response)
+        full_response = self._strip_think_blocks(state.get("full_response", ""))
 
         # 对话链路日志
         clog = get_conv_logger(client_id, conv_id)
@@ -88,14 +87,14 @@ class SaveResponseNode(BaseNode):
         # ── 澄清检测 ──────────────────────────────────────────────────────────
         # 优先：DB-first 路径 — call_model_node 预检直接设置 state 字段
         clar_data = state.get("clarification_data") or None
-        # COMPAT: 模型通过 system prompt 主动输出 [NEED_CLARIFICATION] 标记时，
-        # 需要从文本中解析。待 system prompt 改为工具调用方式后可移除。
+        # 其次：request_clarification 工具通过 in-place 变更写入的 dict 槽位。
+        # stream.py 入口已 set({}); 工具写入后这里直接读 ["data"]。
         if not clar_data:
-            for candidate in (full_response, raw_response):
-                if candidate and self._is_clarification_response(candidate):
-                    clar_data = self._extract_clarification_from_text(candidate)
-                    if clar_data:
-                        break
+            slot = current_clarification.get()
+            if isinstance(slot, dict) and slot.get("data"):
+                clar_data = slot["data"]
+                # 消费后清空，避免同一图执行中被误复用（注意：只清 key，不 .set()）
+                slot.pop("data", None)
 
         # 获取 StreamSession 预写的 DB 行 ID
         pre_user_id = state.get("pre_user_db_id", 0)
@@ -367,53 +366,3 @@ class SaveResponseNode(BaseNode):
         if summaries:
             return "【工具调用记录】\n" + "\n".join(summaries[:20])  # 最多 20 条
         return ""
-
-    # ── COMPAT: 模型输出的澄清标记解析（待 system prompt 改用工具调用后移除）────
-
-    _CLAR_START = "[NEED_CLARIFICATION]"
-    _CLAR_END   = "[/NEED_CLARIFICATION]"
-
-    @classmethod
-    def _is_clarification_response(cls, text: str) -> bool:
-        # COMPAT: 检测模型输出中的澄清标记
-        return cls._CLAR_START in text
-
-    @classmethod
-    def _extract_clarification_from_text(cls, text: str) -> dict | None:
-        """
-        COMPAT: 从模型输出的 [NEED_CLARIFICATION]...[/NEED_CLARIFICATION] 标记中提取 JSON。
-        容错：支持无闭合标签、markdown 包裹、JSON 内嵌等情况。
-        """
-        start = text.find(cls._CLAR_START)
-        if start == -1:
-            return None
-
-        after_start = text[start + len(cls._CLAR_START):]
-        end_in_after = after_start.find(cls._CLAR_END)
-        raw = after_start[:end_in_after].strip() if end_in_after != -1 else after_start.strip()
-
-        # 尝试直接解析
-        data = cls._try_parse_clar_json(raw)
-        if data:
-            return data
-
-        # 容错：用正则提取完整 JSON 对象
-        json_match = re.search(r'\{[\s\S]*\}', raw)
-        if json_match:
-            data = cls._try_parse_clar_json(json_match.group())
-            if data:
-                return data
-
-        logger.warning("COMPAT 澄清 JSON 解析失败 | raw=%.200s", raw)
-        return None
-
-    @staticmethod
-    def _try_parse_clar_json(raw: str) -> dict | None:
-        """尝试解析澄清 JSON，需含 question + items。"""
-        try:
-            data = json.loads(raw)
-            if isinstance(data, dict) and "question" in data and isinstance(data.get("items"), list):
-                return data
-        except (json.JSONDecodeError, ValueError):
-            pass
-        return None
