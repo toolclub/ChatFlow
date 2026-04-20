@@ -3,7 +3,10 @@
 """
 
 # ── Skill 元数据（SkillRegistry 自动收集） ──
-GUIDANCE = "获取当前精确日期和时间（支持时区）。系统提示中已有日期，仅在需要精确时间（时/分/秒）时才调用。"
+GUIDANCE = (
+    "问系统时钟当前时刻——带时区的「此刻」。"
+    "system prompt 里已经告诉你今天的日期；只在需要精确到时 / 分 / 秒，或需要某个非默认时区时才召唤它。"
+)
 ERROR_HINT = "时区格式应为 IANA 格式（如 Asia/Shanghai、America/New_York）。"
 TAGS = ["utility"]
 DISPLAY_MODE = "default"
@@ -15,10 +18,13 @@ from langchain_core.tools import tool
 @tool
 def get_current_datetime(timezone: str = "Asia/Shanghai") -> str:
     """
-    获取指定时区的当前日期和时间。
+    问系统时钟当前时刻——带时区的"此刻"。
+
+    何时召唤：需要精确到时 / 分 / 秒，或需要某个非默认时区。
+    何时不召唤：只是想知道今天日期——system prompt 里已经有了。
 
     Args:
-        timezone: 时区名称，例如 "Asia/Shanghai"（默认）、"UTC"、"America/New_York"
+        timezone: IANA 时区名，如 "Asia/Shanghai"（默认）、"UTC"、"America/New_York"
 
     Returns:
         格式化的当前日期时间字符串

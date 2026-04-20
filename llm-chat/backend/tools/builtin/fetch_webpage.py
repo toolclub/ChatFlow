@@ -6,7 +6,11 @@
 """
 
 # ── Skill 元数据（SkillRegistry 自动收集） ──
-GUIDANCE = "搜索结果不够详细时，用此工具读取完整网页正文。只支持 HTML 页面，不支持 PDF/图片等二进制文件。"
+GUIDANCE = (
+    "搜索给你摘要，这个工具给你原文。"
+    "当摘要不够、需要核对细节、或要引述某段原话时召唤。"
+    "只处理 HTML 页面；PDF / 图片 / 视频等二进制文件会被跳过。"
+)
 ERROR_HINT = "网页读取失败可能是目标站点限制，可尝试其他 URL 或换用 web_search 搜索相关内容。"
 TAGS = ["search", "web"]
 DISPLAY_MODE = "default"
@@ -64,14 +68,16 @@ def _do_fetch(url: str) -> str:
 @tool
 async def fetch_webpage(url: str) -> str:
     """
-    读取指定 URL 的网页正文内容，用于深入了解搜索结果中某个页面的详细信息。
-    适用于：需要阅读完整文章、获取详细数据、验证搜索摘要时。
+    读取某个 URL 的完整正文——搜索只给摘要，这里给原文。
+
+    何时召唤：需要阅读完整文章、核对具体数据、引述原话、验证搜索摘要。
+    只处理 HTML；PDF / 图片 / 视频等二进制无法解析。
 
     Args:
         url: 要读取的网页地址
 
     Returns:
-        网页的纯文本正文（最多 3000 字）
+        网页正文（纯文本，最多 3000 字）
     """
     logger.info("fetch_webpage 开始 | url='%s'", url)
     try:
