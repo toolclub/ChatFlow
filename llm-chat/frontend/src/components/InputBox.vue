@@ -91,6 +91,7 @@ interface ModeProfile {
   label: string
   desc: string
   accent: string  // 用于胶囊环配色
+  prompt: string  // 完整提示词，发送给后端
 }
 
 const MODE_META: Record<Exclude<PickerKind, 'ppt'>, { title: string; accent: string; profiles: ModeProfile[] }> = {
@@ -98,29 +99,62 @@ const MODE_META: Record<Exclude<PickerKind, 'ppt'>, { title: string; accent: str
     title: '选择研究配方',
     accent: '#8B5CF6',
     profiles: [
-      { id: 'brief',    label: '简报', desc: '300 字内 · 结构化要点 · 直给结论', accent: '#8B5CF6' },
-      { id: 'standard', label: '深解', desc: '多源交叉 · 正反对比 · 可追溯引用', accent: '#6D28D9' },
-      { id: 'academic', label: '学者', desc: '文献级严谨 · 定义/方法/局限/展望', accent: '#4C1D95' },
+      {
+        id: 'brief', label: '简报', desc: '300 字内 · 结构化要点 · 直给结论', accent: '#8B5CF6',
+        prompt: '【任务】生成一份结构化简报，300 字以内，直接给结论。\n\n【要求】\n- 结论先行，再给支撑要点（不超过 3 条）\n- 语言简洁，不废话\n- 不确定的事实调用工具核查\n\n【澄清协议】以下情况先问清楚再答：话题涉及多个对立观点、用户未明确立场偏好、需要引用外部数据但不确定来源。',
+      },
+      {
+        id: 'standard', label: '深解', desc: '多源交叉 · 正反对比 · 可追溯引用', accent: '#6D28D9',
+        prompt: '【任务】对话题做深度研究，输出结构化分析报告。\n\n【要求】\n- 多源交叉验证：至少引用 2 个不同来源\n- 列出正方和反方观点（如果存在争议）\n- 每条论点标注来源（标题 + 链接或出处）\n- 结论基于证据，不基于猜测\n\n【澄清协议】以下情况先调用 request_clarification：话题涉及专业领域术语但用户未说明背景、话题存在多种解释框架、用户未明确分析深度（入门/专业/学术）。',
+      },
+      {
+        id: 'academic', label: '学者', desc: '文献级严谨 · 定义/方法/局限/展望', accent: '#4C1D95',
+        prompt: '【任务】以学术规范对话题进行系统性分析，产出接近文献综述水平的内容。\n\n【要求】\n- 严格定义核心概念（给出 2-3 种代表性定义并比较）\n- 梳理研究方法论（定量/定性/案例等）\n- 分析局限性（数据、方法、视角）\n- 指出未来研究方向\n- 所有引用必须可查证\n\n【澄清协议】以下情况先问清楚：用户未说明目标读者是学术/专业/大众、话题的学科归属不明确、用户未说明需要的引用风格（APA/MLA/GB/T）。',
+      },
     ],
   },
   code: {
     title: '选择代码脚手架',
     accent: '#10B981',
     profiles: [
-      { id: 'cli',   label: '命令行', desc: '单文件脚本 · 带参数解析 · 自含依赖', accent: '#059669' },
-      { id: 'web',   label: 'Web 全栈', desc: '前后端最小闭环 · 本地即跑',      accent: '#0D9488' },
-      { id: 'algo',  label: '算法题',   desc: '推导 · 多解法 · 复杂度 · 边界',   accent: '#047857' },
-      { id: 'lib',   label: '库/模块',  desc: '抽象 API · 单测示例 · 可复用',    accent: '#065F46' },
+      {
+        id: 'cli', label: '命令行', desc: '单文件脚本 · 带参数解析 · 自含依赖', accent: '#059669',
+        prompt: '【任务】生成一个完整可运行的命令行工具脚本。\n\n【要求】\n- 单文件解决，不额外拆分文件\n- 必须含参数解析（argparse/opt 等）\n- 依赖必须注明，且只依赖标准库或用户已明确的库\n- 包含 --help 说明\n- 代码必须可直接运行\n\n【澄清协议】以下情况先调用 request_clarification：用户未说明目标语言（Python/Shell/Go/Rust 等）、未说明运行环境（Linux/macOS/Windows）、脚本涉及文件IO但未说明路径规范。',
+      },
+      {
+        id: 'web', label: 'Web 全栈', desc: '前后端最小闭环 · 本地即跑', accent: '#0D9488',
+        prompt: '【任务】根据用户需求构建一个前后端完整可运行的 Web 应用。\n\n【工作流程】\n1. 确认技术栈偏好（前端框架 / 后端语言 / 数据库）\n2. 生成完整代码，确保本地可运行\n3. 说明启动方式和依赖安装\n\n【产物要求】\n- 代码完整，不依赖未声明的外部库\n- 前后端分离，提供启动说明\n- 遵循所选技术栈的最佳实践\n- 不要在聊天里复述完整源码——告知用户文件路径和启动方式即可\n\n【澄清协议】以下情况必须先调用 request_clarification：用户未指定前端框架（React/Vue/Angular/纯HTML等）、后端语言和框架（Node/Flask/FastAPI/Django等）、数据库选型（MySQL/PostgreSQL/SQLite/MongoDB等）、是否需要用户认证和 API 接口设计。',
+      },
+      {
+        id: 'algo', label: '算法题', desc: '推导 · 多解法 · 复杂度 · 边界', accent: '#047857',
+        prompt: '【任务】帮助用户理解、推导和实现算法。\n\n【工作流程】\n1. 理解问题：确认输入输出、边界条件、特殊用例\n2. 推导思路：分析最优解法及时间 / 空间复杂度\n3. 提供多解法：穷举 → 优化 → 最优，讲解每种取舍\n4. 给出完整代码实现\n5. 验证边界情况和极端用例\n\n【产物要求】\n- 代码必须完整可运行\n- 每种解法标注时间 / 空间复杂度\n- 要有边界条件处理\n- 讲解帮助理解，不是直接给答案\n\n【澄清协议】以下情况先调用 request_clarification：用户未说明编程语言偏好、未明确输入数据规模和取值范围、题目来自在线评测（OJ）但未提供链接或原始描述。',
+      },
+      {
+        id: 'lib', label: '库/模块', desc: '抽象 API · 单测示例 · 可复用', accent: '#065F46',
+        prompt: '【任务】生成一个可复用的库或模块代码。\n\n【要求】\n- 抽象为独立 API 模块，不耦合具体业务逻辑\n- 包含完整的函数 / 类文档注释\n- 提供单元测试示例\n- 导出接口清晰，附使用示例\n- 不依赖未声明的第三方库\n\n【澄清协议】以下情况先调用 request_clarification：用户未说明目标语言（Python/JS/Go/Rust 等）、未说明是否需要类型注解、未说明调用方式偏好（同步/异步）。',
+      },
     ],
   },
   writing: {
     title: '选择书写体裁',
     accent: '#FB7299',
     profiles: [
-      { id: 'weixin', label: '公众号',  desc: '长文 · 有节奏的小标题',            accent: '#FB7299' },
-      { id: 'xhs',    label: '小红书',  desc: '短段 · emoji 点缀 · 标签后缀',     accent: '#EF4444' },
-      { id: 'email',  label: '邮件',    desc: '简洁 · 语气考究 · 结尾有 CTA',     accent: '#DC2626' },
-      { id: 'story',  label: '短篇故事', desc: '场景+对白+余韵 · 1500 字内',      accent: '#B91C1C' },
+      {
+        id: 'weixin', label: '公众号', desc: '长文 · 有节奏的小标题', accent: '#FB7299',
+        prompt: '【任务】按公众号风格撰写一篇结构化长文。\n\n【要求】\n- 长度 1500-3000 字\n- 有节奏感的小标题（3-5 个）\n- 开头抓人（痛点 / 故事 / 数据）\n- 结尾有行动号召或情感共鸣\n- 语言风格：专业但不晦涩，接地气\n\n【澄清协议】以下情况先调用 request_clarification：用户未说明文章主题和核心观点、未说明目标读者是谁（职场/学生/专业/大众）、未说明希望突出的重点（案例/数据/情感/方法论）。',
+      },
+      {
+        id: 'xhs', label: '小红书', desc: '短段 · emoji 点缀 · 标签后缀', accent: '#EF4444',
+        prompt: '【任务】按小红书风格生成一篇吸引人的短内容。\n\n【要求】\n- 每段控制在 3 行以内，留白透气\n- 善用 emoji 点缀（但不过度）\n- 结尾加标签（#标签名 格式，3-8 个）\n- 开头要有钩子（数字 / 痛点 / 反差）\n- 总字数控制在 500-800 字\n\n【澄清协议】以下情况先调用 request_clarification：用户未说明内容主题和核心卖点、未说明目标人群（学生党/职场人/宝妈等）、未说明内容调性（干货/情感/搞笑/种草）。',
+      },
+      {
+        id: 'email', label: '邮件', desc: '简洁 · 语气考究 · 结尾有 CTA', accent: '#DC2626',
+        prompt: '【任务】撰写一封专业邮件。\n\n【要求】\n- 主题行清晰，不超过 50 字\n- 正文简洁，3 段以内（背景 / 核心内容 / 行动）\n- 语气得体（尊重但不卑微）\n- 结尾有明确 CTA（希望对方做什么）\n- 格式规范，适合商务场景\n\n【澄清协议】以下情况先调用 request_clarification：用户未说明收件人和发件人关系（上下级/平级/客户/合作方）、未说明邮件目的（申请/汇报/感谢/通知/邀请）、未说明紧急程度（常规/加急）。',
+      },
+      {
+        id: 'story', label: '短篇故事', desc: '场景+对白+余韵 · 1500 字内', accent: '#B91C1C',
+        prompt: '【任务】撰写一个完整的短篇故事。\n\n【要求】\n- 长度 800-1500 字\n- 有具体场景和人物\n- 有对白，不要通篇叙述\n- 结尾有余韵，不说破，留给读者想象\n- 情感真实，不矫情\n\n【澄清协议】以下情况先调用 request_clarification：用户未说明故事主题或核心情感（爱情/成长/悬疑/温情等）、未说明目标读者年龄层（儿童/青少年/成人）、未说明故事背景时代（现代/民国/科幻/奇幻）。',
+      },
     ],
   },
 }
@@ -642,6 +676,10 @@ const canSend = () =>
 function handleSend() {
   if (!canSend()) return
   let text = input.value
+  // 选了胶囊模式但没打字，自动填一个最小占位（确保 intent 能送达后端）
+  if (!text.trim() && selectedMode.value) {
+    text = selectedMode.value.profile.label
+  }
   // intent：API 路由前缀 | intentLabel：气泡里显示的意图标签
   let intent = ''
   let intentLabel = ''
@@ -649,7 +687,7 @@ function handleSend() {
     intent = `[PPT:${selectedPptTheme.value.id}]`
     intentLabel = `做 PPT · ${selectedPptTheme.value.label}`
   } else if (selectedMode.value) {
-    intent = `[${selectedMode.value.profile.id}]`
+    intent = selectedMode.value.profile.prompt
     intentLabel = `${modeKindLabel(selectedMode.value.kind)} · ${selectedMode.value.profile.label}`
   }
   // 只发送"已上传成功"的文件（有 id，且未标记 error/uploading）
