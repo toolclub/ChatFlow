@@ -47,13 +47,12 @@ onMounted(() => {
   if (saved !== null) agentMode.value = saved === 'true'
   emit('agent-change', agentMode.value)
 
-  // 主题缩略图解码预热：让浏览器在空闲时把 12 张 SVG 先解码好，
-  // 首次打开 PPT 面板时只做挂载，不再同帧解码 → 无感顺滑。
+  // 主题封面图预热：首次打开 PPT 画廊时 8 张 WebP 已在浏览器磁盘缓存里
   const warmup = () => {
     for (const t of pptThemesWithUri) {
       const img = new Image()
       img.decoding = 'async'
-      img.src = t.svgUri
+      img.src = t.image
     }
   }
   const idle = (window as any).requestIdleCallback as ((fn: () => void) => void) | undefined
@@ -188,481 +187,64 @@ function modeKindLabel(kind: 'research' | 'code' | 'writing'): string {
 defineExpose({ openCapsule })
 
 interface PptTheme {
-  id: string
-  label: string
-  desc: string
-  bg: string       // 背景色
-  primary: string   // 标题色
-  accent: string    // 装饰色
-  textColor: string // 正文色
+  id: string            // 随 [PPT:xxx] 提示词送给后端
+  label: string         // 胶囊标签 / 气泡里显示
+  desc: string          // 卡片副标题
+  image: string         // 缩略图 + 送给模型的 mood board（/public 下静态资源）
+  tint: string          // 卡片底部遮罩色（cover 风封面字叠加用）
 }
 
+// 8 个真图主题（/public/ppt-themes/*.webp，Unsplash CC0）
 const PPT_THEMES: PptTheme[] = [
-  // 商务风格
-  { id: 'corp_blue',      label: '企业蓝',      desc: '商务汇报',   bg: '#FFFFFF', primary: '#1E3A5F', accent: '#2563EB', textColor: '#64748B' },
-  { id: 'exec_dark',      label: 'Executive',   desc: '高管提案',   bg: '#0F172A', primary: '#F8FAFC', accent: '#F59E0B', textColor: '#94A3B8' },
-  { id: 'startup',        label: 'Startup',     desc: '创业路演',   bg: '#FFFFFF', primary: '#7C3AED', accent: '#06B6D4', textColor: '#64748B' },
-  // 动漫风格
-  { id: 'sakura',         label: '樱花物语',    desc: '日系唯美',   bg: '#FFF0F5', primary: '#E91E8C', accent: '#FFB7C5', textColor: '#8B7355' },
-  { id: 'neon_tokyo',     label: '霓虹东京',    desc: '赛博朋克',   bg: '#0D0D1A', primary: '#FF2D78', accent: '#00FFFF', textColor: '#B0B0B0' },
-  { id: 'fantasy',        label: '梦幻森林',    desc: '童话魔法',   bg: '#F0FDF4', primary: '#059669', accent: '#A855F7', textColor: '#6B7280' },
-  // 创意风格
-  { id: 'watercolor',     label: '水彩艺术',   desc: '创意设计',   bg: '#FEFCE8', primary: '#D946EF', accent: '#F59E0B', textColor: '#92400E' },
-  { id: 'geometric',       label: '几何艺术',    desc: '抽象装饰',   bg: '#FAFAFA', primary: '#18181B', accent: '#EF4444', textColor: '#525252' },
-  { id: 'retro',          label: '复古潮流',    desc: '怀旧情怀',   bg: '#FEF3C7', primary: '#B45309', accent: '#DC2626', textColor: '#78350F' },
-  // 自然风格
-  { id: 'mountain',       label: '山水禅意',    desc: '东方美学',   bg: '#F5F5F4', primary: '#1C1917', accent: '#78716C', textColor: '#57534E' },
-  { id: 'ocean',          label: '深海探秘',    desc: '海洋生态',   bg: '#F0F9FF', primary: '#0369A1', accent: '#0891B2', textColor: '#0C4A6E' },
-  { id: 'aurora',         label: '极光星夜',    desc: '北欧风情',   bg: '#0F1729', primary: '#E0F2FE', accent: '#A78BFA', textColor: '#7DD3FC' },
+  { id: 'nordic_mist',    label: 'Nordic Mist',    desc: '雪原冷峰 · 商务汇报',  image: '/ppt-themes/nordic_mist.webp',    tint: 'rgba(12,22,38,0.72)' },
+  { id: 'editorial_mono', label: 'Editorial Mono', desc: '黑白建筑 · 极致克制',  image: '/ppt-themes/editorial_mono.webp', tint: 'rgba(0,0,0,0.70)' },
+  { id: 'kyoto_dusk',     label: 'Kyoto Dusk',     desc: '京都暮色 · 东方沉静',  image: '/ppt-themes/kyoto_dusk.webp',     tint: 'rgba(40,18,18,0.66)' },
+  { id: 'aurora_night',   label: 'Aurora Night',   desc: '北极光 · 科技发布',    image: '/ppt-themes/aurora_night.webp',   tint: 'rgba(8,18,38,0.62)' },
+  { id: 'pacific_fog',    label: 'Pacific Fog',    desc: '海雾晨光 · 学术冷静',  image: '/ppt-themes/pacific_fog.webp',    tint: 'rgba(20,32,48,0.58)' },
+  { id: 'desert_gold',    label: 'Desert Gold',    desc: '沙漠金辉 · 品牌温度',  image: '/ppt-themes/desert_gold.webp',    tint: 'rgba(52,24,8,0.58)' },
+  { id: 'gallery_white',  label: 'Gallery White',  desc: '美术馆白 · 极简留白',  image: '/ppt-themes/gallery_white.webp',  tint: 'rgba(0,0,0,0.50)' },
+  { id: 'neon_district',  label: 'Neon District',  desc: '都市霓虹 · 潮流视觉',  image: '/ppt-themes/neon_district.webp',  tint: 'rgba(8,10,28,0.60)' },
 ]
 
-/** 生成精美4K风格PPT主题缩略图 */
-function buildThemeSvg(t: PptTheme): string {
-  const isDark = ['#0F172A','#0D0D1A','#0F1729','#1E1E2E'].includes(t.bg)
+// 画廊列表（保留旧 pptThemesWithUri 命名便于模板兼容，不再预合成 SVG）
+const pptThemesWithUri = PPT_THEMES
 
-  // 通用滤镜定义
-  const defs = `
-    <defs>
-      <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-        <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="${isDark ? 'rgba(0,0,0,0.5)' : 'rgba(0,0,0,0.1)'}" flood-opacity="1"/>
-      </filter>
-      <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
-        <feGaussianBlur stdDeviation="3" result="blur"/>
-        <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
-      </filter>
-      <filter id="softGlow" x="-30%" y="-30%" width="160%" height="160%">
-        <feGaussianBlur stdDeviation="2" result="blur"/>
-        <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
-      </filter>
-    </defs>`
+// 当前主题的图片 dataURI（会放进 pendingImages），用 ref 精确跟踪，避免误删用户的其他附件
+const pptThemeImageUri = ref<string | null>(null)
 
-  // 各主题专属设计
-  const designs: Record<string, string> = {
-
-    // ═══════════════════════════════════════════════════════════════
-    // 商务风格
-    // ═══════════════════════════════════════════════════════════════
-
-    corp_blue: `
-      <rect width="200" height="120" rx="8" fill="#FFFFFF"/>
-      <!-- 顶部蓝色条带 -->
-      <rect x="0" y="0" width="200" height="6" rx="0" fill="${t.primary}"/>
-      <!-- 左侧装饰竖条 -->
-      <rect x="20" y="25" width="5" height="35" rx="2.5" fill="${t.accent}"/>
-      <!-- 标题 -->
-      <rect x="32" y="28" width="80" height="10" rx="3" fill="${t.primary}"/>
-      <rect x="32" y="44" width="55" height="5" rx="2.5" fill="#E2E8F0"/>
-      <!-- 主内容卡片 -->
-      <rect x="20" y="60" width="110" height="50" rx="6" fill="#F8FAFC" filter="url(#shadow)"/>
-      <!-- 图表区域 -->
-      <rect x="30" y="70" width="40" height="6" rx="2" fill="${t.accent}"/>
-      <rect x="30" y="82" width="90" height="4" rx="2" fill="#E2E8F0"/>
-      <rect x="30" y="92" width="75" height="4" rx="2" fill="#E2E8F0"/>
-      <rect x="30" y="102" width="60" height="4" rx="2" fill="#E2E8F0"/>
-      <!-- 右侧数据卡片 -->
-      <rect x="140" y="30" width="45" height="80" rx="6" fill="white" filter="url(#shadow)"/>
-      <circle cx="162" cy="60" r="18" fill="none" stroke="#E2E8F0" stroke-width="6"/>
-      <circle cx="162" cy="60" r="18" fill="none" stroke="${t.accent}" stroke-width="6" stroke-dasharray="75 113" stroke-linecap="round" transform="rotate(-90 162 60)"/>
-      <rect x="148" y="88" width="30" height="5" rx="2" fill="${t.primary}"/>
-      <rect x="148" y="97" width="20" height="4" rx="2" fill="#E2E8F0"/>
-      <!-- 底部页码 -->
-      <rect x="85" y="112" width="30" height="3" rx="1.5" fill="#CBD5E1"/>
-    `,
-
-    exec_dark: `
-      <rect width="200" height="120" rx="8" fill="${t.bg}"/>
-      <!-- 背景光晕 -->
-      <circle cx="180" cy="30" r="60" fill="${t.accent}" opacity="0.05" filter="url(#glow)"/>
-      <!-- 顶部金色条带 -->
-      <rect x="0" y="0" width="200" height="5" rx="0" fill="${t.accent}" filter="url(#softGlow)"/>
-      <!-- 标题 -->
-      <rect x="25" y="25" width="70" height="12" rx="3" fill="${t.primary}"/>
-      <rect x="25" y="43" width="45" height="5" rx="2.5" fill="rgba(255,255,255,0.3)"/>
-      <!-- 主卡片 -->
-      <rect x="25" y="60" width="100" height="50" rx="6" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.1)" stroke-width="1"/>
-      <!-- 数据展示 -->
-      <rect x="35" y="72" width="35" height="8" rx="2" fill="${t.accent}" filter="url(#softGlow)"/>
-      <rect x="35" y="86" width="75" height="4" rx="2" fill="rgba(255,255,255,0.15)"/>
-      <rect x="35" y="96" width="60" height="4" rx="2" fill="rgba(255,255,255,0.1)"/>
-      <!-- 右侧图表 -->
-      <rect x="135" y="30" width="50" height="80" rx="6" fill="rgba(255,255,255,0.03)" stroke="${t.accent}" stroke-width="0.5" opacity="0.8"/>
-      <rect x="145" y="42" width="30" height="5" rx="2" fill="${t.accent}"/>
-      <!-- 折线图 -->
-      <polyline points="145,95 155,80 165,88 175,70 185,78" fill="none" stroke="${t.accent}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-      <circle cx="155" cy="80" r="3" fill="${t.accent}"/>
-      <circle cx="175" cy="70" r="3" fill="${t.accent}"/>
-      <!-- 底部页码 -->
-      <rect x="85" y="112" width="30" height="3" rx="1.5" fill="rgba(255,255,255,0.2)"/>
-    `,
-
-    startup: `
-      <rect width="200" height="120" rx="8" fill="#FFFFFF"/>
-      <!-- 渐变顶部 -->
-      <rect x="0" y="0" width="200" height="5" rx="0">
-        <linearGradient id="startupGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-          <stop offset="0%" stop-color="${t.primary}"/>
-          <stop offset="100%" stop-color="${t.accent}"/>
-        </linearGradient>
-      </rect>
-      <rect x="0" y="0" width="200" height="5" rx="0" fill="url(#startupGrad)"/>
-      <!-- 装饰圆形 -->
-      <circle cx="175" cy="30" r="35" fill="${t.accent}" opacity="0.08"/>
-      <circle cx="180" cy="25" r="20" fill="${t.primary}" opacity="0.1"/>
-      <!-- 标题 -->
-      <rect x="20" y="20" width="60" height="10" rx="3" fill="${t.primary}"/>
-      <rect x="20" y="36" width="40" height="5" rx="2.5" fill="${t.accent}" opacity="0.6"/>
-      <!-- 内容 -->
-      <rect x="20" y="55" width="75" height="55" rx="6" fill="#FAFAFA" filter="url(#shadow)"/>
-      <rect x="30" y="65" width="30" height="6" rx="2" fill="${t.primary}"/>
-      <rect x="30" y="78" width="55" height="4" rx="2" fill="#E2E8F0"/>
-      <rect x="30" y="88" width="45" height="4" rx="2" fill="#E2E8F0"/>
-      <rect x="30" y="98" width="50" height="4" rx="2" fill="#E2E8F0"/>
-      <!-- 右侧增长图 -->
-      <rect x="105" y="55" width="75" height="55" rx="6" fill="#F0F9FF" filter="url(#shadow)"/>
-      <polyline points="120,95 135,75 150,82 165,60 180,70" fill="none" stroke="${t.accent}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-      <polygon points="165,60 180,70 165,70 150,82 135,75 120,95 120,100 165,100 180,100 180,70" fill="${t.accent}" opacity="0.15"/>
-      <circle cx="165" cy="60" r="4" fill="${t.accent}" filter="url(#softGlow)"/>
-      <!-- 底部页码 -->
-      <rect x="85" y="112" width="30" height="3" rx="1.5" fill="#CBD5E1"/>
-    `,
-
-    // ═══════════════════════════════════════════════════════════════
-    // 动漫风格
-    // ═══════════════════════════════════════════════════════════════
-
-    sakura: `
-      <rect width="200" height="120" rx="8" fill="${t.bg}"/>
-      <!-- 樱花装饰 -->
-      <ellipse cx="20" cy="20" rx="12" ry="10" fill="${t.accent}" opacity="0.4" transform="rotate(-15 20 20)"/>
-      <ellipse cx="28" cy="28" rx="8" ry="6" fill="${t.primary}" opacity="0.3" transform="rotate(20 28 28)"/>
-      <ellipse cx="180" cy="95" rx="15" ry="12" fill="${t.accent}" opacity="0.25" transform="rotate(30 180 95)"/>
-      <ellipse cx="175" cy="100" rx="10" ry="8" fill="${t.primary}" opacity="0.2" transform="rotate(-10 175 100)"/>
-      <!-- 樱花花瓣飘落 -->
-      <ellipse cx="60" cy="35" rx="5" ry="4" fill="${t.accent}" opacity="0.5"/>
-      <ellipse cx="140" cy="45" rx="4" ry="3" fill="${t.primary}" opacity="0.4"/>
-      <ellipse cx="90" cy="85" rx="5" ry="4" fill="${t.accent}" opacity="0.35"/>
-      <!-- 顶部粉色条带 -->
-      <rect x="0" y="0" width="200" height="5" rx="0" fill="${t.primary}"/>
-      <!-- 标题 -->
-      <rect x="35" y="25" width="70" height="10" rx="3" fill="${t.primary}" filter="url(#softGlow)"/>
-      <rect x="35" y="41" width="50" height="5" rx="2.5" fill="${t.accent}" opacity="0.7"/>
-      <!-- 主卡片 -->
-      <rect x="20" y="58" width="80" height="52" rx="8" fill="white" filter="url(#shadow)"/>
-      <rect x="28" y="68" width="35" height="5" rx="2" fill="${t.primary}"/>
-      <rect x="28" y="80" width="60" height="4" rx="2" fill="#FFF0F5"/>
-      <rect x="28" y="90" width="50" height="4" rx="2" fill="#FFF0F5"/>
-      <rect x="28" y="100" width="55" height="4" rx="2" fill="#FFF0F5"/>
-      <!-- 右侧装饰 -->
-      <rect x="110" y="58" width="70" height="52" rx="8" fill="white" filter="url(#shadow)"/>
-      <circle cx="145" cy="84" r="20" fill="${t.accent}" opacity="0.15"/>
-      <circle cx="145" cy="84" r="14" fill="${t.primary}" opacity="0.1"/>
-      <circle cx="145" cy="84" r="8" fill="${t.accent}" opacity="0.2"/>
-      <!-- 底部页码 -->
-      <rect x="85" y="112" width="30" height="3" rx="1.5" fill="#FECDD3"/>
-    `,
-
-    neon_tokyo: `
-      <rect width="200" height="120" rx="8" fill="${t.bg}"/>
-      <!-- 背景网格 -->
-      <pattern id="tokyoGrid" width="12" height="12" patternUnits="userSpaceOnUse">
-        <path d="M 12 0 L 0 0 0 12" fill="none" stroke="rgba(255,45,120,0.08)" stroke-width="0.5"/>
-      </pattern>
-      <rect width="200" height="120" fill="url(#tokyoGrid)"/>
-      <!-- 霓虹光晕 -->
-      <circle cx="30" cy="90" r="50" fill="${t.primary}" opacity="0.04" filter="url(#glow)"/>
-      <circle cx="170" cy="40" r="45" fill="${t.accent}" opacity="0.05" filter="url(#glow)"/>
-      <!-- 霓虹顶部条 -->
-      <rect x="0" y="0" width="200" height="4" fill="${t.primary}" filter="url(#softGlow)"/>
-      <!-- 建筑轮廓装饰 -->
-      <rect x="10" y="100" width="15" height="20" rx="1" fill="${t.accent}" opacity="0.15"/>
-      <rect x="28" y="95" width="12" height="25" rx="1" fill="${t.primary}" opacity="0.1"/>
-      <rect x="165" y="98" width="18" height="22" rx="1" fill="${t.accent}" opacity="0.12"/>
-      <rect x="152" y="102" width="10" height="18" rx="1" fill="${t.primary}" opacity="0.08"/>
-      <!-- 标题 -->
-      <rect x="25" y="22" width="65" height="10" rx="3" fill="${t.primary}" filter="url(#glow)"/>
-      <rect x="25" y="38" width="45" height="4" rx="2" fill="${t.accent}" opacity="0.8"/>
-      <!-- 主卡片 -->
-      <rect x="25" y="55" width="70" height="45" rx="5" fill="rgba(255,45,120,0.05)" stroke="${t.primary}" stroke-width="0.5" opacity="0.9"/>
-      <rect x="33" y="63" width="35" height="4" rx="2" fill="${t.primary}" filter="url(#softGlow)"/>
-      <rect x="33" y="74" width="50" height="3" rx="1.5" fill="rgba(0,255,255,0.3)"/>
-      <rect x="33" y="82" width="40" height="3" rx="1.5" fill="rgba(0,255,255,0.2)"/>
-      <rect x="33" y="90" width="45" height="3" rx="1.5" fill="rgba(255,45,120,0.25)"/>
-      <!-- 右侧霓虹装饰 -->
-      <rect x="105" y="55" width="75" height="45" rx="5" fill="rgba(0,255,255,0.03)" stroke="${t.accent}" stroke-width="0.5"/>
-      <rect x="113" y="62" width="30" height="4" rx="2" fill="${t.accent}" filter="url(#glow)"/>
-      <!-- 数据流 -->
-      <path d="M113,82 L125,72 L140,78 L155,65 L170,72" fill="none" stroke="${t.primary}" stroke-width="1.5" stroke-dasharray="4 2" opacity="0.7"/>
-      <path d="M113,92 L130,85 L145,90 L165,80 L175,85" fill="none" stroke="${t.accent}" stroke-width="1" stroke-dasharray="3 2" opacity="0.5"/>
-      <!-- 底部页码 -->
-      <rect x="85" y="112" width="30" height="3" rx="1.5" fill="rgba(255,45,120,0.3)"/>
-    `,
-
-    fantasy: `
-      <rect width="200" height="120" rx="8" fill="${t.bg}"/>
-      <!-- 魔法光效 -->
-      <circle cx="100" cy="60" r="55" fill="${t.primary}" opacity="0.05" filter="url(#glow)"/>
-      <circle cx="160" cy="35" r="30" fill="${t.accent}" opacity="0.06" filter="url(#glow)"/>
-      <!-- 星星装饰 -->
-      <path d="M50,25 L52,30 L57,30 L53,33 L55,38 L50,35 L45,38 L47,33 L43,30 L48,30 Z" fill="${t.accent}" opacity="0.4"/>
-      <path d="M170,55 L171,58 L174,58 L172,60 L173,63 L170,61 L167,63 L168,60 L166,58 L169,58 Z" fill="${t.primary}" opacity="0.35"/>
-      <path d="M35,90 L36,93 L39,93 L37,95 L38,98 L35,96 L32,98 L33,95 L31,93 L34,93 Z" fill="${t.accent}" opacity="0.3"/>
-      <!-- 顶部渐变条 -->
-      <rect x="0" y="0" width="200" height="4" rx="0">
-        <linearGradient id="magicGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-          <stop offset="0%" stop-color="${t.primary}"/>
-          <stop offset="100%" stop-color="${t.accent}"/>
-        </linearGradient>
-      </rect>
-      <rect x="0" y="0" width="200" height="4" rx="0" fill="url(#magicGrad)" filter="url(#softGlow)"/>
-      <!-- 标题 -->
-      <rect x="25" y="22" width="60" height="10" rx="3" fill="${t.primary}" filter="url(#softGlow)"/>
-      <rect x="25" y="38" width="40" height="5" rx="2.5" fill="${t.accent}" opacity="0.7"/>
-      <!-- 主卡片 -->
-      <rect x="20" y="55" width="75" height="55" rx="8" fill="white" filter="url(#shadow)"/>
-      <rect x="28" y="65" width="40" height="5" rx="2" fill="${t.primary}"/>
-      <rect x="28" y="77" width="55" height="4" rx="2" fill="#ECFDF5"/>
-      <rect x="28" y="87" width="45" height="4" rx="2" fill="#ECFDF5"/>
-      <rect x="28" y="97" width="50" height="4" rx="2" fill="#ECFDF5"/>
-      <!-- 魔法杖装饰 -->
-      <rect x="105" y="60" width="75" height="50" rx="8" fill="white" filter="url(#shadow)"/>
-      <circle cx="142" cy="85" r="18" fill="${t.accent}" opacity="0.1"/>
-      <circle cx="142" cy="85" r="12" fill="${t.primary}" opacity="0.15"/>
-      <circle cx="142" cy="85" r="6" fill="${t.accent}" opacity="0.25" filter="url(#softGlow)"/>
-      <!-- 底部页码 -->
-      <rect x="85" y="112" width="30" height="3" rx="1.5" fill="#D1FAE5"/>
-    `,
-
-    // ═══════════════════════════════════════════════════════════════
-    // 创意风格
-    // ═══════════════════════════════════════════════════════════════
-
-    watercolor: `
-      <rect width="200" height="120" rx="8" fill="${t.bg}"/>
-      <!-- 水彩晕染效果 -->
-      <ellipse cx="50" cy="100" rx="60" ry="40" fill="${t.primary}" opacity="0.08"/>
-      <ellipse cx="150" cy="80" rx="50" ry="45" fill="${t.accent}" opacity="0.1"/>
-      <ellipse cx="100" cy="60" rx="40" ry="35" fill="${t.primary}" opacity="0.06"/>
-      <!-- 顶部条带 -->
-      <rect x="0" y="0" width="200" height="5" rx="0" fill="${t.primary}" opacity="0.8"/>
-      <!-- 标题 -->
-      <rect x="25" y="22" width="55" height="10" rx="3" fill="${t.primary}"/>
-      <rect x="25" y="38" width="35" height="5" rx="2.5" fill="${t.accent}" opacity="0.6"/>
-      <!-- 主卡片 -->
-      <rect x="20" y="55" width="80" height="55" rx="8" fill="white" filter="url(#shadow)" opacity="0.95"/>
-      <rect x="28" y="65" width="40" height="5" rx="2" fill="${t.primary}"/>
-      <rect x="28" y="77" width="60" height="4" rx="2" fill="#FEF3C7"/>
-      <rect x="28" y="87" width="50" height="4" rx="2" fill="#FEF3C7"/>
-      <rect x="28" y="97" width="55" height="4" rx="2" fill="#FEF3C7"/>
-      <!-- 右侧水彩装饰 -->
-      <rect x="108" y="55" width="72" height="55" rx="8" fill="white" filter="url(#shadow)" opacity="0.95"/>
-      <ellipse cx="144" cy="82" rx="25" ry="20" fill="${t.accent}" opacity="0.15"/>
-      <ellipse cx="140" cy="78" rx="18" ry="14" fill="${t.primary}" opacity="0.1"/>
-      <rect x="125" y="92" width="38" height="4" rx="2" fill="${t.primary}" opacity="0.5"/>
-      <!-- 底部页码 -->
-      <rect x="85" y="112" width="30" height="3" rx="1.5" fill="#FDE68A"/>
-    `,
-
-    geometric: `
-      <rect width="200" height="120" rx="8" fill="${t.bg}"/>
-      <!-- 几何装饰 -->
-      <polygon points="180,10 195,35 165,35" fill="${t.accent}" opacity="0.15"/>
-      <rect x="10" y="90" width="25" height="25" rx="2" fill="${t.primary}" opacity="0.1" transform="rotate(15 22 102)"/>
-      <circle cx="170" cy="100" r="15" fill="none" stroke="${t.accent}" stroke-width="2" opacity="0.2"/>
-      <!-- 顶部条带 -->
-      <rect x="0" y="0" width="200" height="5" rx="0" fill="${t.primary}"/>
-      <!-- 标题 -->
-      <rect x="25" y="25" width="50" height="10" rx="2" fill="${t.primary}"/>
-      <rect x="25" y="41" width="35" height="5" rx="2.5" fill="${t.accent}"/>
-      <!-- 主卡片 -->
-      <rect x="20" y="58" width="70" height="52" rx="4" fill="white" filter="url(#shadow)"/>
-      <rect x="28" y="68" width="35" height="5" rx="2" fill="${t.primary}"/>
-      <rect x="28" y="80" width="50" height="4" rx="2" fill="#F4F4F5"/>
-      <rect x="28" y="90" width="42" height="4" rx="2" fill="#F4F4F5"/>
-      <rect x="28" y="100" width="48" height="4" rx="2" fill="#F4F4F5"/>
-      <!-- 右侧几何装饰 -->
-      <rect x="98" y="58" width="82" height="52" rx="4" fill="white" filter="url(#shadow)"/>
-      <!-- 几何图形组合 -->
-      <rect x="110" y="68" width="20" height="20" rx="2" fill="${t.accent}" opacity="0.2"/>
-      <rect x="115" y="73" width="20" height="20" rx="2" fill="${t.primary}" opacity="0.3"/>
-      <rect x="120" y="78" width="20" height="20" rx="2" fill="${t.accent}" opacity="0.4"/>
-      <circle cx="160" cy="95" r="12" fill="none" stroke="${t.primary}" stroke-width="2" opacity="0.3"/>
-      <polygon points="155,78 165,78 160,70" fill="${t.accent}" opacity="0.3"/>
-      <!-- 底部页码 -->
-      <rect x="85" y="112" width="30" height="3" rx="1.5" fill="#D4D4D8"/>
-    `,
-
-    retro: `
-      <rect width="200" height="120" rx="8" fill="${t.bg}"/>
-      <!-- 复古纹理 -->
-      <pattern id="retroPat" width="8" height="8" patternUnits="userSpaceOnUse">
-        <rect width="8" height="8" fill="${t.accent}" opacity="0.03"/>
-      </pattern>
-      <rect width="200" height="120" fill="url(#retroPat)"/>
-      <!-- 复古圆形装饰 -->
-      <circle cx="180" cy="25" r="30" fill="${t.accent}" opacity="0.1"/>
-      <circle cx="25" cy="100" r="20" fill="${t.primary}" opacity="0.08"/>
-      <!-- 顶部条带 -->
-      <rect x="0" y="0" width="200" height="5" rx="0" fill="${t.primary}"/>
-      <!-- 标题 -->
-      <rect x="25" y="25" width="60" height="10" rx="2" fill="${t.primary}"/>
-      <rect x="25" y="41" width="45" height="5" rx="2.5" fill="${t.accent}" opacity="0.7"/>
-      <!-- 主卡片 -->
-      <rect x="20" y="58" width="75" height="52" rx="6" fill="white" filter="url(#shadow)"/>
-      <rect x="28" y="68" width="40" height="5" rx="2" fill="${t.primary}"/>
-      <rect x="28" y="80" width="55" height="4" rx="2" fill="#FEF3C7"/>
-      <rect x="28" y="90" width="45" height="4" rx="2" fill="#FEF3C7"/>
-      <rect x="28" y="100" width="50" height="4" rx="2" fill="#FEF3C7"/>
-      <!-- 右侧复古装饰 -->
-      <rect x="103" y="58" width="77" height="52" rx="6" fill="white" filter="url(#shadow)"/>
-      <circle cx="141" cy="84" r="18" fill="${t.accent}" opacity="0.15"/>
-      <circle cx="141" cy="84" r="12" fill="none" stroke="${t.primary}" stroke-width="3" opacity="0.25"/>
-      <circle cx="141" cy="84" r="6" fill="${t.accent}" opacity="0.3"/>
-      <rect x="128" y="95" width="26" height="4" rx="2" fill="${t.primary}" opacity="0.4"/>
-      <!-- 底部页码 -->
-      <rect x="85" y="112" width="30" height="3" rx="1.5" fill="#FCD34D"/>
-    `,
-
-    // ═══════════════════════════════════════════════════════════════
-    // 自然风格
-    // ═══════════════════════════════════════════════════════════════
-
-    mountain: `
-      <rect width="200" height="120" rx="8" fill="${t.bg}"/>
-      <!-- 水墨山峦 -->
-      <path d="M0,110 Q30,70 60,90 Q90,60 120,80 Q150,50 180,75 Q195,65 200,70 L200,120 L0,120 Z" fill="${t.accent}" opacity="0.08"/>
-      <path d="M0,115 Q40,90 80,105 Q120,80 160,95 Q190,82 200,88 L200,120 L0,120 Z" fill="${t.accent}" opacity="0.05"/>
-      <!-- 顶部条带 -->
-      <rect x="0" y="0" width="200" height="4" rx="0" fill="${t.primary}" opacity="0.6"/>
-      <!-- 标题 -->
-      <rect x="25" y="22" width="55" height="10" rx="3" fill="${t.primary}"/>
-      <rect x="25" y="38" width="40" height="5" rx="2.5" fill="${t.accent}" opacity="0.5"/>
-      <!-- 主卡片 -->
-      <rect x="20" y="52" width="72" height="58" rx="6" fill="white" filter="url(#shadow)" opacity="0.95"/>
-      <rect x="28" y="62" width="38" height="5" rx="2" fill="${t.primary}"/>
-      <rect x="28" y="74" width="52" height="4" rx="2" fill="#F5F5F4"/>
-      <rect x="28" y="84" width="44" height="4" rx="2" fill="#F5F5F4"/>
-      <rect x="28" y="94" width="48" height="4" rx="2" fill="#F5F5F4"/>
-      <!-- 右侧印章风格装饰 -->
-      <rect x="100" y="52" width="80" height="58" rx="6" fill="white" filter="url(#shadow)" opacity="0.95"/>
-      <rect x="110" y="62" width="30" height="4" rx="2" fill="${t.accent}" opacity="0.4"/>
-      <rect x="110" y="72" width="50" height="3" rx="1.5" fill="${t.primary}" opacity="0.2"/>
-      <rect x="110" y="80" width="40" height="3" rx="1.5" fill="${t.primary}" opacity="0.15"/>
-      <rect x="110" y="88" width="45" height="3" rx="1.5" fill="${t.primary}" opacity="0.12"/>
-      <rect x="110" y="96" width="35" height="3" rx="1.5" fill="${t.accent}" opacity="0.2"/>
-      <!-- 底部页码 -->
-      <rect x="85" y="112" width="30" height="3" rx="1.5" fill="#D6D3D1"/>
-    `,
-
-    ocean: `
-      <rect width="200" height="120" rx="8" fill="${t.bg}"/>
-      <!-- 波浪装饰 -->
-      <path d="M0,100 Q25,92 50,100 T100,100 T150,100 T200,100 L200,120 L0,120 Z" fill="${t.accent}" opacity="0.08"/>
-      <path d="M0,105 Q30,98 60,105 T120,105 T180,105 T200,105 L200,120 L0,120 Z" fill="${t.accent}" opacity="0.05"/>
-      <path d="M0,110 Q35,104 70,110 T140,110 T200,110 L200,120 L0,120 Z" fill="${t.primary}" opacity="0.04"/>
-      <!-- 顶部条带 -->
-      <rect x="0" y="0" width="200" height="5" rx="0" fill="${t.primary}"/>
-      <!-- 气泡装饰 -->
-      <circle cx="175" cy="25" r="8" fill="${t.accent}" opacity="0.15"/>
-      <circle cx="182" cy="35" r="5" fill="${t.primary}" opacity="0.1"/>
-      <circle cx="30" cy="95" r="6" fill="${t.accent}" opacity="0.12"/>
-      <!-- 标题 -->
-      <rect x="25" y="22" width="60" height="10" rx="3" fill="${t.primary}"/>
-      <rect x="25" y="38" width="42" height="5" rx="2.5" fill="${t.accent}" opacity="0.7"/>
-      <!-- 主卡片 -->
-      <rect x="20" y="52" width="75" height="58" rx="6" fill="white" filter="url(#shadow)" opacity="0.95"/>
-      <rect x="28" y="62" width="35" height="5" rx="2" fill="${t.primary}"/>
-      <rect x="28" y="74" width="55" height="4" rx="2" fill="#F0F9FF"/>
-      <rect x="28" y="84" width="45" height="4" rx="2" fill="#F0F9FF"/>
-      <rect x="28" y="94" width="50" height="4" rx="2" fill="#F0F9FF"/>
-      <!-- 右侧海洋图表 -->
-      <rect x="103" y="52" width="77" height="58" rx="6" fill="white" filter="url(#shadow)" opacity="0.95"/>
-      <rect x="113" y="62" width="30" height="4" rx="2" fill="${t.accent}"/>
-      <!-- 波浪线 -->
-      <path d="M113,85 Q125,75 137,82 T163,75 T175,80" fill="none" stroke="${t.primary}" stroke-width="2" stroke-linecap="round" opacity="0.5"/>
-      <path d="M113,95 Q128,88 143,92 T173,85 T183,90" fill="none" stroke="${t.accent}" stroke-width="1.5" stroke-linecap="round" opacity="0.4"/>
-      <!-- 底部页码 -->
-      <rect x="85" y="112" width="30" height="3" rx="1.5" fill="#BAE6FD"/>
-    `,
-
-    aurora: `
-      <rect width="200" height="120" rx="8" fill="${t.bg}"/>
-      <!-- 极光效果 -->
-      <ellipse cx="60" cy="40" rx="80" ry="60" fill="${t.accent}" opacity="0.04" filter="url(#glow)"/>
-      <ellipse cx="150" cy="50" rx="70" ry="55" fill="${t.primary}" opacity="0.05" filter="url(#glow)"/>
-      <path d="M0,80 Q50,50 100,70 Q150,40 200,65 L200,120 L0,120 Z" fill="${t.accent}" opacity="0.06"/>
-      <path d="M0,90 Q60,70 120,85 Q180,65 200,80 L200,120 L0,120 Z" fill="${t.primary}" opacity="0.04"/>
-      <!-- 星星 -->
-      <circle cx="40" cy="25" r="1.5" fill="${t.primary}" opacity="0.6"/>
-      <circle cx="80" cy="18" r="1" fill="${t.primary}" opacity="0.4"/>
-      <circle cx="160" cy="30" r="1.5" fill="${t.accent}" opacity="0.5"/>
-      <circle cx="185" cy="15" r="1" fill="${t.primary}" opacity="0.5"/>
-      <circle cx="120" cy="22" r="1" fill="${t.accent}" opacity="0.4"/>
-      <!-- 顶部条带 -->
-      <rect x="0" y="0" width="200" height="4" rx="0" fill="${t.primary}" opacity="0.8"/>
-      <!-- 标题 -->
-      <rect x="25" y="22" width="60" height="10" rx="3" fill="${t.primary}" opacity="0.9"/>
-      <rect x="25" y="38" width="45" height="5" rx="2.5" fill="${t.accent}" opacity="0.6"/>
-      <!-- 主卡片 -->
-      <rect x="20" y="52" width="72" height="58" rx="6" fill="rgba(255,255,255,0.05)" stroke="rgba(255,255,255,0.1)" stroke-width="1" filter="url(#shadow)"/>
-      <rect x="28" y="62" width="38" height="5" rx="2" fill="${t.primary}"/>
-      <rect x="28" y="74" width="52" height="4" rx="2" fill="rgba(255,255,255,0.15)"/>
-      <rect x="28" y="84" width="42" height="4" rx="2" fill="rgba(255,255,255,0.1)"/>
-      <rect x="28" y="94" width="48" height="4" rx="2" fill="rgba(255,255,255,0.08)"/>
-      <!-- 右侧装饰 -->
-      <rect x="100" y="52" width="80" height="58" rx="6" fill="rgba(255,255,255,0.03)" stroke="${t.accent}" stroke-width="0.5" opacity="0.8"/>
-      <circle cx="140" cy="80" r="18" fill="none" stroke="${t.accent}" stroke-width="1.5" opacity="0.3"/>
-      <circle cx="140" cy="80" r="12" fill="none" stroke="${t.primary}" stroke-width="1.5" opacity="0.25"/>
-      <circle cx="140" cy="80" r="6" fill="${t.accent}" opacity="0.2"/>
-      <!-- 底部页码 -->
-      <rect x="85" y="112" width="30" height="3" rx="1.5" fill="rgba(255,255,255,0.15)"/>
-    `
-  }
-
-  const design = designs[t.id] || designs.corp_blue
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120" viewBox="0 0 200 120">${defs}${design}</svg>`
-}
-
-function getThemeSvgDataUri(t: PptTheme): string {
-  return 'data:image/svg+xml,' + encodeURIComponent(buildThemeSvg(t))
-}
-
-/** 预计算所有主题缩略图 URI —— 在 setup 期同步一次性合成，
- *  不走 computed 的懒求值路径（首次打开面板会一帧内生成 12 张 SVG，肉眼可见卡顿）。
- *  注：虽然在 setup 里同步执行，但 InputBox 只在空状态+对话底部最多挂一次，代价可以忽略。 */
-const pptThemesWithUri: (PptTheme & { svgUri: string })[] = PPT_THEMES.map(t => ({
-  ...t,
-  svgUri: getThemeSvgDataUri(t),
-}))
-
-/** 选中主题 → 将缩略图转为 PNG 加入 pendingImages */
-function selectPptTheme(theme: PptTheme) {
-  selectedPptTheme.value = { id: theme.id, label: theme.label }
+/** 选中主题 → fetch 本地 webp → base64 dataURI → 加入 pendingImages 作为 mood board */
+async function selectPptTheme(theme: PptTheme) {
   activePicker.value = null
-
-  // SVG → Canvas → PNG base64 → 加入图片附件
-  const svg = buildThemeSvg(theme)
-  const blob = new Blob([svg], { type: 'image/svg+xml' })
-  const url = URL.createObjectURL(blob)
-  const img = new Image()
-  img.onload = () => {
-    const canvas = document.createElement('canvas')
-    canvas.width = 400; canvas.height = 226
-    const ctx2d = canvas.getContext('2d')!
-    ctx2d.drawImage(img, 0, 0, 400, 226)
-    const pngDataUri = canvas.toDataURL('image/png')
-    // 替换掉之前的主题图片（如果有）
-    pendingImages.value = pendingImages.value.filter(i => !i.startsWith('data:image/png;base64,iVBOR'))
-    pendingImages.value.unshift(pngDataUri)
-    URL.revokeObjectURL(url)
-    setTimeout(() => textareaRef.value?.focus(), 100)
+  try {
+    const res = await fetch(theme.image)
+    if (!res.ok) throw new Error(String(res.status))
+    const blob = await res.blob()
+    const dataUri = await new Promise<string>((resolve, reject) => {
+      const r = new FileReader()
+      r.onload = () => resolve(r.result as string)
+      r.onerror = () => reject(r.error)
+      r.readAsDataURL(blob)
+    })
+    // 如果之前已有主题图，先从 pending 移除
+    if (pptThemeImageUri.value) {
+      pendingImages.value = pendingImages.value.filter(i => i !== pptThemeImageUri.value)
+    }
+    pptThemeImageUri.value = dataUri
+    pendingImages.value.unshift(dataUri)
+    selectedPptTheme.value = { id: theme.id, label: theme.label }
+  } catch (err) {
+    ElMessage.error('加载主题图片失败')
+    return
   }
-  img.src = url
+  setTimeout(() => textareaRef.value?.focus(), 100)
 }
 
 function clearPptTheme() {
+  if (pptThemeImageUri.value) {
+    pendingImages.value = pendingImages.value.filter(i => i !== pptThemeImageUri.value)
+    pptThemeImageUri.value = null
+  }
   selectedPptTheme.value = null
-  // 移除主题图片
-  pendingImages.value = pendingImages.value.filter(i => !i.startsWith('data:image/png;base64,iVBOR'))
 }
 
 
@@ -709,6 +291,7 @@ function handleSend() {
   pendingImages.value = []
   pendingFiles.value = []
   selectedPptTheme.value = null
+  pptThemeImageUri.value = null
   selectedMode.value = null
   if (textareaRef.value) textareaRef.value.style.height = 'auto'
 }
@@ -1001,10 +584,12 @@ function openPendingPreview(f: PendingFile) {
             v-for="t in pptThemesWithUri" :key="t.id"
             class="ppt-gallery-card"
             :class="{ 'ppt-gallery-card--selected': selectedPptTheme?.id === t.id }"
+            :style="{ '--cover-tint': t.tint }"
             @click="selectPptTheme(t)"
           >
-            <img class="ppt-gallery-img" :src="t.svgUri" :alt="t.label" loading="lazy" decoding="async" />
-            <div class="ppt-gallery-info">
+            <img class="ppt-gallery-img" :src="t.image" :alt="t.label" loading="lazy" decoding="async" />
+            <div class="ppt-gallery-overlay" aria-hidden="true"></div>
+            <div class="ppt-gallery-caption">
               <span class="ppt-gallery-name">{{ t.label }}</span>
               <span class="ppt-gallery-desc">{{ t.desc }}</span>
             </div>
@@ -1311,75 +896,77 @@ function openPendingPreview(f: PendingFile) {
 }
 
 .ppt-gallery-card {
-  display: flex; flex-direction: column;
-  padding: 0; border: 2.5px solid transparent; border-radius: 12px;
-  background: #fff; cursor: pointer;
+  --cover-tint: rgba(0,0,0,0.6);
+  display: block;
+  padding: 0; border: 2.5px solid transparent; border-radius: 14px;
+  background: #1a1a1a; cursor: pointer;
   transition: all 0.22s cubic-bezier(0.34,1.56,0.64,1);
   overflow: hidden;
   position: relative;
-  /* 跳过不在视口内的卡片的绘制/布局，首次打开画廊不会一帧渲染 12 张复杂 SVG */
-  content-visibility: auto;
-  contain-intrinsic-size: 160px 160px;
-}
-/* 卡片悬浮内光 */
-.ppt-gallery-card::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  opacity: 0;
-  transition: opacity 0.3s;
-  background: linear-gradient(135deg, rgba(0,174,236,0.03), rgba(251,114,153,0.03));
-  pointer-events: none;
+  /* cover 封面布局：图片填满，文字叠加在底部暗渐变上 */
+  aspect-ratio: 16/9;
 }
 .ppt-gallery-card:hover {
-  border-color: #00AEEC;
-  box-shadow: 0 6px 20px rgba(0,174,236,0.18), 0 0 0 1px rgba(0,174,236,0.08);
-  transform: translateY(-4px);
+  border-color: rgba(255,255,255,0.5);
+  box-shadow: 0 8px 28px rgba(0,0,0,0.30), 0 0 0 1px rgba(255,255,255,0.08);
+  transform: translateY(-5px) scale(1.02);
 }
-.ppt-gallery-card:hover::before { opacity: 1; }
 .ppt-gallery-card:active {
-  transform: translateY(-2px) scale(0.98);
+  transform: translateY(-2px) scale(0.99);
 }
 .ppt-gallery-card--selected {
   border-color: #FF9800 !important;
-  box-shadow: 0 6px 20px rgba(255,152,0,0.22), 0 0 0 1px rgba(255,152,0,0.1) !important;
-}
-.ppt-gallery-card--selected::after {
-  content: '';
-  position: absolute;
-  top: 6px; right: 6px;
-  width: 18px; height: 18px;
-  background: linear-gradient(135deg, #FF9800, #FFB74D);
-  border-radius: 50%;
-  display: flex; align-items: center; justify-content: center;
-  box-shadow: 0 2px 6px rgba(255,152,0,0.4);
-  z-index: 2;
+  box-shadow: 0 8px 28px rgba(255,152,0,0.28), 0 0 0 2px rgba(255,152,0,0.2) !important;
+  transform: translateY(-4px) scale(1.015);
 }
 
 .ppt-gallery-img {
-  width: 100%;
-  aspect-ratio: 16/9;
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
   object-fit: cover;
-  border-radius: 10px 10px 0 0;
   display: block;
-  transition: transform 0.3s;
+  transition: transform 0.35s ease;
 }
 .ppt-gallery-card:hover .ppt-gallery-img {
-  transform: scale(1.03);
+  transform: scale(1.07);
 }
 
-.ppt-gallery-info {
-  padding: 8px 10px 10px;
+/* 底部暗渐变叠加层（文字可读性保护） */
+.ppt-gallery-overlay {
+  position: absolute; inset: 0;
+  background: linear-gradient(
+    to top,
+    var(--cover-tint) 0%,
+    rgba(0,0,0,0.15) 55%,
+    rgba(0,0,0,0.05) 100%
+  );
+  transition: opacity 0.25s;
+}
+.ppt-gallery-card:hover .ppt-gallery-overlay {
+  opacity: 0.85;
+}
+
+/* 文字区：左下角叠在图上 */
+.ppt-gallery-caption {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  padding: 32px 12px 12px;
   display: flex; flex-direction: column; gap: 2px;
 }
 .ppt-gallery-name {
-  font-size: 12px; font-weight: 700; color: #18191C;
+  font-size: 12px; font-weight: 700;
+  color: #ffffff;
+  letter-spacing: 0.3px;
+  line-height: 1.2;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.5);
   transition: color 0.15s;
 }
-.ppt-gallery-card:hover .ppt-gallery-name { color: #00AEEC; }
-.ppt-gallery-card--selected .ppt-gallery-name { color: #FF9800; }
-.ppt-gallery-desc { font-size: 10.5px; color: #9499A0; }
+.ppt-gallery-card--selected .ppt-gallery-name { color: #FFB74D; }
+.ppt-gallery-desc {
+  font-size: 10px; font-weight: 500;
+  color: rgba(255,255,255,0.72);
+  text-shadow: 0 1px 3px rgba(0,0,0,0.4);
+}
 
 /* 画廊动画 */
 .ppt-panel-enter-active { transition: opacity 0.2s, max-height 0.25s ease-out; }
