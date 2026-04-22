@@ -305,13 +305,26 @@ class StreamSession:
                     await self._save_partial()
                     await self._mark_stream_completed()  # 确保 stream_completed=True
                     self._emit_sse(sse({"stopped": True}), "stopped")
+                    # 发送 stop_confirmed（握手机制核心）
+                    self._emit_sse(sse({
+                        "type": "stop_confirmed",
+                        "can_continue": bool(self.best_partial),
+                        "reason": "stopped",
+                    }), "stop_confirmed")
                     await self._set_done("active")
                     break
 
                 elif kind == "cancelled":
                     await self._flush_to_db()
+                    await self._save_partial()  # 保存部分内容（关键！）
                     await self._mark_stream_completed()  # 确保 stream_completed=True
                     self._emit_sse(sse({"stopped": True}), "stopped")
+                    # 发送 stop_confirmed（握手机制核心）
+                    self._emit_sse(sse({
+                        "type": "stop_confirmed",
+                        "can_continue": bool(self.best_partial),
+                        "reason": "cancelled",
+                    }), "stop_confirmed")
                     await self._set_done("active")
                     break
 

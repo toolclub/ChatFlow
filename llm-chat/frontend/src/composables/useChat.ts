@@ -142,20 +142,41 @@ export function useChat() {
     if (!id) return
     const s = convStates[id]
     if (!s) return
+
+    // 生成唯一 stop_token（用于握手机制）
+    const stopToken = crypto.randomUUID()
+
+    // 1. 触发 fetch abort（立即）
     if (s.abortController) {
       s.abortController.abort()
       s.abortController = null
     }
-    await api.stopStream(id)
+
+    // 2. 发送停止请求（等待握手确认）
+    let stopResult: { can_continue: boolean; reason: string } | null = null
+    try {
+      stopResult = await api.stopStreamWithToken(id, stopToken, 30000)
+    } catch {}
+
+    // 3. 收到确认后才清除 loading
     s.loading = false
     s.agentStatus = { state: 'idle', model: s.agentStatus.model }
     s.cognitive.isActive = false
-    // Mark running steps as failed on stop
+
+    // 4. 标记 running 步骤为 failed
     if (s.cognitive.plan.length > 0) {
       s.cognitive.plan = s.cognitive.plan.map(step => ({
         ...step,
         status: step.status === 'running' ? 'failed' : step.status,
       }))
+    }
+
+    // 5. 根据停止结果决定 canContinue
+    // stopResult.can_continue = true 表示后端认为可以继续
+    if (stopResult?.can_continue) {
+      s.canContinue = true
+    } else {
+      s.canContinue = false
     }
   }
 
@@ -494,6 +515,7 @@ export function useChat() {
         () => {
           s.loading = false; s.abortController = null
           s.agentStatus = { state: 'idle', model: s.agentStatus.model }; s.cognitive.isActive = false
+          s.canContinue = false  // 用户主动停止，不应该显示继续
         },
         s.abortController.signal,
         // onThinking: 结构化事件按 (node, step_index, phase) 分发到 msg/step 的 segments
@@ -800,6 +822,7 @@ export function useChat() {
           s.abortController = null
           s.agentStatus = { state: 'idle', model: s.agentStatus.model }
           s.cognitive.isActive = false
+          s.canContinue = false  // 用户主动停止，不应该显示继续
         },
         s.abortController.signal,
         // onThinking: 结构化事件按 (node, step_index, phase) 分发到 msg/step 的 segments

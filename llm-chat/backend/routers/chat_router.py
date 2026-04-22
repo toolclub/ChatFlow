@@ -7,9 +7,11 @@
   - GET  /api/conversations/:id/resume — 恢复流式输出
 """
 import asyncio
+import json
 import logging
+import time
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Header, Request
 from fastapi.responses import StreamingResponse
 
 from models import ChatRequest
@@ -100,22 +102,64 @@ async def chat(req: ChatRequest, request: Request):
     )
 
 
-@router.post("/chat/{conv_id}/stop")
-async def stop_chat(conv_id: str):
-    """主动停止某个会话的流式输出（本 worker + 跨 worker Redis）。"""
-    event = _stop_events.get(conv_id)
-    if event:
-        event.set()
+@router.post("/api/chat/{conv_id}/stop")
+async def stop_chat(
+    conv_id: str,
+    request: Request,
+    stop_token: str = Header(None),
+    timeout_ms: int = Header(30000),
+):
+    """
+    握手机制：收到停止请求后，等待后端真正停止，
+    然后通过 SSE 发送 stop_confirmed 确认事件。
+    """
+    # 获取或创建 stop event
+    stop_event = _stop_events.get(conv_id)
+    if stop_event:
+        stop_event.set()
+
+    # 取消 graph task
     from graph.runner.stream import _active_sessions
     session = _active_sessions.get(conv_id)
     if session and session._graph_task and not session._graph_task.done():
         session._graph_task.cancel()
+
+    # 跨 worker 广播
     try:
         from db.redis_state import publish_stop
         await publish_stop(conv_id)
     except Exception as exc:
         logger.warning("Redis publish_stop 失败: %s", exc)
-    return {"ok": True}
+
+    # 轮询等待 session 停止
+    async def event_generator():
+        start = time.time()
+        timeout = timeout_ms / 1000
+
+        while time.time() - start < timeout:
+            sess = _active_sessions.get(conv_id)
+            if sess is None or sess._sse_done:
+                break
+            await asyncio.sleep(0.1)
+
+        # 发送确认事件
+        can_cont = False
+        if session:
+            content = getattr(session, 'best_partial', '') or ''
+            can_cont = bool(content.strip())
+
+        yield f"data: {json.dumps({
+            'stop_confirmed': True,
+            'stop_token': stop_token or '',
+            'can_continue': can_cont,
+            'reason': 'stopped',
+        })}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/conversations/{conv_id}/resume")

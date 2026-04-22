@@ -111,6 +111,70 @@ export async function stopStream(convId: string): Promise<void> {
   }).catch(() => {})
 }
 
+export async function stopStreamWithToken(
+  convId: string,
+  stopToken: string,
+  timeoutMs: number = 30000
+): Promise<{ can_continue: boolean; reason: string } | null> {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const res = await fetch(`${API_BASE}/api/chat/${convId}/stop`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Client-ID': getClientId(),
+        'X-Stop-Token': stopToken,
+      },
+      body: JSON.stringify({
+        conversation_id: convId,
+        stop_token: stopToken,
+        timeout_ms: timeoutMs,
+      }),
+      signal: controller.signal,
+    })
+    clearTimeout(timeoutId)
+
+    if (!res.ok) return null
+
+    // 读取 SSE 流获取 stop_confirmed
+    const reader = res.body?.getReader()
+    if (!reader) return null
+
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(line.slice(6))
+            if (data.stop_confirmed) {
+              return {
+                can_continue: data.can_continue ?? false,
+                reason: data.reason ?? 'stopped',
+              }
+            }
+          } catch {}
+        }
+      }
+    }
+
+    return null
+  } catch (e) {
+    clearTimeout(timeoutId)
+    return null
+  }
+}
+
 export async function fetchConvTools(convId: string): Promise<ToolHistoryEvent[]> {
   const res = await fetch(`${API_BASE}/api/conversations/${convId}/tools`, {
     headers: { 'X-Client-ID': getClientId() },
