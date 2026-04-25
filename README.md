@@ -85,7 +85,10 @@
 | **后端框架** | Python 3.12 · FastAPI · asyncio |
 | **AI 编排** | LangChain · LangGraph |
 | **状态机** | python-statemachine（对话/工具/SSE 事件） |
-| **前端框架** | Vue 3 · TypeScript · Vite |
+| **前端框架** | Vue 3.5 · TypeScript 5.7 · Vite 6.2 |
+| **UI 组件** | Element Plus 2.13 · @antv/x6 3.1 |
+| **状态管理** | 自定义 Composable（按对话 ID 分离） |
+| **API 通信** | fetch + SSE 流式（断点续传） |
 | **关系数据库** | PostgreSQL 16（含 JSONB 原子更新） |
 | **向量数据库** | Qdrant |
 | **缓存/共享状态** | Redis Stack（语义缓存 KNN + 跨 worker 状态同步） |
@@ -254,7 +257,10 @@ flowchart TD
     RF -->|"done"| SR
 
     SR["💾 save_response\n持久化消息 + step_results 摘要\n检测澄清意图"]
-    SR --> CM2
+    SR --> EM
+
+    EM["🧬 extract_memory\n事实抽取（fire-and-forget）\nLLM 提取结构化事实"]
+    EM --> CM2
 
     CM2["🗜️ compress_memory\n超阈值时压缩 → 写入 Qdrant"]
     CM2 --> END([END])
@@ -269,6 +275,7 @@ flowchart TD
     style CMT fill:#dcfce7
     style RF fill:#fce7f3
     style SR fill:#e0f2fe
+    style EM fill:#fef9c3
     style CM2 fill:#e0f2fe
 ```
 
@@ -488,6 +495,8 @@ ChatFlow/
 │   │   │   │   ├── call_model_after_tool_node.py # 工具后综合
 │   │   │   │   ├── reflector_node.py       # 步骤评估（5条快速路径）
 │   │   │   │   ├── save_response_node.py   # 持久化（step_results 摘要）
+│   │   │   │   ├── extract_memory_node.py  # 事实抽取（fire-and-forget）
+│   │   │   │   ├── compress_node.py        # 语义压缩节点
 │   │   │   │   └── cache_node.py           # 语义缓存节点
 │   │   │   └── runner/
 │   │   │       ├── stream.py               # SSE 主驱动（队列+心跳+断点续传）
@@ -496,22 +505,51 @@ ChatFlow/
 │   │   │       └── handlers/               # 各类 SSE 事件处理器
 │   │   ├── memory/
 │   │   │   ├── store.py                    # 短期记忆 CRUD
-│   │   │   ├── context_builder.py          # 消息组装（去重+渐进遗忘+历史截断）
+│   │   │   ├── context_builder.py          # 消息组装（8层优先级+去重+渐进遗忘）
+│   │   │   ├── compressor.py               # 语义压缩
+│   │   │   ├── core_memory.py              # 核心常驻记忆
+│   │   │   ├── tool_events.py              # 工具事件记录
 │   │   │   └── schema.py                   # 数据模型
 │   │   ├── rag/                            # 长期记忆（Qdrant）
+│   │   │   ├── retriever.py                # 向量检索
+│   │   │   ├── ingestor.py                 # 写入 Qdrant
+│   │   │   └ fact_schema.py                # 事实结构定义
 │   │   ├── cache/                          # 语义缓存（Redis KNN）
-│   │   ├── fsm/                            # 状态机（python-statemachine 框架）
-│   │   │   ├── conversation.py             # 对话生命周期状态机
-│   │   │   ├── tool_execution.py           # 工具执行状态机
+│   │   │   ├── base.py                     # 缓存基类
+│   │   │   ├── redis_cache.py              # Redis 实现
+│   │   │   └ factory.py                    # 缓存工厂
+│   │   ├── fsm/                            # 状态机
+│   │   │   ├── conversation.py             # 对话生命周期
+│   │   │   ├── tool_execution.py           # 工具执行状态
+│   │   │   ├── plan_step.py                # 计划步骤状态
 │   │   │   └── sse_events.py               # SSE 事件类型注册表
 │   │   ├── db/
 │   │   │   ├── models.py                   # SQLAlchemy ORM
 │   │   │   ├── database.py                 # 异步会话
 │   │   │   ├── redis_state.py              # Redis 跨 worker 共享状态
 │   │   │   ├── migrate.py                  # 幂等迁移
-│   │   │   └── plan_store.py               # 执行计划 CRUD（jsonb_set 原子更新）
-│   │   ├── llm/                            # LLM / Embedding 工厂（模型无关适配层）
-│   │   ├── tools/                          # 内置工具 + MCP 加载器
+│   │   │   ├── plan_store.py               # 执行计划 CRUD
+│   │   │   ├── artifact_store.py           # 文件产物存储
+│   │   │   ├── tool_store.py               # 工具执行记录
+│   │   │   ├── event_store.py              # SSE 事件日志
+│   │   │   └ message_detail_store.py       # 消息详情
+│   │   ├── llm/                            # LLM 工厂
+│   │   │   ├── client.py                   # OpenAI 兼容客户端
+│   │   │   ├── chat.py                     # Chat 模型封装
+│   │   │   └ embeddings.py                 # Embedding 工厂
+│   │   ├── tools/                          # 工具系统
+│   │   │   ├── skill.py                    # Skill 框架（自动发现注册）
+│   │   │   ├── builtin/                    # 内置工具
+│   │   │   ├── sandboxed/                  # 沙箱工具
+│   │   │   └ mcp/                          # MCP 协议扩展
+│   │   ├── sandbox/                        # 代码沙箱执行
+│   │   ├── ppt/                            # PPT 渲染
+│   │   ├── routers/                        # API 路由模块
+│   │   ├── services/                       # 服务层
+│   │   ├── prompts/                        # 系统提示词目录
+│   │   │   ├── system.md                   # 全局系统提示
+│   │   │   └ nodes/                        # 节点专用提示词
+│   │   ├── tests/                          # 测试代码
 │   │   └── Dockerfile
 │   ├── frontend/
 │   │   ├── src/
@@ -530,7 +568,13 @@ ChatFlow/
 │   │   └── Dockerfile
 │   ├── docker-compose.yml                  # 五容器编排
 │   └── .env.example
-└── README.md
+├── docs/
+│   ├── pain-points-analysis.md              # 痛点分析与升级路线图
+│   └ ux-design.md                          # UX 设计分析
+├── spec.md                                  # 开发规格（铁律+协议）
+├── README.md                                # 本文档
+├── start-mac.sh / start-prod.bat           # 启动脚本
+├── stop-mac.sh / stop.bat                  # 停止脚本
 ```
 
 ---
@@ -582,6 +626,18 @@ ChatFlow/
 | `{"done": true, "compressed": false}` | 流正常结束 |
 | `{"error": "...", "can_continue": true}` | 执行出错，前端展示 Continue 按钮 |
 | `{"ping": true}` | 心跳保活 |
+
+---
+
+## 相关文档
+
+| 文档 | 说明 |
+|------|------|
+| [spec.md](spec.md) | 开发规格、铁律、协议、踩坑记录 |
+| [docs/pain-points-analysis.md](docs/pain-points-analysis.md) | 痛点分析与 2.0 升级路线图 |
+| [docs/ux-design.md](docs/ux-design.md) | UX 设计分析与改进建议 |
+| [llm-chat/backend/README.md](llm-chat/backend/README.md) | 后端架构详解 |
+| [llm-chat/frontend/README.md](llm-chat/frontend/README.md) | 前端架构详解 |
 
 ---
 
