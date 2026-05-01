@@ -40,6 +40,7 @@ def build_messages(
     forget_mode: bool = False,
     tool_names: list[str] | None = None,  # 保留参数兼容旧调用；当前由 get_tools_guidance 内部决定
     route: str = "",
+    quant_snapshots_text: list[str] | None = None,
 ) -> list[BaseMessage]:
     """
     构建发送给 LLM 的完整消息列表。
@@ -51,6 +52,7 @@ def build_messages(
                             但 core_memory 中的规则/偏好/画像仍然保留（这些是显式写入的长期事实）
         tool_names:         兼容保留，未使用
         route:              当前路由，用于裁剪无关工具 guidance
+        quant_snapshots_text: 附加的量化快照上下文
 
     Returns:
         list[BaseMessage]，可直接传给 LLM.ainvoke()
@@ -83,6 +85,10 @@ def build_messages(
     # Layer 5: 当前任务（会话级临时目标）
     if core["current_task"]:
         layers.append(f"【当前任务】\n- {core['current_task']}")
+        
+    # Layer 5.5: 量化选股快照上下文
+    if quant_snapshots_text:
+        layers.append("\n\n".join(quant_snapshots_text))
 
     # Layer 6 + 7: 背景摘要 + 长期记忆（forget_mode 下跳过）
     if not forget_mode:

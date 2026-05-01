@@ -150,6 +150,23 @@ class EventLogModel(Base):
     )
 
 
+class QuantSnapshotModel(Base):
+    """量化分析快照表"""
+    __tablename__ = "quant_snapshots"
+
+    id = Column(String(50), primary_key=True)
+    client_id = Column(String(36), nullable=False, index=True)
+    conversation_id = Column(String(36), nullable=True)
+    criteria = Column(JSONB, nullable=False)
+    rows = Column(JSONB, nullable=False)
+    provider_trace = Column(JSONB, nullable=False)
+    analysis = Column(Text, nullable=False, default="")
+    risk_notes = Column(JSONB, nullable=False, default=list)
+    status = Column(String(20), nullable=False, default="DONE")
+    created_at = Column(Float, nullable=False)
+
+
+
 # ── 以下为保留表（向后兼容） ──────────────────────────────────────────────────
 
 class PlanStepModel(Base):

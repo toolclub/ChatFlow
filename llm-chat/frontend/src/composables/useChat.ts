@@ -612,11 +612,11 @@ export function useChat() {
   // 下一次 send 附加的 force_plan（由 applyModifiedPlan 设置，send 消费后清空）
   const _nextForcePlan = ref<PlanStep[] | null>(null)
 
-  async function send({ text, images, agentMode, forcePlan, files, intent, intentLabel }: SendPayload) {
+  async function send({ text, images, agentMode, forcePlan, files, intent, intentLabel, contextRefs }: SendPayload) {
     // forcePlan 参数优先，其次用 _nextForcePlan（兼容两种调用方式）
     const activeForcePlan = forcePlan || _nextForcePlan.value
     _nextForcePlan.value = null
-    if (!text.trim() && images.length === 0 && (!files || files.length === 0)) return
+    if (!text.trim() && images.length === 0 && (!files || files.length === 0) && (!contextRefs || contextRefs.length === 0)) return
     if (!currentConvId.value) {
       const data = await api.createConversation(text.slice(0, 30) || '图片对话')
       currentConvId.value = data.id
@@ -897,6 +897,7 @@ export function useChat() {
         },
         // fileIds：用户上传的文件 artifact ID 列表（后端 bind_artifacts_to_message 用）
         files && files.length > 0 ? files.map(f => f.id) : undefined,
+        contextRefs,
       )
     } catch (err: any) {
       if (err?.name === 'AbortError') return

@@ -31,6 +31,9 @@ Thumbs.db
 desktop.ini
 
 # ===== Project specific =====
+# 量化数据缓存不上库（Parquet/Pickle 二进制，体积大且可自动生成）
+.quant_cache/
+**/.quant_cache/
 # 对话历史不上库
 llm-chat/backend/conversations/*.json
 

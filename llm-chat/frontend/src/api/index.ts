@@ -1,4 +1,7 @@
-import type { ClarificationData, FileArtifact, PlanStep, ThinkingEvent, ToolHistoryEvent, UploadedFile } from '../types'
+import type {
+  ClarificationData, FileArtifact, PlanStep, ThinkingEvent, ToolHistoryEvent, UploadedFile,
+  QuantProviderInfo, QuantScreenCriteria, QuantScreenResult,
+} from '../types'
 
 /** 归一化 SSE thinking 字段：协议要求 dict，COMPAT 降级到裸字符串。 */
 function normalizeThinking(raw: unknown): ThinkingEvent | null {
@@ -370,6 +373,7 @@ export async function sendMessage(
   onToolCallStart?: (name: string, displayMode?: string) => void,
   onToolCallArgs?: (text: string) => void,
   fileIds?: number[],
+  contextRefs?: {type: string, id: string}[],
 ) {
   const body: Record<string, unknown> = {
     conversation_id: conversationId,
@@ -385,6 +389,9 @@ export async function sendMessage(
   }
   if (fileIds?.length) {
     body.file_ids = fileIds
+  }
+  if (contextRefs?.length) {
+    body.context_refs = contextRefs
   }
 
   const res = await fetch(`${API_BASE}/api/chat`, {
@@ -478,5 +485,139 @@ export async function sendMessage(
     } else {
       onInterrupted?.()
     }
+  }
+}
+
+// ── 量化模块 API ─────────────────────────────────────────────────────────────
+
+export interface QuantCacheStatus {
+  root: string
+  spot_latest: { name: string; date: string | null; age_seconds: number; size_kb: number } | null
+  spot_files: number
+  bars_latest: { name: string; date: string | null; age_seconds: number; size_kb: number } | null
+  bars_files: number
+  bars_oldest_date: string | null
+  index_files: string[]
+  total_mb: number
+  warmer_running: boolean
+  meta: Record<string, any>
+}
+
+export async function fetchQuantCacheStatus(): Promise<QuantCacheStatus> {
+  const res = await fetch(`${API_BASE}/api/quant/cache/status`, {
+    headers: { 'X-Client-ID': getClientId() },
+  })
+  if (!res.ok) throw new Error(`获取缓存状态失败: ${res.status}`)
+  return res.json()
+}
+
+export async function refreshQuantCache(kinds?: string[]): Promise<{ scheduled: string[]; worker: string }> {
+  const res = await fetch(`${API_BASE}/api/quant/cache/refresh`, {
+    method: 'POST',
+    headers: commonHeaders(),
+    body: JSON.stringify(kinds || null),
+  })
+  if (!res.ok) throw new Error(`触发缓存刷新失败: ${res.status}`)
+  return res.json()
+}
+
+export async function fetchActiveQuantSession(): Promise<{ active: boolean; snapshot_id?: string; status?: string; criteria?: QuantScreenCriteria }> {
+  const res = await fetch(`${API_BASE}/api/quant/session/active`, {
+    headers: { 'X-Client-ID': getClientId() },
+  })
+  if (!res.ok) return { active: false }
+  return res.json()
+}
+
+export async function fetchQuantSnapshot(snapshotId: string): Promise<QuantScreenResult> {
+  const res = await fetch(`${API_BASE}/api/quant/snapshot/${snapshotId}`, {
+    headers: { 'X-Client-ID': getClientId() },
+  })
+  if (!res.ok) throw new Error(`获取快照失败: ${res.status}`)
+  return res.json()
+}
+
+export async function fetchStockChart(symbol: string, days: number = 240): Promise<any> {
+  const res = await fetch(`${API_BASE}/api/quant/stock/${symbol}/chart?days=${days}`, {
+    headers: { 'X-Client-ID': getClientId() },
+  })
+  if (!res.ok) throw new Error(`获取图表失败: ${res.status}`)
+  return res.json()
+}
+
+export async function fetchQuantProviders(): Promise<QuantProviderInfo[]> {
+  const res = await fetch(`${API_BASE}/api/quant/providers`, {
+    headers: { 'X-Client-ID': getClientId() },
+  })
+  if (!res.ok) throw new Error(`获取 Provider 失败: ${res.status}`)
+  return res.json()
+}
+
+export async function runQuantScreen(criteria: QuantScreenCriteria): Promise<QuantScreenResult> {
+  const res = await fetch(`${API_BASE}/api/quant/screen`, {
+    method: 'POST',
+    headers: commonHeaders(),
+    body: JSON.stringify(criteria),
+  })
+  if (!res.ok) {
+    let detail = ''
+    try { detail = (await res.json()).detail || '' } catch {}
+    throw new Error(detail || `选股失败 (HTTP ${res.status})`)
+  }
+  return res.json()
+}
+
+/**
+ * 流式订阅快照分析。后端按 SSE 推送 delta / done / error 三类事件。
+ *
+ *   onDelta:  每个 LLM token（含 JSON 控制字符，调用方负责剥离展示）
+ *   onDone:   收到 {analysis, risk_notes} 结构化结果
+ *   onError:  服务端报错或网络断开
+ */
+export async function streamQuantAnalyze(
+  snapshotId: string,
+  onDelta: (text: string) => void,
+  onDone: (analysis: string, riskNotes: string[]) => void,
+  onError: (msg: string) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/quant/snapshot/${snapshotId}/analyze`, {
+    headers: { 'X-Client-ID': getClientId() },
+    signal,
+  })
+  if (!res.ok) {
+    onError(`分析请求失败 (HTTP ${res.status})`)
+    return
+  }
+  const reader = res.body?.getReader()
+  if (!reader) {
+    onError('浏览器不支持流式读取')
+    return
+  }
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  function processLine(line: string) {
+    if (!line.startsWith('data: ')) return
+    try {
+      const ev = JSON.parse(line.slice(6))
+      if (ev.event === 'delta' && typeof ev.text === 'string') onDelta(ev.text)
+      else if (ev.event === 'done') onDone(ev.analysis || '', ev.risk_notes || [])
+      else if (ev.event === 'error') onError(String(ev.message || '分析失败'))
+    } catch {}
+  }
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) processLine(line)
+    }
+    if (buffer.trim()) processLine(buffer.trim())
+  } catch (e: any) {
+    if (!signal?.aborted) onError(e?.message || '连接中断')
   }
 }

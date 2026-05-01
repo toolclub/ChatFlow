@@ -6,6 +6,10 @@ from pydantic import BaseModel
 from typing import Optional
 
 
+class ContextRef(BaseModel):
+    type: str
+    id: str
+
 class ChatRequest(BaseModel):
     conversation_id: str
     message: str
@@ -17,6 +21,7 @@ class ChatRequest(BaseModel):
     # 用户上传的文件（已通过 POST /api/files/upload 落到沙箱），这里只带 ID
     # 后端会 bind_artifacts_to_message 关联到 user 消息，并把清单注入到 HumanMessage 前缀
     file_ids: list[int] = []
+    context_refs: list[ContextRef] = []
 
 
 class CreateConversationRequest(BaseModel):

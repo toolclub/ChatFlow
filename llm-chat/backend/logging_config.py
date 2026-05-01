@@ -72,6 +72,19 @@ def setup_logging(log_dir: str) -> None:
     pf.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
     _prompt_logger.addHandler(pf)
 
+    # ── 量化/定时任务专用日志（独立文件，不传播到 chatflow.log）─────────────────
+    timer_logger = logging.getLogger("quant.timer")
+    timer_logger.propagate = False            # 不写入 chatflow.log
+    timer_logger.setLevel(logging.INFO)
+    tf = RotatingFileHandler(
+        _log_dir / "chatflow-timer.log",
+        maxBytes=20 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    tf.setFormatter(fmt)
+    timer_logger.addHandler(tf)
+
 
 def log_prompt(
     conv_id: str,

@@ -487,7 +487,82 @@ pytest tests/ -m smoke         # 冒烟拨测（端到端）
 
 ---
 
-## 十、spec 对照检查（改代码后必跑）
+## 十、量化模块 (quant/)
+
+> 设计来自 `docs/quant-trading-design.md`。M1 范围只覆盖后端选股 pipeline，不包含 LangGraph 和对话续接。
+
+### T-QUANT-01: 选股 pipeline 端到端（FakeProvider）
+
+> 已实现：`tests/test_quant_screen.py::test_screen_pipeline_end_to_end`
+
+| 用例 | 输入 | 期望 | 标记 |
+|------|------|------|------|
+| 默认条件全市场 | `ScreenCriteria(top_n=10)` | rows 按 total 降序、rank 从 1 起、universe_size 正确 | unit |
+| provider_trace 完整 | 同上 | trace 至少含 `realtime_snapshot` + `daily_bars`，每条带 `elapsed_ms`/`rows` | unit |
+| 因子原始值落到 raw | 同上 | 每行 `raw` 含 pe/pb/momentum/volatility 等键，缺失为 None | unit |
+| 默认风险过滤 | exclude_st=true, exclude_suspended=true | rows 不含 ST 名称、不含 volume==0 标的 | unit |
+| 综合分按权重合成 | 自定义 weights | total ∝ Σ(category_z × weight)/Σ(weight) | unit |
+
+### T-QUANT-02: 股票池
+
+> 已实现 hs300 用例：`test_universe_index_constituents`
+
+| 用例 | 输入 | 期望 | 标记 |
+|------|------|------|------|
+| universe=hs300 | `universe="hs300"` | 调用 INDEX_WEIGHT capability，universe_size = 成分股数 | unit |
+| universe=custom 提供 symbols | `custom_symbols=["000001.SZ"]` | 仅命中标的进入候选 | unit |
+| universe=custom 但 symbols 为空 | `custom_symbols=[]` | 回退到 all，warnings 包含说明 | unit |
+| 指数 provider 失败 | provider 抛错 | 回退到全市场，warnings 含错误说明，logger.warning 有记录 | unit |
+
+### T-QUANT-03: 硬过滤
+
+> 已实现 pe_range：`test_hard_filters_pe_range`
+
+| 用例 | 输入 | 期望 | 标记 |
+|------|------|------|------|
+| pe_range | `pe_range=(5, 20)` | PE 超出区间标的剔除 | unit |
+| pb_range | `pb_range=(0.5, 3)` | PB 超出区间剔除 | unit |
+| min_market_cap（亿元） | `min_market_cap=500` | 总市值 < 500 亿剔除 | unit |
+| min_avg_turnover（亿元） | `min_avg_turnover=5` | 成交额 < 5 亿剔除 | unit |
+| 多重叠加 | pe + pb + market_cap 同时设 | 全部条件 AND 后剩余正确 | unit |
+
+### T-QUANT-04: 因子计算与打分
+
+> 已实现 zscore 空 Series：`test_factor_z_score_handles_empty`
+
+| 用例 | 输入 | 期望 | 标记 |
+|------|------|------|------|
+| 动量 | 70 日上涨趋势 close | momentum > 0 | unit |
+| 波动率 | 高 jitter 序列 vs 平稳序列 | volatility 显著更大 | unit |
+| MA 偏离 | close >> MA20 | ma_deviation 为正 | unit |
+| zscore 空 Series | `pd.Series([])` | 返回空，不抛错 | unit |
+| zscore 全 NaN | `pd.Series([NaN]*5)` | 返回全 NaN | unit |
+| 负 PE 不参与基本面打分 | pe = -10 | fund_z 不被拉低；改由 risk_z 扣分 | unit |
+| ST/停牌通过 risk_z 扣分 | is_st=true | risk_z 显著为负 | unit |
+
+### T-QUANT-05: provider registry fallback
+
+| 用例 | 输入 | 期望 | 标记 |
+|------|------|------|------|
+| 单 provider 成功 | 1 个 OK provider | trace.status="ok"，rows 正确 | unit |
+| 第一个失败 fallback | provider1 抛错，provider2 OK | trace 含 error+ok 两条；最终成功 | unit |
+| 全部失败 | 所有 provider 抛错 | 抛 NoProviderAvailable | unit |
+| capability 不匹配 | provider 不声明目标 capability | candidates 为空 → NoProviderAvailable | unit |
+| health=DOWN 跳过 | provider 健康为 DOWN | candidates 不含它 | unit |
+
+### T-QUANT-06: REST API
+
+| 用例 | 请求 | 期望 | 标记 |
+|------|------|------|------|
+| QUANT_ENABLED=false | `GET /api/quant/providers` | 503 + "量化模块未启用" | smoke |
+| 探活 | `POST /api/quant/providers/refresh` | 200，registry health 被刷新 | smoke |
+| 选股请求 | `POST /api/quant/screen` body=ScreenCriteria | 200，结构化 ScreenResult | smoke |
+| 参数错误 | top_n 类型不对 | 422 | smoke |
+| 全 provider down | service 抛 NoProviderAvailable | 路由转 503 | unit |
+
+---
+
+## 十一、spec 对照检查（改代码后必跑）
 
 | 改了什么 | 跑哪些测试 |
 |---------|-----------|
@@ -499,8 +574,10 @@ pytest tests/ -m smoke         # 冒烟拨测（端到端）
 | sandbox/ 沙箱 | T-SANDBOX-* |
 | llm/ 客户端 | T-LLM-* |
 | graph/edges.py 路由 | T-EDGE-* |
+| quant/ 量化模块 | T-QUANT-* |
 | 任何改动 | T-SMOKE-* (冒烟) |
 | 新增工具 | T-SANDBOX-03 + T-SMOKE-03 |
 | 新增 SSE 事件 | T-FSM-05 + T-STREAM-03 |
 | 新增 DB 字段 | T-DB-04 (迁移幂等) |
+| 新增 quant provider | T-QUANT-05 + T-QUANT-06 |
 | 文件上传相关 | T-DB-02 + T-SANDBOX-04 + T-UPLOAD-* |

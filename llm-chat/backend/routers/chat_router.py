@@ -87,6 +87,7 @@ async def chat(req: ChatRequest, request: Request):
                 force_plan=req.force_plan,
                 stop_event=stop_event,
                 file_ids=req.file_ids,
+                context_refs=[{"type": r.type, "id": r.id} for r in req.context_refs],
             ):
                 if await request.is_disconnected():
                     break

@@ -87,6 +87,25 @@ _MIGRATIONS = [
     # ── artifacts 补字段（区分用户上传 vs 工具产出） ──
     "ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS source VARCHAR(16) NOT NULL DEFAULT 'generated'",
     "CREATE INDEX IF NOT EXISTS ix_artifacts_conv_source ON artifacts(conv_id, source)",
+
+    # ── quant_snapshots 表 ──
+    """CREATE TABLE IF NOT EXISTS quant_snapshots (
+        id              VARCHAR(50)      NOT NULL,
+        client_id       VARCHAR(36)      NOT NULL,
+        conversation_id VARCHAR(36)      DEFAULT NULL,
+        criteria        JSONB            NOT NULL,
+        rows            JSONB            NOT NULL,
+        provider_trace  JSONB            NOT NULL,
+        analysis        TEXT             NOT NULL DEFAULT '',
+        risk_notes      JSONB            NOT NULL DEFAULT '[]',
+        status          VARCHAR(20)      NOT NULL DEFAULT 'DONE',
+        created_at      DOUBLE PRECISION NOT NULL,
+        CONSTRAINT pk_quant_snapshots PRIMARY KEY (id)
+    )""",
+    # ── quant_snapshots 补字段（异步计算状态追踪） ──
+    "ALTER TABLE quant_snapshots ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'DONE'",
+
+    "CREATE INDEX IF NOT EXISTS ix_quant_snapshots_client ON quant_snapshots(client_id)",
 ]
 
 

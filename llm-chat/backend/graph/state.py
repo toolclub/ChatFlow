@@ -72,3 +72,6 @@ class GraphState(TypedDict):
 
     # ── 用户上传的文件 artifact ID（已绑定到当前 user 消息，注入到 HumanMessage 前缀） ──
     file_ids: list[int]
+
+    # ── 外部传入的结构化上下文引用（如量化快照） ──
+    context_refs: list[dict]

@@ -12,6 +12,7 @@ author: leizihao
 email: lzh19162600626@gmail.com
 """
 import logging
+import asyncio
 
 import uvicorn
 from contextlib import asynccontextmanager
@@ -114,6 +115,26 @@ async def lifespan(app: FastAPI):
     all_tools = get_all_tools()
     graph_agent.init(tools=all_tools, model=CHAT_MODEL)
 
+    # 8. 延迟初始化量化模块（确保后端先启动，避开 CPU 导入风暴）
+    quant_warmer_ref = None
+
+    async def delayed_quant_init():
+        nonlocal quant_warmer_ref
+        try:
+            # 等待 15s，确保 4 个 worker 错峰完成基础启动，且 Web 端口已就绪
+            await asyncio.sleep(15.0)
+            from quant.bootstrap import init_quant
+            await init_quant()
+            from quant.cache_warmer import get_warmer
+            quant_warmer_ref = get_warmer()
+            await quant_warmer_ref.start(initial_delay=2.0)
+            logger.info("量化模块延迟初始化完成")
+        except Exception as exc:
+            logger.error("量化模块后台初始化失败: %s", exc)
+
+    # 抛出后台任务，不阻塞 lifespan yield
+    asyncio.create_task(delayed_quant_init())
+
     logger.info(
         "ChatFlow 启动完成 | 模型: %s | 工具数: %d | 长期记忆: %s | 语义缓存: %s | 沙箱: %s",
         CHAT_MODEL,
@@ -125,6 +146,11 @@ async def lifespan(app: FastAPI):
 
     yield
     # ── 关闭 ──
+    if quant_warmer_ref is not None:
+        try:
+            await quant_warmer_ref.stop(timeout=3.0)
+        except Exception as exc:
+            logger.warning("warmer 停止异常（忽略）: %s", exc)
     if sandbox_ok:
         from sandbox.manager import sandbox_manager
         await sandbox_manager.shutdown()
@@ -142,12 +168,14 @@ from routers.chat_router import router as chat_router
 from routers.tool_router import router as tool_router
 from routers.model_router import router as model_router
 from routers.files_router import router as files_router
+from quant.router import router as quant_router
 
 app.include_router(conversation_router)
 app.include_router(chat_router)
 app.include_router(tool_router)
 app.include_router(model_router)
 app.include_router(files_router)
+app.include_router(quant_router)
 
 # ── 入口 ──────────────────────────────────────────────────────────────────────
 

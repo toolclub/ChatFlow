@@ -2,7 +2,7 @@
 import { ref, computed, nextTick, onMounted, watch } from 'vue'
 import type { ConversationInfo } from '../types'
 import {
-  Plus, Search, ChatDotRound, Delete, Check, Close, Select,
+  Plus, Search, ChatDotRound, Delete, Check, Close, Select, Monitor,
 } from '@element-plus/icons-vue'
 
 const props = defineProps<{
@@ -10,6 +10,7 @@ const props = defineProps<{
   currentConvId: string | null
   activeConvIds?: Set<string>
   creating?: boolean
+  activeWorkspace?: 'chat' | 'quant'
 }>()
 
 const emit = defineEmits<{
@@ -17,6 +18,7 @@ const emit = defineEmits<{
   select: [id: string]
   delete: [id: string]
   batchDelete: [ids: string[]]
+  switchWorkspace: [workspace: 'chat' | 'quant']
 }>()
 
 const searchQuery = ref('')
@@ -157,8 +159,26 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
       <span class="logo-version">AI</span>
     </div>
 
+    <!-- 工作台切换 -->
+    <div class="workspace-switcher">
+      <button 
+        class="workspace-btn" 
+        :class="{ active: props.activeWorkspace === 'chat' }"
+        @click="emit('switchWorkspace', 'chat')"
+      >
+        <el-icon><ChatDotRound /></el-icon> 对话
+      </button>
+      <button 
+        class="workspace-btn" 
+        :class="{ active: props.activeWorkspace === 'quant' }"
+        @click="emit('switchWorkspace', 'quant')"
+      >
+        <el-icon><Monitor /></el-icon> 量化
+      </button>
+    </div>
+
     <!-- 新对话 + 管理按钮 -->
-    <div class="sidebar-actions">
+    <div class="sidebar-actions" v-if="props.activeWorkspace === 'chat'">
       <button
         class="new-chat-btn"
         :class="{ 'new-chat-btn--loading': props.creating }"
@@ -376,6 +396,45 @@ onMounted(() => { document.body.classList.toggle('dark', isDark.value) })
   padding: 2px 8px;
   border-radius: 20px;
   margin-left: auto;
+}
+
+/* ── 工作台切换 ── */
+.workspace-switcher {
+  display: flex;
+  margin: 12px 12px 6px;
+  background: var(--cf-bg-2);
+  padding: 3px;
+  border-radius: 10px;
+  position: relative;
+  border: 1px solid var(--cf-border-soft);
+}
+.workspace-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 0;
+  border-radius: 8px;
+  background: transparent;
+  border: none;
+  color: var(--cf-text-3);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.workspace-btn:hover {
+  color: var(--cf-text-1);
+}
+.workspace-btn.active {
+  background: var(--cf-card);
+  color: #00AEEC;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  font-weight: 600;
+}
+body.dark .workspace-btn.active {
+  background: #2e2429;
 }
 
 /* ── 新对话 + 管理按钮 ── */

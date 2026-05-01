@@ -125,6 +125,32 @@ class Settings(BaseSettings):
     upload_max_file_size: int = 50 * 1024 * 1024   # 单文件 50MB
     upload_max_files_per_message: int = 10         # 单条消息最多带几个文件
 
+    # ── 量化模块（A 股选股） ─────────────────────────────────────────────────
+    quant_enabled: bool = False
+    # JSON 数组：["baostock","tushare","akshare"]，按顺序作为优先级
+    quant_provider_order: list[str] = ["baostock", "akshare"]
+    quant_bars_concurrency: int = 8        # 拉取日线时的并发上限
+    quant_default_top_n: int = 30          # /api/quant/screen 默认 top_n
+    quant_first_pass_keep: int = 200       # 硬过滤后保留的候选数量上限
+    quant_http_timeout: int = 20
+
+    # ── Tushare（可选，需 token + 积分） ─────────────────────────────────────
+    tushare_token: str = ""
+
+    # ── BaoStock（可选，免 token） ───────────────────────────────────────────
+    baostock_enabled: bool = True
+
+    # ── 量化磁盘缓存 / 后台预热 ──────────────────────────────────────────────
+    quant_cache_dir: str = "./.quant_cache"
+    quant_cache_retention_days: int = 90       # bars 保留天数
+    quant_cache_max_size_mb: int = 200         # 整个 cache 目录硬上限
+    quant_warmer_enabled: bool = True
+    quant_warmer_spot_interval: int = 300      # 行情时间窗内 spot 刷新间隔（秒）
+    quant_warmer_bars_hour: int = 16           # 每天此小时（本地）跑当天 bars
+    quant_warmer_index_hour: int = 7
+    quant_spot_fresh_seconds: int = 600        # spot 多久内算新鲜，过期才回源
+    quant_bars_lookback_days: int = 120        # bars 默认预热区间
+
     # ── 服务端口 ──────────────────────────────────────────────────────────────
     backend_host: str
     backend_port: int

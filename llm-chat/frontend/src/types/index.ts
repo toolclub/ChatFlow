@@ -129,6 +129,7 @@ export interface SendPayload {
   files?: UploadedFile[]    // 用户已上传的文件（在发送前调用 /api/files/upload 得到 id）
   intent?: string           // API 前缀（如 [PPT:corp_blue] / [algo]），不出现在气泡
   intentLabel?: string      // 气泡里显示的意图标签（如"做 PPT · 企业蓝" / "写代码 · 算法题"）
+  contextRefs?: {type: string, id: string}[]
 }
 
 export interface AgentStatus {
@@ -226,4 +227,74 @@ export function makeEmptyCognitiveState(): CognitiveState {
     historyEvents: [],
     artifacts: [],
   }
+}
+
+// ── 量化模块类型 ─────────────────────────────────────────────────────────────
+
+export interface QuantProviderInfo {
+  name: string
+  enabled: boolean
+  priority: number
+  capabilities: string[]
+  health: 'ok' | 'degraded' | 'down'
+  message?: string
+}
+
+export interface QuantScreenCriteria {
+  market?: 'cn_a'
+  universe?: 'all' | 'hs300' | 'zz500' | 'custom'
+  custom_symbols?: string[]
+  industries?: string[]
+  min_market_cap?: number | null
+  min_avg_turnover?: number | null
+  pe_range?: [number, number] | null
+  pb_range?: [number, number] | null
+  roe_min?: number | null
+  momentum_window?: number
+  volatility_window?: number
+  exclude_st?: boolean
+  exclude_suspended?: boolean
+  exclude_new_stocks_days?: number
+  top_n?: number
+  weights?: Record<string, number>
+}
+
+export interface QuantFactorScore {
+  symbol: string
+  name: string
+  industry?: string
+  technical: number
+  fundamental: number
+  liquidity: number
+  risk: number
+  total: number
+  rank: number
+  reasons: string[]
+  warnings: string[]
+  raw: Record<string, number | null>
+}
+
+export interface QuantProviderTrace {
+  provider: string
+  capability: string
+  status: 'ok' | 'fallback' | 'error'
+  elapsed_ms: number
+  rows: number
+  error?: string
+}
+
+export interface QuantScreenResult {
+  snapshot_id: string
+  criteria: QuantScreenCriteria
+  rows: QuantFactorScore[]
+  provider_trace: QuantProviderTrace[]
+  weights: Record<string, number>
+  universe_size: number
+  as_of_date: string
+  generated_at: number
+  warnings: string[]
+  /** LLM 流式分析结果（异步回填，初始为空） */
+  analysis?: string
+  /** LLM 提取的风险点（异步回填） */
+  risk_notes?: string[]
 }

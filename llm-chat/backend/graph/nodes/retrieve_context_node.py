@@ -105,6 +105,18 @@ class RetrieveContextNode(BaseNode):
             except Exception as exc:
                 logger.warning("长期记忆检索失败（已降级为无记忆）| conv=%s | error=%s", conv_id, exc)
 
+        # ── 解析 context_refs ───────────────────────────────────────────────
+        context_refs = state.get("context_refs", [])
+        quant_snapshots_text = []
+        if context_refs:
+            from db.quant_store import get_quant_snapshot
+            for ref in context_refs:
+                if ref.get("type") == "quant_snapshot":
+                    snap = await get_quant_snapshot(ref["id"])
+                    if snap:
+                        text = f"【量化选股快照 {snap.id}】\n筛选条件: {snap.criteria}\n分析结果: {snap.analysis}\n风险提示: {snap.risk_notes}\n前5名标的: {[r['symbol'] + r.get('name', '') for r in snap.rows[:5]]}"
+                        quant_snapshots_text.append(text)
+
         # ── 组装历史消息 ────────────────────────────────────────────────────
         history_messages = build_messages(
             conv,
@@ -112,6 +124,7 @@ class RetrieveContextNode(BaseNode):
             forget_mode,
             self._tool_names,
             route=state.get("route", ""),
+            quant_snapshots_text=quant_snapshots_text,
         )
 
         # ── 构建用户消息 ────────────────────────────────────────────────────

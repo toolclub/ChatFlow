@@ -5,8 +5,12 @@ import type { FileArtifact } from './types'
 import Sidebar from './components/Sidebar.vue'
 import ChatView from './components/ChatView.vue'
 import CognitivePanel from './components/CognitivePanel.vue'
+import QuantView from './components/QuantView.vue'
+import StockDetailView from './components/StockDetailView.vue'
 
 const chat = useChat()
+const activeWorkspace = ref<'chat' | 'quant' | 'stock_detail'>('chat')
+const selectedStockData = ref<any>(null)
 
 onMounted(async () => {
   await chat.loadConversations()
@@ -102,6 +106,38 @@ watch(() => chat.currentConvId.value, () => {
   selectedFile.value = null
 })
 
+// ── 量化 → 对话续接 ─────────────────────────────────────────────────────────
+// useChat 非单例，QuantView 不能自己 send（会写到独立 state）。
+// 这里由 App 持有的 chat 实例发起，确保 send 写入正在渲染的对话状态。
+async function continueWithSnapshot(snapshotId: string) {
+  // 1) 总是开新会话，避免污染既有上下文
+  await chat.newConversation()
+  // 2) 等到 currentConvId 真正写入后再 send（newConversation 内部已 await，但
+  //    Vue 响应式要一拍渲染，多 await 一次 microtask 更稳）
+  await Promise.resolve()
+  // 3) agentMode=false：上下文已由 retrieve_context 注入，不需要 planner/工具，
+  //    直接走 chat 路径，避免 5min idle 超时。
+  await chat.send({
+    text: '我刚才做了一次量化选股，请基于这次筛选结果做深度分析：\n' +
+          '1) 整体特征与共性（行业集中度、估值偏向、动量分布）\n' +
+          '2) 前 3 只标的的逻辑与潜在催化\n' +
+          '3) 主要风险点和应对建议',
+    images: [],
+    agentMode: false,
+    intentLabel: '量化分析',
+    contextRefs: [{ type: 'quant_snapshot', id: snapshotId }],
+  })
+}
+
+function openStockDetail(stock: any) {
+  selectedStockData.value = stock
+  activeWorkspace.value = 'stock_detail'
+}
+
+function backToQuant() {
+  activeWorkspace.value = 'quant'
+}
+
 // ── 面板拖拽缩放 ──────────────────────────────────────────────────────────────
 const panelWidth = ref(400)
 const isDragging = ref(false)
@@ -148,10 +184,12 @@ function onDragStart(e: MouseEvent) {
       :currentConvId="chat.currentConvId.value"
       :activeConvIds="chat.activeConvIds.value"
       :creating="chat.creatingConv.value"
+      :activeWorkspace="activeWorkspace"
       @new-chat="chat.newConversation()"
       @select="chat.selectConversation($event)"
       @delete="chat.removeConversation($event)"
       @batch-delete="chat.batchRemoveConversations($event)"
+      @switchWorkspace="activeWorkspace = $event"
     />
 
     <!-- 全局加载遮罩（刷新恢复数据时）— Bilibili 颜文字风格 -->
@@ -164,8 +202,9 @@ function onDragStart(e: MouseEvent) {
 
     <!-- 主内容区 -->
     <div class="main-area">
-      <!-- 左侧：对话视图 -->
+      <!-- 聊天工作台 -->
       <ChatView
+        v-show="activeWorkspace === 'chat'"
         :messages="chat.messages.value"
         :loading="chat.loading.value"
         :agentStatus="chat.agentStatus.value"
@@ -191,7 +230,7 @@ function onDragStart(e: MouseEvent) {
 
       <!-- 右侧：认知面板（内含拖拽手柄） -->
       <div
-        v-if="showCognitivePanel"
+        v-show="activeWorkspace === 'chat' && showCognitivePanel"
         class="panel-wrapper"
         :style="{ width: panelWidth + 'px' }"
       >
@@ -213,6 +252,21 @@ function onDragStart(e: MouseEvent) {
           @close-file="selectedFile = null"
         />
       </div>
+
+      <!-- 量化工作台 -->
+      <QuantView
+        v-show="activeWorkspace === 'quant'"
+        @switch-workspace="activeWorkspace = $event"
+        @continue-with-snapshot="continueWithSnapshot"
+        @open-stock-detail="openStockDetail"
+      />
+
+      <!-- 个股详情页 -->
+      <StockDetailView
+        v-if="activeWorkspace === 'stock_detail' && selectedStockData"
+        :stock="selectedStockData"
+        @back="backToQuant"
+      />
     </div>
   </div>
 </template>

@@ -36,7 +36,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1.0'
+          cpus: '4.0'
           memory: 1G
 
   # ── PostgreSQL 关系型数据库 ───────────────────────────────────────────────
@@ -72,7 +72,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1.0'
+          cpus: '4.0'
           memory: 1G
 
   # ── Redis（含 RedisSearch，用于语义缓存）────────────────────────────────
@@ -122,11 +122,19 @@ services:
     restart: unless-stopped
     env_file:
       - .env          # 密文 + 基础配置在 .env 里
+    environment:
+      - OMP_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+      - VECLIB_MAX_THREADS=1
+      - NUMEXPR_NUM_THREADS=1
+      - GUNICORN_WORKERS=4
     expose:
       - "${BACKEND_PORT}"
     volumes:
       - ${BACKEND_LOG_HOST_DIR}:/var/log/chatflow
       - ${SECRET_DIR:-/opt/secret}:/opt/secret:ro
+      - ./.quant_cache:/app/.quant_cache
     depends_on:
       qdrant:
         condition: service_healthy
@@ -160,8 +168,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '5.0'
-          memory: 4G
+          cpus: '4.0'
+          memory: 2G
 
   # ── Vue 前端（Nginx 静态服务 + SSE 优化反代）──────────────────────────────
   frontend:
