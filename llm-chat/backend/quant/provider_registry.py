@@ -18,11 +18,18 @@ logger = logging.getLogger("quant.registry")
 
 
 def _is_permanent_error(exc: BaseException) -> bool:
-    """不应重试的错误：权限不足 / 积分不够 / 明确空数据。"""
+    """不应重试的错误：权限不足 / 积分不够 / 网络不通 / 明确空数据。"""
     msg = str(exc)
     if "权限" in msg or "积分" in msg or "没有接口" in msg:
         return True
     if "返回空 bars" in msg or "返回空 spot" in msg:
+        return True
+    # 网络不通 / 超时 → 不重试（第一次不通后面也不会通）
+    if "网络接收错误" in msg or "登录失败" in msg:
+        return True
+    if "timeout" in msg.lower() or "超时" in msg:
+        return True
+    if "Connection" in msg and ("refused" in msg or "reset" in msg):
         return True
     return False
 

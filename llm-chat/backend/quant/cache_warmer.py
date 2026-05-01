@@ -216,11 +216,18 @@ class WarmerState:
 
         logger.info("⏱️ [%s] 🚀 开启全局独占预热任务 | Worker: %s | 计划: %s", mode, _WORKER_ID, kinds)
         start_round = time.perf_counter()
-        
+
+        # 标记预热进行中（前端 /cache/status 轮询用）
+        warming_key = "chatflow:quant:warming"
         try:
-            # 记录开始时间到 Redis 供全局冷却参考
             from db.redis_state import _get_redis
             r = _get_redis()
+            await r.set(warming_key, f"{_WORKER_ID}:{','.join(kinds)}", ex=3600)
+        except Exception:
+            pass
+
+        try:
+            # 记录开始时间到 Redis 供全局冷却参考
             await r.set("chatflow:quant:last_refresh_ts", str(time.time()), ex=1800)
 
             for kind in kinds:
@@ -249,7 +256,13 @@ class WarmerState:
             self.last_spot_ok = time.time()
 
         finally:
-            # 2. 只有任务彻底执行完（或崩溃）才释放总锁
+            # 清除预热标记
+            try:
+                from db.redis_state import _get_redis
+                await _get_redis().delete(warming_key)
+            except Exception:
+                pass
+            # 只有任务彻底执行完（或崩溃）才释放总锁
             await _release_lock("global_session", session_lock_token)
 
     async def _do_spot(self) -> None:

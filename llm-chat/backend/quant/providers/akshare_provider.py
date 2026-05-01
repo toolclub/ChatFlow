@@ -364,16 +364,24 @@ class AKShareProvider:
 
     @staticmethod
     def _fetch_hist(symbol: str, start: str, end: str, adjust: str) -> pd.DataFrame:
+        import socket
         import akshare as ak
 
         code6 = to_akshare_code(symbol)
         start_d = start.replace("-", "")
         end_d = end.replace("-", "")
-        raw = ak.stock_zh_a_hist(
-            symbol=code6, period="daily",
-            start_date=start_d, end_date=end_d,
-            adjust=adjust,
-        )
+
+        old_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(15)
+        try:
+            raw = ak.stock_zh_a_hist(
+                symbol=code6, period="daily",
+                start_date=start_d, end_date=end_d,
+                adjust=adjust,
+            )
+        finally:
+            socket.setdefaulttimeout(old_timeout)
+
         if raw is None or raw.empty:
             return pd.DataFrame()
         df = raw.rename(columns={k: v for k, v in _HIST_RENAME.items() if k in raw.columns})

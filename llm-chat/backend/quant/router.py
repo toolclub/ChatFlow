@@ -64,10 +64,19 @@ async def cache_status() -> dict:
     """返回磁盘缓存全景：spot/bars/index 文件数、最新日期、age、磁盘占用。
 
     前端 QuantView 头部用此数据展示"数据更新于 X 分钟前"。
+    warming 字段为 true 时前端应显示"数据同步中"。
     """
     _ensure_enabled()
     info = await cache_disk.cache_status()
     info["warmer_running"] = get_warmer().is_running()
+    # 检查是否有预热任务正在进行
+    try:
+        from db.redis_state import _get_redis
+        r = _get_redis()
+        warming = await r.get("chatflow:quant:warming")
+        info["warming"] = bool(warming)
+    except Exception:
+        info["warming"] = False
     return info
 
 
