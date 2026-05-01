@@ -136,7 +136,29 @@ class WarmerState:
             except asyncio.TimeoutError:
                 continue
 
-    # ... _try_acquire_master_lock 保持不变 ...
+    async def _try_acquire_master_lock(self) -> bool:
+        """尝试成为 master worker（Redis SETNX，TTL 120s）。
+
+        每次 tick 调用一次，自动续期。Redis 不可用时直接放行（单机模式）。
+        """
+        try:
+            from db.redis_state import _get_redis  # type: ignore
+            r = _get_redis()
+            ok = await r.set(
+                f"{_LOCK_KEY_PREFIX}:master", _WORKER_ID,
+                nx=True, ex=120,
+            )
+            if ok:
+                return True
+            # 锁已存在 → 检查是否是自己持有（续期）
+            cur = await r.get(f"{_LOCK_KEY_PREFIX}:master")
+            if cur == _WORKER_ID:
+                await r.expire(f"{_LOCK_KEY_PREFIX}:master", 120)
+                return True
+            return False
+        except Exception:
+            # Redis 不可用 → 单机模式，每个 worker 都是 master
+            return True
 
     async def _tick(self) -> None:
         now = datetime.now()
