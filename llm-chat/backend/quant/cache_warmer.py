@@ -36,7 +36,7 @@ logger = logging.getLogger("quant.timer")
 
 _WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
 _LOCK_KEY_PREFIX = "chatflow:quant:warmer_lock"
-_LOCK_TTL_SECONDS = 600
+_LOCK_TTL_SECONDS = 1800  # 全局会话锁 30 分钟（覆盖全市场 bars 最长耗时）
 _PENDING_WARM_KEY = "chatflow:quant:pending_warm"
 
 _INDEX_CODES_TO_WARM = ["hs300", "zz500"]
@@ -146,14 +146,14 @@ class WarmerState:
             r = _get_redis()
             ok = await r.set(
                 f"{_LOCK_KEY_PREFIX}:master", _WORKER_ID,
-                nx=True, ex=120,
+                nx=True, ex=600,
             )
             if ok:
                 return True
             # 锁已存在 → 检查是否是自己持有（续期）
             cur = await r.get(f"{_LOCK_KEY_PREFIX}:master")
             if cur == _WORKER_ID:
-                await r.expire(f"{_LOCK_KEY_PREFIX}:master", 120)
+                await r.expire(f"{_LOCK_KEY_PREFIX}:master", 600)
                 return True
             return False
         except Exception:
@@ -257,10 +257,11 @@ class WarmerState:
         if symbols:
             syms = set(symbols)
         else:
-            # 全市场：从 spot 拿全部 symbol
+            # 全市场：从 spot 拿全部 symbol；spot 过期时顺手刷新
             spot = await cache_disk.read_spot("cn_a")
-            if spot is None or spot.empty:
+            if spot is None or spot.empty or not await cache_disk.is_spot_fresh("cn_a"):
                 spot = await adapter.spot("cn_a")
+                # adapter.spot 已写盘，无需重复写
             if spot is None or spot.empty:
                 logger.warning("warmer bars: spot 为空，跳过")
                 return
@@ -274,6 +275,29 @@ class WarmerState:
         t1 = time.perf_counter()
         logger.info("    ∟ 开始拉取 K 线 | 目标数量: %d", len(syms))
 
+        # 后台心跳：每隔 60s 打进度 + 续期全局会话锁，防止超长拉取导致锁过期
+        heartbeat_stop = asyncio.Event()
+        async def _heartbeat():
+            cnt = 0
+            while not heartbeat_stop.is_set():
+                try:
+                    await asyncio.wait_for(heartbeat_stop.wait(), timeout=60.0)
+                    break
+                except asyncio.TimeoutError:
+                    cnt += 1
+                    # 续期全局会话锁（防止 30min TTL 不够）
+                    try:
+                        from db.redis_state import _get_redis
+                        r = _get_redis()
+                        cur = await r.get(f"{_LOCK_KEY_PREFIX}:global_session")
+                        if cur and cur.startswith(_WORKER_ID.rsplit(":", 1)[0]):
+                            await r.expire(f"{_LOCK_KEY_PREFIX}:global_session", 1800)
+                    except Exception:
+                        pass
+                    logger.info("    ∟ 仍在拉取 K 线… 已耗时 ~%d min", cnt)
+
+        heartbeat_task = asyncio.create_task(_heartbeat())
+
         end_d = date.today()
         start_d = end_d - timedelta(days=int(QUANT_BARS_LOOKBACK_DAYS * 1.6))
 
@@ -282,6 +306,10 @@ class WarmerState:
             start=start_d,
             end=end_d,
         )
+
+        heartbeat_stop.set()
+        if heartbeat_task and not heartbeat_task.done():
+            heartbeat_task.cancel()
         if df is not None and not df.empty:
             self.last_bars_day_ok = end_d
             sym_count = df["symbol"].nunique() if "symbol" in df.columns else 0

@@ -93,9 +93,14 @@ class BaoStockProvider:
         BATCH_SIZE = 20
         all_results: list[pd.DataFrame] = []
         sym_list = list(symbols)
+        total_batches = (len(sym_list) + BATCH_SIZE - 1) // BATCH_SIZE
 
         for i in range(0, len(sym_list), BATCH_SIZE):
             batch = sym_list[i : i + BATCH_SIZE]
+            batch_no = i // BATCH_SIZE + 1
+            if batch_no % 50 == 1 or batch_no == total_batches:
+                logger.info("baostock 批次进度 %d/%d (%d 只)",
+                            batch_no, total_batches, len(batch))
             # 对每一个小批次独立加锁
             df_batch = await self._call_sync(
                 self._fetch_bars_batch, batch, start, end, adjust_flag,
