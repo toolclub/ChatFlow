@@ -129,6 +129,9 @@ services:
       - VECLIB_MAX_THREADS=1
       - NUMEXPR_NUM_THREADS=1
       - GUNICORN_WORKERS=4
+    dns:
+      - 223.5.5.5
+      - 114.114.114.114
     expose:
       - "${BACKEND_PORT}"
     volumes:
