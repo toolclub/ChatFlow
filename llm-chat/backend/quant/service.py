@@ -159,33 +159,39 @@ class QuantScreeningService:
         )
 
     async def get_stock_chart_data(self, symbol: str, days: int = 240) -> dict:
-        """获取个股 K 线图数据（适配 ECharts）。"""
+        """获取个股 K 线图数据（纯读缓存，绝不回源）。"""
         end_d = datetime.now().date()
-        # 考虑到非交易日，days * 1.6 确保覆盖足够的自然日
         start_d = end_d - timedelta(days=int(days * 1.6))
 
+        # readonly=True：只读磁盘缓存，不触发网络请求
         df = await self._adapter.bars(
             symbols=[symbol],
             start=start_d,
             end=end_d,
             market="cn_a",
+            readonly=True,
         )
         if df.empty:
-            return {"dates": [], "values": [], "volumes": [], "ma5": [], "ma10": [], "ma20": []}
+            # 缓存缺失 → 通知 warmer 后台异步补仓
+            import asyncio
+            asyncio.ensure_future(self._schedule_warm(symbol))
+            return {
+                "symbol": symbol,
+                "dates": [], "values": [], "volumes": [],
+                "ma5": [], "ma10": [], "ma20": [],
+                "pending": True,
+            }
 
         df = df.sort_values("date").reset_index(drop=True)
-        
-        # 计算均线
+
         df["ma5"] = df["close"].rolling(5).mean()
         df["ma10"] = df["close"].rolling(10).mean()
         df["ma20"] = df["close"].rolling(20).mean()
 
-        # ECharts Candlestick 格式：[open, close, low, high]
         values = df[["open", "close", "low", "high"]].values.tolist()
         dates = df["date"].astype(str).tolist()
         volumes = []
         for i, row in df.iterrows():
-            # [index, volume, color_flag]
             color_flag = 1 if row["close"] >= row["open"] else -1
             volumes.append([i, row["volume"], color_flag])
 
@@ -197,7 +203,17 @@ class QuantScreeningService:
             "ma5": df["ma5"].replace({float('nan'): None}).tolist(),
             "ma10": df["ma10"].replace({float('nan'): None}).tolist(),
             "ma20": df["ma20"].replace({float('nan'): None}).tolist(),
+            "pending": False,
         }
+
+    @staticmethod
+    async def _schedule_warm(symbol: str) -> None:
+        """通知 warmer 后台补仓（非阻塞）。"""
+        try:
+            from quant.cache_warmer import request_warm
+            await request_warm([symbol])
+        except Exception:
+            pass
 
     # ── 各阶段实现 ─────────────────────────────────────────────────────────
 

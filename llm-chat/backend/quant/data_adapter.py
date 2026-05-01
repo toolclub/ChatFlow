@@ -86,45 +86,56 @@ class CachedDataAdapter:
         end: str | date,
         market: str = "cn_a",
         trace: list[ProviderTrace] | None = None,
+        *,
+        readonly: bool = False,
     ) -> pd.DataFrame:
         if not symbols:
             return pd.DataFrame()
 
         s_date = _to_date(start)
         e_date = _to_date(end)
-        # 1) 先尝试整体读盘
-        cached, missing = await cache_disk.read_bars_range(market, s_date, e_date)
         sym_set = set(symbols)
 
+        cached: pd.DataFrame | None = None
+        if len(symbols) == 1:
+            cached = await cache_disk.read_bars_for_symbol(market, symbols[0], s_date, e_date)
+        else:
+            cached, _ = await cache_disk.read_bars_range(market, s_date, e_date)
+
         if cached is not None and not cached.empty:
-            cached_syms = set(cached["symbol"].astype(str).unique()) if "symbol" in cached.columns else set()
-            cover_ratio = len(cached_syms & sym_set) / max(len(sym_set), 1)
+            cover_ratio = len(
+                set(cached["symbol"].astype(str).unique()) & sym_set
+            ) / max(len(sym_set), 1) if "symbol" in cached.columns else 0.0
         else:
             cover_ratio = 0.0
 
-        # 命中条件：覆盖率 ≥ 80% 且最近 5 个日历日内有数据 → 直接返回缓存裁剪
-        cache_recent_enough = cached is not None and not cached.empty and (
-            (e_date - max(pd.to_datetime(cached["date"]).dt.date.max(),
-                          s_date)).days <= 5
-        )
-        if cover_ratio >= 0.8 and cache_recent_enough:
+        if cover_ratio >= 0.8:
             if trace is not None:
                 trace.append(ProviderTrace(
                     provider="disk_cache",
                     capability=ProviderCapability.DAILY_BARS.value,
                     status="ok",
                     elapsed_ms=0.0,
-                    rows=len(cached),
+                    rows=len(cached) if cached is not None else 0,
                     error=f"coverage={cover_ratio:.0%}",
                 ))
-            df = cached[cached["symbol"].astype(str).isin(sym_set)].reset_index(drop=True)
-            return df
+            return cached[cached["symbol"].astype(str).isin(sym_set)].reset_index(drop=True) if cached is not None else pd.DataFrame()
 
-        # 2) 缓存不足：回源全量
+        # readonly 模式：缓存不足直接返回已有数据（含空），绝不回源
+        if readonly:
+            if cached is not None and not cached.empty:
+                return cached[cached["symbol"].astype(str).isin(sym_set)].reset_index(drop=True)
+            return pd.DataFrame()
+
+        # 2) 缓存不足：回源全量（仅 warmer / 非 API 路径走这里）
         async def invoker(provider):
             df = await provider.daily_bars(
                 symbols, start=_to_str(s_date), end=_to_str(e_date),
             )
+            if df is None or df.empty:
+                raise RuntimeError(
+                    f"{provider.name} 返回空 bars（{len(symbols)} 只标的）"
+                )
             return df, len(df)
 
         try:
@@ -133,7 +144,6 @@ class CachedDataAdapter:
             )
         except Exception as exc:
             logger.warning("daily_bars 回源失败：%s", exc)
-            # 兜底：返回部分命中的缓存（即便覆盖率 <80%，total better than empty）
             if cached is not None and not cached.empty:
                 return cached[cached["symbol"].astype(str).isin(sym_set)].reset_index(drop=True)
             return pd.DataFrame()

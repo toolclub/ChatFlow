@@ -17,6 +17,16 @@ from quant.providers.base import MarketDataProvider
 logger = logging.getLogger("quant.registry")
 
 
+def _is_permanent_error(exc: BaseException) -> bool:
+    """不应重试的错误：权限不足 / 积分不够 / 明确空数据。"""
+    msg = str(exc)
+    if "权限" in msg or "积分" in msg or "没有接口" in msg:
+        return True
+    if "返回空 bars" in msg or "返回空 spot" in msg:
+        return True
+    return False
+
+
 class NoProviderAvailable(RuntimeError):
     """所有 provider 都不可用或没有目标能力"""
 
@@ -82,11 +92,18 @@ class ProviderRegistry:
         capability: ProviderCapability,
         invoker,
         trace: list[ProviderTrace] | None = None,
+        *,
+        max_retries: int = 2,
     ):
         """按优先级依次尝试 provider 调用 invoker(provider)，遇错自动 fallback。
 
+        每个 provider 在放弃前重试最多 max_retries 次（指数退避 + 随机抖动），
+        权限类错误（积分/权限）不重试，立即跳到下一个 provider。
+
         invoker: async (provider) -> (result, rows_count)
         """
+        import random as _random
+
         cs = self.candidates(capability)
         if not cs:
             raise NoProviderAvailable(f"无可用 provider 提供能力：{capability.value}")
@@ -97,30 +114,57 @@ class ProviderRegistry:
                 "调用 provider %s (capability=%s, %d/%d)",
                 p.name, capability.value, idx + 1, len(cs),
             )
-            t0 = time.perf_counter()
-            try:
-                result, rows = await invoker(p)
-                if trace is not None:
-                    trace.append(ProviderTrace(
-                        provider=p.name,
-                        capability=capability.value,
-                        status="ok" if idx == 0 else "fallback",
-                        elapsed_ms=(time.perf_counter() - t0) * 1000,
-                        rows=int(rows or 0),
-                    ))
-                return result
-            except Exception as exc:
-                last_exc = exc
-                if trace is not None:
-                    trace.append(ProviderTrace(
-                        provider=p.name,
-                        capability=capability.value,
-                        status="error",
-                        elapsed_ms=(time.perf_counter() - t0) * 1000,
-                        error=f"{type(exc).__name__}: {exc}"[:200],
-                    ))
-                logger.warning("provider %s 调用失败 (capability=%s)，尝试 fallback：%s",
-                               p.name, capability.value, exc)
+
+            for attempt in range(max_retries + 1):
+                t0 = time.perf_counter()
+                try:
+                    result, rows = await invoker(p)
+                    if trace is not None:
+                        trace.append(ProviderTrace(
+                            provider=p.name,
+                            capability=capability.value,
+                            status="ok" if idx == 0 else "fallback",
+                            elapsed_ms=(time.perf_counter() - t0) * 1000,
+                            rows=int(rows or 0),
+                        ))
+                    return result
+                except Exception as exc:
+                    last_exc = exc
+                    if _is_permanent_error(exc):
+                        # 权限/积分/空数据 → 不重试，直接跳到下一个 provider
+                        if trace is not None:
+                            trace.append(ProviderTrace(
+                                provider=p.name,
+                                capability=capability.value,
+                                status="error",
+                                elapsed_ms=(time.perf_counter() - t0) * 1000,
+                                error=f"{type(exc).__name__}: {exc}"[:200],
+                            ))
+                        logger.warning("provider %s 调用失败 (不可重试)，尝试 fallback：%s",
+                                       p.name, exc)
+                        break
+
+                    if attempt < max_retries:
+                        delay = (2 ** attempt) + _random.uniform(0.5, 1.5)
+                        logger.warning(
+                            "provider %s 调用失败 (第 %d/%d 次重试, %.1fs 后): %s",
+                            p.name, attempt + 1, max_retries, delay, exc,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+
+                    # 最后一次重试也失败
+                    if trace is not None:
+                        trace.append(ProviderTrace(
+                            provider=p.name,
+                            capability=capability.value,
+                            status="error",
+                            elapsed_ms=(time.perf_counter() - t0) * 1000,
+                            error=f"{type(exc).__name__}: {exc}"[:200],
+                        ))
+                    logger.warning("provider %s 调用失败 (%d 次重试耗尽)，尝试 fallback：%s",
+                                   p.name, max_retries, exc)
+                    break
 
         raise NoProviderAvailable(
             f"所有 provider 都失败 (capability={capability.value}): {last_exc}"

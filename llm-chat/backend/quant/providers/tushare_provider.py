@@ -290,6 +290,8 @@ class TushareProvider:
         if not symbols:
             return pd.DataFrame()
 
+        errors: dict[str, int] = {}
+
         async def _one(sym: str) -> pd.DataFrame:
             async with self._sem:
                 try:
@@ -303,12 +305,15 @@ class TushareProvider:
                     return df
                 except Exception as exc:
                     if _is_permission_error(exc):
-                        # 一只失败 = 整批积分不够，直接抛让 registry fallback
                         raise
-                    logger.warning("Tushare 拉取 %s 日线失败: %s", sym, exc)
+                    msg = f"{type(exc).__name__}: {exc}"[:120]
+                    errors[msg] = errors.get(msg, 0) + 1
                     return pd.DataFrame()
 
         results = await asyncio.gather(*[_one(s) for s in symbols])
+        if errors:
+            for msg, count in sorted(errors.items(), key=lambda x: -x[1]):
+                logger.warning("Tushare 拉取 %d 只股票日线失败: %s", count, msg)
         non_empty = [r for r in results if not r.empty]
         if not non_empty:
             return pd.DataFrame()

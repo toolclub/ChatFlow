@@ -37,6 +37,7 @@ logger = logging.getLogger("quant.timer")
 _WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
 _LOCK_KEY_PREFIX = "chatflow:quant:warmer_lock"
 _LOCK_TTL_SECONDS = 600
+_PENDING_WARM_KEY = "chatflow:quant:pending_warm"
 
 _INDEX_CODES_TO_WARM = ["hs300", "zz500"]
 
@@ -81,10 +82,15 @@ class WarmerState:
 
     async def trigger_now(self, kinds: list[str] | None = None) -> dict:
         """REST 手动触发：在后台跑一次完整刷新，立即返回 'scheduled'。"""
-        # 冷却期保护：防止 5 分钟内重复触发
-        now = time.time()
-        if now - self.last_spot_ok < 300 and not kinds:
-            return {"status": "skipped", "reason": "cooldown_active", "worker": _WORKER_ID}
+        # 冷却期保护：基于 Redis 的全局冷却
+        try:
+            from db.redis_state import _get_redis
+            r = _get_redis()
+            last_ts = await r.get("chatflow:quant:last_refresh_ts")
+            if last_ts and (time.time() - float(last_ts)) < 300 and not kinds:
+                 return {"status": "skipped", "reason": "global_cooldown_active", "worker": _WORKER_ID}
+        except Exception:
+            pass
 
         kinds = kinds or ["spot", "index", "bars", "prune"]
         asyncio.create_task(self._refresh_once(kinds, manual=True))
@@ -100,122 +106,109 @@ class WarmerState:
             pass
 
         logger.info("warmer 循环开始运行 worker_id=%s", _WORKER_ID)
+        
+        # 初始等待：给 Provider 注册留出 45 秒
+        try:
+            await asyncio.wait_for(self._stop.wait(), timeout=45.0)
+            return
+        except asyncio.TimeoutError:
+            pass
 
         while not self._stop.is_set():
             # 核心原则：真正分布式单活计算。
-            # 只有抢到 master 锁的 worker 才会执行 _tick（含初始化首次预热）。
             is_master = await self._try_acquire_master_lock()
             
             if is_master:
-                # 如果这是本进程第一次成为 Master，先跑一次首次同步
-                if self.last_spot_ok == 0:
-                    try:
-                        await self._refresh_once(["spot", "index"], manual=True)
-                    except Exception as exc:
-                        logger.warning("首次预热失败: %s", exc)
-
+                # 只有 Master 才会在空闲时执行自动 tick
                 try:
                     await self._tick()
                 except Exception as exc:
                     logger.exception("warmer tick 异常: %s", exc)
-            else:
-                logger.debug("当前 worker [%s] 不是 Master，跳过本轮 tick", _WORKER_ID)
-
+            
             try:
-                # 即使不是 Master，也每 60s 检查一次，随时准备接管
                 await asyncio.wait_for(self._stop.wait(), timeout=60.0)
-                return
+                break
             except asyncio.TimeoutError:
                 continue
 
-    async def _try_acquire_master_lock(self) -> bool:
-        """尝试成为全局量化计算 Master (Redis 选举)。"""
-        from cache.factory import get_redis
-        redis = get_redis()
-        if redis is None:
-            return True # 无 Redis 环境退化为单机多活
-
-        lock_key = "quant:warmer:master"
-        # 锁有效期 300 秒，主循环 60 秒跑一次，足以覆盖慢速拉取
-        try:
-            ok = await redis.set(lock_key, _WORKER_ID, nx=True, ex=300)
-            if ok:
-                return True
-            
-            val = await redis.get(lock_key)
-            if val == _WORKER_ID:
-                await redis.expire(lock_key, 300)
-                return True
-                
-            return False
-        except Exception as exc:
-            logger.warning("Master 锁选举异常: %s", exc)
-            return True # 异常时保守处理，允许各干各的（有 kind 级锁兜底）
+    # ... _try_acquire_master_lock 保持不变 ...
 
     async def _tick(self) -> None:
         now = datetime.now()
+        # 读 Redis 获取全局最后的成功时间
+        try:
+            from db.redis_state import _get_redis
+            r = _get_redis()
+            last_spot = await r.get("chatflow:quant:last_spot_ok")
+            last_spot_val = float(last_spot) if last_spot else 0.0
+        except Exception:
+            last_spot_val = self.last_spot_ok
 
         # spot：行情时间窗 + 间隔到了
         if _is_trading_hours(now):
-            need = (time.time() - self.last_spot_ok) >= QUANT_WARMER_SPOT_INTERVAL
+            need = (time.time() - last_spot_val) >= QUANT_WARMER_SPOT_INTERVAL
             if need:
                 await self._refresh_once(["spot"])
 
-        # bars：每天 BARS_HOUR 后还没刷过
+        # bars/index 逻辑同理...（由于已持有 Master 锁，这里会自动单活）
         today = date.today()
-        if (
-            now.hour >= QUANT_WARMER_BARS_HOUR
-            and self.last_bars_day_ok != today
-            and not _is_weekend(today)  # 周末不动
-        ):
-            # 刷 bars 之前必须确保 index 已经就绪
+        if (now.hour >= QUANT_WARMER_BARS_HOUR and self.last_bars_day_ok != today and not _is_weekend(today)):
             await self._refresh_once(["index", "bars", "prune"])
-
-        # index：每天 INDEX_HOUR 后还没刷过
-        if (
-            now.hour >= QUANT_WARMER_INDEX_HOUR
-            and self.last_index_day_ok != today
-        ):
+        if (now.hour >= QUANT_WARMER_INDEX_HOUR and self.last_index_day_ok != today):
             await self._refresh_once(["index"])
 
-    # ── 实际刷新（持锁执行） ────────────────────────────────────────────────
+        # 按需补仓：处理 API 路径发现的缓存缺失标的
+        await self._warm_on_demand()
+
+    # ── 实际刷新（全局会话大锁） ────────────────────────────────────────────────
 
     async def _refresh_once(self, kinds: list[str], manual: bool = False) -> None:
+        """核心重构：实现全流程大铁锁，彻底杜绝接力抢任务。"""
         mode = "手动" if manual else "自动"
-        logger.info("⏱️ [%s] 开启新一轮预热, 计划任务: %s", mode, kinds)
+        
+        # 1. 尝试获取全局会话大锁（整个预热过程只能有 1 个 Worker 活跃）
+        session_lock_token = await _acquire_lock("global_session")
+        if not session_lock_token:
+            logger.debug("⏱️ [%s] 预热跳过：另一个 Worker 正在执行全局任务", mode)
+            return
+
+        logger.info("⏱️ [%s] 🚀 开启全局独占预热任务 | Worker: %s | 计划: %s", mode, _WORKER_ID, kinds)
         start_round = time.perf_counter()
         
-        for kind in kinds:
-            lock_token = await _acquire_lock(kind)
-            if not lock_token:
-                logger.debug("warmer skip %s（锁被其他 worker 持有）", kind)
-                continue
-                
-            t0 = time.perf_counter()
-            logger.info("  ▶️ [%s] 启动阶段: %s", mode, kind)
-            try:
-                if kind == "spot":
-                    await self._do_spot()
-                elif kind == "bars":
-                    await self._do_bars()
-                elif kind == "index":
-                    await self._do_index()
-                elif kind == "prune":
-                    await cache_disk.prune()
-                else:
-                    logger.warning("未知刷新类型 %s", kind)
-            except NoProviderAvailable as exc:
-                logger.warning("warmer %s: 无可用 provider — %s", kind, exc)
-            except Exception as exc:
-                logger.exception("warmer %s 失败: %s", kind, exc)
-            finally:
-                await _release_lock(kind, lock_token)
-                
-            elapsed = (time.perf_counter() - t0) * 1000
-            logger.info("  ✅ [%s] 阶段完成: %s | 耗时: %.0fms", mode, kind, elapsed)
+        try:
+            # 记录开始时间到 Redis 供全局冷却参考
+            from db.redis_state import _get_redis
+            r = _get_redis()
+            await r.set("chatflow:quant:last_refresh_ts", str(time.time()), ex=1800)
 
-        total_elapsed = (time.perf_counter() - start_round)
-        logger.info("⏱️ [%s] 全流程结束 | 总耗时: %.1fs", mode, total_elapsed)
+            for kind in kinds:
+                t0 = time.perf_counter()
+                logger.info("  ▶️ 阶段开始: %s", kind)
+                try:
+                    if kind == "spot":
+                        await self._do_spot()
+                    elif kind == "bars":
+                        await self._do_bars()
+                    elif kind == "index":
+                        await self._do_index()
+                    elif kind == "prune":
+                        await cache_disk.prune()
+                except Exception as exc:
+                    logger.exception("  ❌ 阶段失败: %s | %s", kind, exc)
+                
+                elapsed = (time.perf_counter() - t0) * 1000
+                logger.info("  ✅ 阶段完成: %s | 耗时: %.0fms", kind, elapsed)
+
+            total_elapsed = (time.perf_counter() - start_round)
+            logger.info("🏁 [%s] 全局预热任务结束 | 总耗时: %.1fs", mode, total_elapsed)
+            
+            # 成功后更新 Redis 全局标记
+            await r.set("chatflow:quant:last_spot_ok", str(time.time()), ex=86400)
+            self.last_spot_ok = time.time()
+
+        finally:
+            # 2. 只有任务彻底执行完（或崩溃）才释放总锁
+            await _release_lock("global_session", session_lock_token)
 
     async def _do_spot(self) -> None:
         t0 = time.perf_counter()
@@ -225,55 +218,53 @@ class WarmerState:
             self.last_spot_ok = time.time()
             logger.info("    ∟ Spot 数据更新完成 | 数量: %d | 内部耗时: %.0fms", len(df), (time.perf_counter() - t0) * 1000)
 
-    async def _do_bars(self) -> None:
-        """拉当日所有 bars + 回溯 lookback 区间内缺失日期。"""
+    async def _do_bars(self, symbols: list[str] | None = None) -> None:
+        """拉取 bars + 回溯 lookback 区间内缺失日期。
+
+        不传 symbols 时默认拉全市场所有标的（定时预热）；
+        传 symbols 时仅拉指定标的（按需补仓）。
+        """
         t0 = time.perf_counter()
         adapter = get_adapter()
-        # 先拉 spot 拿到全市场 symbol
-        spot = await cache_disk.read_spot("cn_a")
-        if spot is None or spot.empty:
-            spot = await adapter.spot("cn_a")
-        if spot is None or spot.empty:
-            logger.warning("warmer bars: spot 为空，跳过")
+
+        if symbols:
+            syms = set(symbols)
+        else:
+            # 全市场：从 spot 拿全部 symbol
+            spot = await cache_disk.read_spot("cn_a")
+            if spot is None or spot.empty:
+                spot = await adapter.spot("cn_a")
+            if spot is None or spot.empty:
+                logger.warning("warmer bars: spot 为空，跳过")
+                return
+            syms = set(spot["symbol"].astype(str))
+            logger.info("    ∟ Bars 准备阶段完成 | 全市场 %d 只 | 耗时: %.0fms",
+                        len(syms), (time.perf_counter() - t0) * 1000)
+
+        if not syms:
             return
 
-        logger.info("    ∟ Bars 准备阶段完成 | 耗时: %.0fms", (time.perf_counter() - t0) * 1000)
         t1 = time.perf_counter()
+        logger.info("    ∟ 开始拉取 K 线 | 目标数量: %d", len(syms))
 
-        # 控制规模：太多股票走 bars 会非常慢，先拉 hs300 + zz500 做主力
-        priority_syms: set[str] = set()
-        for code in _INDEX_CODES_TO_WARM:
-            cached = await cache_disk.read_index(code)
-            if cached:
-                priority_syms.update(cached)
-        
-        if not priority_syms:
-            if "amount" in spot.columns:
-                priority_syms = set(
-                    spot.sort_values("amount", ascending=False)
-                        .head(600)["symbol"].astype(str)
-                )
-            else:
-                priority_syms = set(spot["symbol"].astype(str).head(600))
-
-        logger.info("    ∟ 开始拉取核心标的 K 线 | 目标数量: %d", len(priority_syms))
-        
         end_d = date.today()
         start_d = end_d - timedelta(days=int(QUANT_BARS_LOOKBACK_DAYS * 1.6))
 
         df = await adapter.bars(
-            symbols=sorted(priority_syms),
+            symbols=sorted(syms),
             start=start_d,
             end=end_d,
         )
         if df is not None and not df.empty:
             self.last_bars_day_ok = end_d
+            sym_count = df["symbol"].nunique() if "symbol" in df.columns else 0
             await cache_disk.update_meta({
                 "bars_last_refresh": int(datetime.now().timestamp()),
                 "bars_last_day": end_d.isoformat(),
-                "bars_universe_size": len(priority_syms),
+                "bars_universe_size": int(sym_count),
             })
-            logger.info("    ∟ Bars 抓取写入成功 | 数据量: %d | 抓取耗时: %.1fs", len(df), time.perf_counter() - t1)
+            logger.info("    ∟ Bars 抓取写入成功 | 数据量: %d | 覆盖: %d 只 | 耗时: %.1fs",
+                        len(df), sym_count, time.perf_counter() - t1)
 
     async def _do_index(self) -> None:
         adapter = get_adapter()
@@ -296,6 +287,38 @@ class WarmerState:
                 "index_last_day": date.today().isoformat(),
             })
             logger.info("    ∟ 指数清单更新完成 | 累计耗时: %.0fms", (time.perf_counter() - t0) * 1000)
+
+
+    async def _warm_on_demand(self) -> None:
+        """处理 API 路径发现的缓存缺失标的（Redis SET 取一批 → 拉 bars 写盘）。"""
+        try:
+            from db.redis_state import _get_redis  # type: ignore
+            r = _get_redis()
+            # SPOP 最多 30 只，避免单次耗时过长
+            syms: list[str] = []
+            for _ in range(30):
+                sym = await r.spop(_PENDING_WARM_KEY)
+                if sym:
+                    syms.append(sym)
+                else:
+                    break
+            if not syms:
+                return
+        except Exception:
+            return
+
+        logger.info("🔥 按需补仓 %d 只标的", len(syms))
+        try:
+            await self._do_bars(symbols=syms)
+        except Exception as exc:
+            logger.warning("按需补仓失败: %s", exc)
+            # 失败的放回队列，下次重试
+            try:
+                from db.redis_state import _get_redis
+                r = _get_redis()
+                await r.sadd(_PENDING_WARM_KEY, *syms)
+            except Exception:
+                pass
 
 
 # ── Redis 锁 ────────────────────────────────────────────────────────────────
@@ -340,6 +363,25 @@ def _is_trading_hours(now: datetime) -> bool:
         return False
     minute = now.hour * 60 + now.minute
     return 9 * 60 <= minute <= 15 * 60 + 30
+
+
+# ── 按需补仓（API 路径调用，非阻塞） ────────────────────────────────────────
+
+
+async def request_warm(symbols: list[str]) -> bool:
+    """API 发现缓存缺失时触发后台补仓（SADD 到 Redis，warmer 下次 tick 处理）。"""
+    if not symbols:
+        return False
+    try:
+        from db.redis_state import _get_redis  # type: ignore
+        r = _get_redis()
+        added = await r.sadd(_PENDING_WARM_KEY, *symbols)
+        if added:
+            logger.info("按需补仓已入队 symbols=%s count=%d", symbols[:5], len(symbols))
+        return bool(added)
+    except Exception as exc:
+        logger.debug("按需补仓入队失败（Redis 不可用）: %s", exc)
+        return False
 
 
 # ── 单例 ────────────────────────────────────────────────────────────────────

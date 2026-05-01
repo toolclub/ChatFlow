@@ -164,6 +164,31 @@ async def write_bars(market: str, df: pd.DataFrame) -> int:
     return size
 
 
+async def read_bars_for_symbol(
+    market: str,
+    symbol: str,
+    start: date,
+    end: date,
+) -> pd.DataFrame | None:
+    """读取单只标的在 [start, end] 区间内的所有缓存 bars（纯读盘，不判断覆盖率）。"""
+    def _read() -> pd.DataFrame | None:
+        bars_dir = _root() / "bars"
+        frames = []
+        for p in sorted(bars_dir.glob(f"{market}_*.pkl.gz")):
+            d = _parse_file_date(p)
+            if d is None or d < start or d > end:
+                continue
+            sub = _sync_read_df(p)
+            if sub is not None and "symbol" in sub.columns and not sub.empty:
+                match = sub[sub["symbol"].astype(str) == symbol]
+                if not match.empty:
+                    frames.append(match)
+        if not frames:
+            return None
+        return pd.concat(frames, ignore_index=True)
+    return await asyncio.to_thread(_read)
+
+
 async def read_bars_range(
     market: str,
     start: date,
