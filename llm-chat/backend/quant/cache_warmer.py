@@ -433,13 +433,28 @@ async def _release_master_lock() -> None:
 
 
 async def _acquire_lock(kind: str) -> str | None:
-    """成功返回 token，失败返回 None。Redis 不可用时直接放行（单机模式）。"""
+    """成功返回 token，失败返回 None。
+
+    旧容器残留检测：锁持有者 hostname 不匹配当前容器时强制接管。
+    Redis 不可用时直接放行（单机模式）。
+    """
     token = f"{_WORKER_ID}:{int(time.time() * 1000)}"
     try:
         from db.redis_state import _get_redis  # type: ignore
         r = _get_redis()
         ok = await r.set(f"{_LOCK_KEY_PREFIX}:{kind}", token, nx=True, ex=_LOCK_TTL_SECONDS)
-        return token if ok else None
+        if ok:
+            return token
+        # 锁已存在 → 检测是否旧容器残留
+        cur = await r.get(f"{_LOCK_KEY_PREFIX}:{kind}")
+        if cur and ":" in cur:
+            cur_host = cur.rsplit(":", 1)[0]
+            my_host = _WORKER_ID.rsplit(":", 1)[0]
+            if cur_host != my_host:
+                logger.info("检测到旧容器 %s 锁 (%s)，强制接管", kind, cur[:40])
+                await r.set(f"{_LOCK_KEY_PREFIX}:{kind}", token, ex=_LOCK_TTL_SECONDS)
+                return token
+        return None
     except Exception as exc:
         logger.debug("Redis 锁不可用，单机模式跑 %s: %s", kind, exc)
         return token
