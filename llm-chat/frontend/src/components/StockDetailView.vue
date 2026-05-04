@@ -227,6 +227,9 @@ onUnmounted(() => {
 
 function getXueqiuUrl() {
   const [code, market] = props.stock.symbol.split('.')
+  if (market === 'US') {
+    return `https://xueqiu.com/S/${code}`
+  }
   const xqMarket = market === 'SH' ? 'SH' : 'SZ'
   return `https://xueqiu.com/S/${xqMarket}${code}`
 }
@@ -249,7 +252,7 @@ const scoreColor = computed(() => {
           <div class="stock-name-row">
             <span class="name">{{ stock.name }}</span>
             <span class="symbol">{{ stock.symbol }}</span>
-            <el-tag size="small" class="bili-tag-filled">A股</el-tag>
+            <el-tag size="small" class="bili-tag-filled">{{ stock.symbol.endsWith('.US') ? '美股' : 'A股' }}</el-tag>
           </div>
           <div class="industry-row">
             <el-icon><Compass /></el-icon> {{ stock.industry || '综合性行业' }}
@@ -271,7 +274,7 @@ const scoreColor = computed(() => {
         </div>
         <div class="m-divider"></div>
         <div class="metric-box">
-          <span class="m-label">市值 (亿)</span>
+          <span class="m-label">市值 ({{ stock.symbol.endsWith('.US') ? '亿刀' : '亿' }})</span>
           <span class="m-value">{{ formatNum(stock.mkt_cap, 1) }}</span>
         </div>
         <div class="m-divider"></div>
@@ -307,7 +310,7 @@ const scoreColor = computed(() => {
           <div class="grid-cell"><span class="l">成交量</span><span class="v">{{ formatNum((stock.raw?.volume || 0), 1) }}万</span></div>
           <div class="grid-cell"><span class="l">昨收</span><span class="v">{{ formatNum(stock.raw?.prev_close) }}</span></div>
           <div class="grid-cell"><span class="l">最低</span><span class="v" style="color: #00B578">{{ formatNum(stock.raw?.low) }}</span></div>
-          <div class="grid-cell"><span class="l">成交额</span><span class="v">{{ formatNum(stock.raw?.amount, 2) }}亿</span></div>
+          <div class="grid-cell"><span class="l">成交额</span><span class="v">{{ formatNum(stock.raw?.amount, 2) }}{{ stock.symbol.endsWith('.US') ? '亿刀' : '亿' }}</span></div>
           <div class="grid-cell"><span class="l">换手</span><span class="v">{{ formatNum(stock.raw?.turnover_rate) }}%</span></div>
           <div class="grid-cell"><span class="l">振幅</span><span class="v">{{ formatNum(stock.raw?.amplitude) }}%</span></div>
           <div class="grid-cell"><span class="l">量比</span><span class="v">{{ formatNum(stock.raw?.volume_ratio) }}</span></div>

@@ -83,17 +83,36 @@ function getScoreColor(score: number): string {
           </div>
           
           <div class="filter-item">
-            <label>股票池 (Universe)</label>
-            <el-select v-model="quant.criteria.value.universe" size="default" class="bili-select">
-              <el-option label="全市场 (A股)" value="all" />
-              <el-option label="沪深300" value="hs300" />
-              <el-option label="中证500" value="zz500" />
+            <label>目标市场 (Market)</label>
+            <el-select v-model="quant.criteria.value.market" size="default" class="bili-select">
+              <el-option label="中国 A 股" value="cn_a" />
+              <el-option label="美国股票" value="us_stock" />
             </el-select>
           </div>
 
           <div class="filter-item">
-            <label>最低市值 (亿元)</label>
+            <label>股票池 (Universe)</label>
+            <el-select v-model="quant.criteria.value.universe" size="default" class="bili-select">
+              <template v-if="quant.criteria.value.market === 'cn_a'">
+                <el-option label="全市场 (A股)" value="all" />
+                <el-option label="沪深300" value="hs300" />
+                <el-option label="中证500" value="zz500" />
+              </template>
+              <template v-else>
+                <el-option label="全市场 (US)" value="all" />
+                <el-option label="纳斯达克 (Nasdaq)" value="nasdaq" />
+                <el-option label="标普500 (S&P 500)" value="sp500" />
+              </template>
+            </el-select>
+          </div>
+
+          <div class="filter-item">
+            <label>最低市值 ({{ quant.criteria.value.market === 'cn_a' ? '亿元' : '亿美元' }})</label>
             <el-input-number v-model="quant.criteria.value.min_market_cap" :min="0" :step="100" class="bili-input-number" />
+          </div>
+
+          <div class="filter-item" v-if="quant.criteria.value.market === 'cn_a'">
+            <el-checkbox v-model="quant.criteria.value.exclude_st" label="剔除 ST / 退市标的" />
           </div>
 
           <div class="filter-item">
@@ -234,7 +253,7 @@ function getScoreColor(score: number): string {
         <div v-else class="empty-layout">
           <div class="empty-content">
             <el-empty :image-size="120" description="请在左侧设置筛选条件" />
-            <p class="empty-tip">支持 5000+ A 股全市场实时打分分析</p>
+            <p class="empty-tip">支持 10000+ A股/美股全市场实时打分分析</p>
           </div>
         </div>
       </div>

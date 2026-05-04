@@ -241,8 +241,8 @@ export interface QuantProviderInfo {
 }
 
 export interface QuantScreenCriteria {
-  market?: 'cn_a'
-  universe?: 'all' | 'hs300' | 'zz500' | 'custom'
+  market?: 'cn_a' | 'us_stock'
+  universe?: 'all' | 'hs300' | 'zz500' | 'nasdaq' | 'sp500' | 'custom'
   custom_symbols?: string[]
   industries?: string[]
   min_market_cap?: number | null

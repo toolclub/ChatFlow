@@ -196,7 +196,8 @@ class WarmerState:
             last_spot_val = self.last_spot_ok
 
         # spot：行情时间窗 + 间隔到了
-        if _is_trading_hours(now):
+        # 美股和 A 股交易时间不同，这里简单处理，只要在 A 股交易时间或美股交易时间（大致）都刷
+        if _is_trading_hours(now) or _is_us_trading_hours(now):
             need = (time.time() - last_spot_val) >= QUANT_WARMER_SPOT_INTERVAL
             if need:
                 await self._refresh_once(["spot"])
@@ -277,42 +278,48 @@ class WarmerState:
     async def _do_spot(self) -> None:
         t0 = time.perf_counter()
         adapter = get_adapter()
-        df = await adapter.spot("cn_a")
-        if df is not None and not df.empty:
-            self.last_spot_ok = time.time()
-            logger.info("    ∟ Spot 数据更新完成 | 数量: %d | 内部耗时: %.0fms", len(df), (time.perf_counter() - t0) * 1000)
+        for market in ["cn_a", "us_stock"]:
+            try:
+                df = await adapter.spot(market)
+                if df is not None and not df.empty:
+                    logger.info("    ∟ Spot (%s) 更新完成 | 数量: %d", market, len(df))
+            except Exception as exc:
+                logger.warning("    ❌ Spot (%s) 失败: %s", market, exc)
+        self.last_spot_ok = time.time()
 
     async def _do_bars(self, symbols: list[str] | None = None) -> None:
-        """拉取 bars + 回溯 lookback 区间内缺失日期。
+        """拉取 bars + 回溯 lookback 区间内缺失日期。"""
+        if symbols:
+            # 按需补仓：自动识别市场
+            cn_syms = [s for s in symbols if not s.endswith(".US")]
+            us_syms = [s for s in symbols if s.endswith(".US")]
+            if cn_syms: await self._do_bars_market("cn_a", cn_syms)
+            if us_syms: await self._do_bars_market("us_stock", us_syms)
+        else:
+            # 全市场预热
+            await self._do_bars_market("cn_a")
+            await self._do_bars_market("us_stock")
 
-        不传 symbols 时默认拉全市场所有标的（定时预热）；
-        传 symbols 时仅拉指定标的（按需补仓）。
-        """
+    async def _do_bars_market(self, market: str, symbols: list[str] | None = None) -> None:
         t0 = time.perf_counter()
         adapter = get_adapter()
-
+        
         if symbols:
             syms = set(symbols)
         else:
-            # 全市场：从 spot 拿全部 symbol；spot 过期时顺手刷新
-            spot = await cache_disk.read_spot("cn_a")
-            if spot is None or spot.empty or not await cache_disk.is_spot_fresh("cn_a"):
-                spot = await adapter.spot("cn_a")
-                # adapter.spot 已写盘，无需重复写
+            spot = await cache_disk.read_spot(market)
+            if spot is None or spot.empty or not await cache_disk.is_spot_fresh(market):
+                spot = await adapter.spot(market)
             if spot is None or spot.empty:
-                logger.warning("warmer bars: spot 为空，跳过")
+                logger.warning("warmer bars (%s): spot 为空，跳过", market)
                 return
             syms = set(spot["symbol"].astype(str))
-            logger.info("    ∟ Bars 准备阶段完成 | 全市场 %d 只 | 耗时: %.0fms",
-                        len(syms), (time.perf_counter() - t0) * 1000)
 
         if not syms:
             return
 
-        t1 = time.perf_counter()
-        logger.info("    ∟ 开始拉取 K 线 | 目标数量: %d", len(syms))
+        logger.info("    ∟ [%s] 开始拉取 K 线 | 目标数量: %d", market, len(syms))
 
-        # 后台心跳：每隔 60s 打进度 + 续期全局会话锁，防止超长拉取导致锁过期
         heartbeat_stop = asyncio.Event()
         async def _heartbeat():
             cnt = 0
@@ -322,7 +329,6 @@ class WarmerState:
                     break
                 except asyncio.TimeoutError:
                     cnt += 1
-                    # 续期全局会话锁 + master 锁（防止超长 bars 拉取导致锁过期）
                     try:
                         from db.redis_state import _get_redis
                         r = _get_redis()
@@ -334,49 +340,40 @@ class WarmerState:
                             await r.expire(f"{_LOCK_KEY_PREFIX}:master", 600)
                     except Exception:
                         pass
-                    logger.info("    ∟ 仍在拉取 K 线… 已耗时 ~%d min", cnt)
+                    logger.info("    ∟ [%s] 仍在拉取 K 线… 已耗时 ~%d min", market, cnt)
 
         heartbeat_task = asyncio.create_task(_heartbeat())
-
         end_d = date.today()
         start_d = end_d - timedelta(days=int(QUANT_BARS_LOOKBACK_DAYS * 1.6))
 
-        df = await adapter.bars(
-            symbols=sorted(syms),
-            start=start_d,
-            end=end_d,
-        )
-
-        heartbeat_stop.set()
-        if heartbeat_task and not heartbeat_task.done():
-            heartbeat_task.cancel()
-        if df is not None and not df.empty:
-            self.last_bars_day_ok = end_d
-            sym_count = df["symbol"].nunique() if "symbol" in df.columns else 0
-            await cache_disk.update_meta({
-                "bars_last_refresh": int(datetime.now().timestamp()),
-                "bars_last_day": end_d.isoformat(),
-                "bars_universe_size": int(sym_count),
-            })
-            missing = len(syms) - sym_count
-            logger.info("    ∟ Bars 抓取写入成功 | 数据行: %d | 标的: %d/%d (缺失 %d) | 耗时: %.1fs",
-                        len(df), sym_count, len(syms), missing,
-                        time.perf_counter() - t1)
+        try:
+            df = await adapter.bars(symbols=sorted(syms), start=start_d, end=end_d, market=market)
+            if df is not None and not df.empty:
+                self.last_bars_day_ok = end_d
+                sym_count = df["symbol"].nunique() if "symbol" in df.columns else 0
+                missing = len(syms) - sym_count
+                logger.info("    ∟ [%s] Bars 抓取成功 | 标的: %d/%d (缺失 %d) | 耗时: %.1fs",
+                            market, sym_count, len(syms), missing, time.perf_counter() - t0)
+        finally:
+            heartbeat_stop.set()
+            if not heartbeat_task.done(): heartbeat_task.cancel()
 
     async def _do_index(self) -> None:
         adapter = get_adapter()
         ok = 0
         t0 = time.perf_counter()
-        for code in _INDEX_CODES_TO_WARM:
+        indices = [
+            ("hs300", "cn_a"), ("zz500", "cn_a"),
+            ("nasdaq_list", "us_stock"), ("sp500_list", "us_stock")
+        ]
+        for code, market in indices:
             try:
                 syms = await adapter.index_constituents(code)
                 if syms:
                     ok += 1
-                    logger.info("    ∟ Index %s 加载成功 | 数量: %d", code, len(syms))
-            except NoProviderAvailable:
-                logger.warning("warmer index %s: 无 provider", code)
+                    logger.info("    ∟ Index %s (%s) 加载成功 | 数量: %d", code, market, len(syms))
             except Exception as exc:
-                logger.warning("warmer index %s 失败: %s", code, exc)
+                logger.warning("warmer index %s (%s) 失败: %s", code, market, exc)
         if ok > 0:
             self.last_index_day_ok = date.today()
             await cache_disk.update_meta({
@@ -487,6 +484,15 @@ def _is_trading_hours(now: datetime) -> bool:
         return False
     minute = now.hour * 60 + now.minute
     return 9 * 60 <= minute <= 15 * 60 + 30
+
+
+def _is_us_trading_hours(now: datetime) -> bool:
+    """美股大致时间窗（北京时间）：21:30 - 04:00 (夏令时) / 22:30 - 05:00 (冬令时)"""
+    if _is_weekend(now.date()):
+        return False
+    minute = now.hour * 60 + now.minute
+    # 宽松范围：21:00 - 06:00
+    return minute >= 21 * 60 or minute <= 6 * 60
 
 
 # ── 按需补仓（API 路径调用，非阻塞） ────────────────────────────────────────

@@ -15,7 +15,7 @@ def _list_or_default(value, default: list[str]) -> list[str]:
 QUANT_ENABLED: bool = bool(getattr(settings, "quant_enabled", False))
 QUANT_PROVIDER_ORDER: list[str] = _list_or_default(
     getattr(settings, "quant_provider_order", None),
-    default=["akshare"],
+    default=["akshare", "akshare_us"],
 )
 QUANT_BARS_CONCURRENCY: int = int(getattr(settings, "quant_bars_concurrency", 8))
 QUANT_DEFAULT_TOP_N: int = int(getattr(settings, "quant_default_top_n", 30))

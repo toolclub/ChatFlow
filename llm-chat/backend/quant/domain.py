@@ -86,8 +86,8 @@ class ProviderTrace(BaseModel):
 
 class ScreenCriteria(BaseModel):
     """选股请求参数"""
-    market: Literal["cn_a"] = "cn_a"
-    universe: Literal["all", "hs300", "zz500", "custom"] = "all"
+    market: Literal["cn_a", "us_stock"] = "cn_a"
+    universe: Literal["all", "hs300", "zz500", "nasdaq", "sp500", "custom"] = "all"
     custom_symbols: list[str] = Field(default_factory=list)
     industries: list[str] = Field(default_factory=list)
 

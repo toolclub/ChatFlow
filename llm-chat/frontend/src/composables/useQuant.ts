@@ -1,4 +1,4 @@
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import * as api from '../api'
 import type { QuantProviderInfo, QuantScreenCriteria, QuantScreenResult } from '../types'
 import type { QuantCacheStatus } from '../api'
@@ -38,7 +38,7 @@ export function useQuant() {
 
   const criteria = ref<QuantScreenCriteria>({
     market: 'cn_a',
-    universe: 'hs300',
+    universe: 'all',
     top_n: 10,
     min_market_cap: 500,
     pe_range: [0, 100],
@@ -52,6 +52,17 @@ export function useQuant() {
       liquidity: 0.20,
       risk: 0.10,
     },
+  })
+
+  // 市场切换时自动重置股票池
+  watch(() => criteria.value.market, (newMarket) => {
+    if (newMarket === 'us_stock') {
+      criteria.value.universe = 'nasdaq'
+      criteria.value.min_market_cap = 100 // 美股通常用美元，单位可能不同，这里仅作默认
+    } else {
+      criteria.value.universe = 'hs300'
+      criteria.value.min_market_cap = 500
+    }
   })
 
   async function loadProviders() {

@@ -51,14 +51,14 @@ class QuantScreeningService:
 
     async def screen(self, criteria: ScreenCriteria, snapshot_id: str | None = None) -> ScreenResult:
         t_total_start = time.perf_counter()
-        logger.info("🚀 [选股] 开始流程 | snapshot_id=%s", snapshot_id)
+        logger.info("🚀 [选股] 开始流程 | market=%s | snapshot_id=%s", criteria.market, snapshot_id)
         criteria = self._normalize_criteria(criteria)
         provider_trace: list[ProviderTrace] = []
         warnings: list[str] = []
 
         # 1. 实时行情
         t0 = time.perf_counter()
-        spot = await self._fetch_spot(provider_trace)
+        spot = await self._fetch_spot(criteria.market, provider_trace)
         if spot.empty:
             logger.warning("    ❌ 快照数据为空，流程终止")
             warnings.append("快照数据为空")
@@ -163,12 +163,14 @@ class QuantScreeningService:
         end_d = datetime.now().date()
         start_d = end_d - timedelta(days=int(days * 1.6))
 
+        market = "us_stock" if symbol.endswith(".US") else "cn_a"
+
         # readonly=True：只读磁盘缓存，不触发网络请求
         df = await self._adapter.bars(
             symbols=[symbol],
             start=start_d,
             end=end_d,
-            market="cn_a",
+            market=market,
             readonly=True,
         )
         if df.empty:
@@ -229,23 +231,19 @@ class QuantScreeningService:
             c.volatility_window = 20
         return c
 
-    async def _fetch_spot(self, trace: list[ProviderTrace]) -> pd.DataFrame:
-        """读 spot：disk_cache → Redis（COMPAT）→ provider fallback。
-
-        adapter 已实现 disk_cache + provider 链；这里多保留一层 Redis 兜底，
-        便于跨 worker 的 10 分钟级共享（disk 由 warmer 周期刷，Redis 由请求顺手刷）。
-        """
-        df = await self._adapter.spot("cn_a", trace)
+    async def _fetch_spot(self, market: str, trace: list[ProviderTrace]) -> pd.DataFrame:
+        """读 spot：disk_cache → Redis（COMPAT）→ provider fallback。"""
+        df = await self._adapter.spot(market, trace)
         if df is not None and not df.empty:
-            # 顺手填 Redis（10min TTL），保证 spot 至少有两层缓存
+            # 顺手填 Redis（10min TTL）
             try:
-                await quant_cache.set_spot_cached("cn_a", df)
+                await quant_cache.set_spot_cached(market, df)
             except Exception:
                 pass
             return df
 
         # adapter 未拿到（极端情况），尝试 Redis
-        cached = await quant_cache.get_spot_cached("cn_a")
+        cached = await quant_cache.get_spot_cached(market)
         if cached is not None and not cached.empty:
             trace.append(ProviderTrace(
                 provider="redis_cache",
@@ -277,7 +275,12 @@ class QuantScreeningService:
             return keep, len(keep)
 
         try:
-            symbols = await self._adapter.index_constituents(criteria.universe, trace)
+            index_code = criteria.universe
+            if criteria.market == "us_stock":
+                if index_code == "nasdaq": index_code = "nasdaq_list"
+                elif index_code == "sp500": index_code = "sp500_list"
+
+            symbols = await self._adapter.index_constituents(index_code, trace)
         except Exception as exc:
             logger.warning("获取指数 %s 成分股失败，回退全市场: %s", criteria.universe, exc)
             warnings.append(f"获取指数成分股失败：{exc}; 回退到全市场")
@@ -299,7 +302,7 @@ class QuantScreeningService:
         df = spot.copy()
         before = len(df)
 
-        if c.exclude_st and "name" in df.columns:
+        if c.market == "cn_a" and c.exclude_st and "name" in df.columns:
             name_up = df["name"].astype(str).str.upper()
             mask_st = (
                 name_up.str.startswith("ST")
@@ -389,7 +392,7 @@ class QuantScreeningService:
                 symbols=symbols,
                 start=start_d,
                 end=end_d,
-                market="cn_a",
+                market=c.market,
                 trace=trace,
             )
         except Exception as exc:

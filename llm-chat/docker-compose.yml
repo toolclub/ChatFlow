@@ -70,6 +70,7 @@ services:
       - "host.docker.internal:host-gateway"   # Linux 上让容器能访问宿主机（沙箱 SSH）
     volumes:
       - ${BACKEND_LOG_HOST_DIR}:/var/log/chatflow
+      - ${QUANT_CACHE_DATA_DIR}:/app/.quant_cache
       - ${SECRET_DIR:-/opt/secret}:/opt/secret:ro   # 密钥文件目录（只读，用于解密 ENC(...) 值）
     depends_on:
       qdrant:

@@ -55,6 +55,17 @@ def _build_provider(name: str, priority: int):
             max_concurrency=QUANT_BARS_CONCURRENCY,
         )
 
+    if name == "akshare_us":
+        try:
+            from quant.providers.akshare_us_provider import AKShareUSProvider
+        except ImportError as exc:
+            logger.warning("AKShare US provider 加载失败：%s", exc)
+            return None
+        return AKShareUSProvider(
+            priority=priority,
+            max_concurrency=QUANT_BARS_CONCURRENCY,
+        )
+
     if name == "baostock":
         if not getattr(settings, "baostock_enabled", True):
             logger.info("BaoStock 已禁用（BAOSTOCK_ENABLED=false），跳过注册")
