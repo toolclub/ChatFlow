@@ -166,6 +166,7 @@ class Settings(BaseSettings):
     jwt_refresh_expire_days: int = 7
 
     # ── OAuth 配置 ─────────────────────────────────────────────────────────────
+    oauth_proxy: str = ""  # OAuth 请求专用代理（如 http://host.docker.internal:7890）
     oauth_google_client_id: str = ""
     oauth_google_client_secret: str = ""
     oauth_google_redirect_uri: str = ""
@@ -288,6 +289,7 @@ JWT_ACCESS_EXPIRE_MINUTES = settings.jwt_access_expire_minutes
 JWT_REFRESH_EXPIRE_DAYS   = settings.jwt_refresh_expire_days
 
 # ── OAuth 配置 ──────────────────────────────────────────────────────────────
+OAUTH_PROXY               = settings.oauth_proxy
 OAUTH_GOOGLE_CLIENT_ID    = settings.oauth_google_client_id
 OAUTH_GOOGLE_CLIENT_SECRET = settings.oauth_google_client_secret
 OAUTH_GOOGLE_REDIRECT_URI = settings.oauth_google_redirect_uri

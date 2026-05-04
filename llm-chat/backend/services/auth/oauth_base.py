@@ -2,14 +2,13 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 import logging
 import httpx
-from config import settings
+from config import settings, OAUTH_PROXY
 
 logger = logging.getLogger("oauth")
 
 class OAuthProvider(ABC):
     def __init__(self, provider_name: str):
         self.provider_name = provider_name
-        # 使用新配置格式：oauth_google_client_id, oauth_github_client_id 等
         if provider_name == "google":
             self.client_id = settings.oauth_google_client_id
             self.client_secret = settings.oauth_google_client_secret
@@ -21,13 +20,21 @@ class OAuthProvider(ABC):
         else:
             raise ValueError(f"Unknown OAuth provider: {provider_name}")
 
-        # 防御：检查 ENC 值是否未被解密（开发配置错误时方便定位）
         if self.client_id.startswith("ENC("):
             logger.error(
                 "OAuth %s client_id 仍是加密格式，解密可能未执行。"
                 " 请确认密钥文件存在且 decrypt_env 正常加载。",
                 provider_name,
             )
+
+        # OAuth 专用代理（仅用于 Google/GitHub API 调用，不影响 LLM 等其他流量）
+        self._proxy = OAUTH_PROXY or None
+        if self._proxy:
+            logger.info("OAuth %s 将通过代理: %s", provider_name, self._proxy)
+
+    def _client(self) -> httpx.AsyncClient:
+        """创建带代理配置的 HTTP 客户端"""
+        return httpx.AsyncClient(proxy=self._proxy)
 
     @abstractmethod
     def get_login_url(self, state: str) -> str:

@@ -27,7 +27,7 @@ class GitHubOAuth(OAuthProvider):
             "redirect_uri": self.redirect_uri
         }
         headers = {"Accept": "application/json"}
-        async with httpx.AsyncClient() as client:
+        async with self._client() as client:
             resp = await client.post(self.token_url, data=data, headers=headers)
             resp.raise_for_status()
             return resp.json()
@@ -37,7 +37,7 @@ class GitHubOAuth(OAuthProvider):
             "Authorization": f"token {access_token}",
             "Accept": "application/json"
         }
-        async with httpx.AsyncClient() as client:
+        async with self._client() as client:
             resp = await client.get(self.user_info_url, headers=headers)
             resp.raise_for_status()
             return resp.json()

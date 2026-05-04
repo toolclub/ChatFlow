@@ -30,14 +30,14 @@ class GoogleOAuth(OAuthProvider):
             "grant_type": "authorization_code",
             "redirect_uri": self.redirect_uri
         }
-        async with httpx.AsyncClient() as client:
+        async with self._client() as client:
             resp = await client.post(self.token_url, data=data)
             resp.raise_for_status()
             return resp.json()
 
     async def get_user_info(self, access_token: str) -> Dict[str, Any]:
         headers = {"Authorization": f"Bearer {access_token}"}
-        async with httpx.AsyncClient() as client:
+        async with self._client() as client:
             resp = await client.get(self.user_info_url, headers=headers)
             resp.raise_for_status()
             return resp.json()
