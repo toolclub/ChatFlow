@@ -1,6 +1,7 @@
 import time
 import secrets
 import logging
+import traceback
 from typing import Optional
 from fastapi import APIRouter, Request, Response, HTTPException
 from fastapi.responses import RedirectResponse
@@ -132,8 +133,10 @@ async def oauth_callback(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("OAuth callback 失败: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("OAuth callback 失败 | type=%s | msg=%s | traceback:\n%s",
+                     type(e).__name__, str(e), traceback.format_exc())
+        detail = f"{type(e).__name__}: {e}" if str(e) else f"{type(e).__name__}"
+        raise HTTPException(status_code=500, detail=detail)
 
 @router.post("/token/refresh")
 async def refresh_token(request: Request, response: Response):

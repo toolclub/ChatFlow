@@ -1,7 +1,10 @@
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
+import logging
 import httpx
 from config import settings
+
+logger = logging.getLogger("oauth")
 
 class OAuthProvider(ABC):
     def __init__(self, provider_name: str):
@@ -17,6 +20,14 @@ class OAuthProvider(ABC):
             self.redirect_uri = settings.oauth_github_redirect_uri
         else:
             raise ValueError(f"Unknown OAuth provider: {provider_name}")
+
+        # 防御：检查 ENC 值是否未被解密（开发配置错误时方便定位）
+        if self.client_id.startswith("ENC("):
+            logger.error(
+                "OAuth %s client_id 仍是加密格式，解密可能未执行。"
+                " 请确认密钥文件存在且 decrypt_env 正常加载。",
+                provider_name,
+            )
 
     @abstractmethod
     def get_login_url(self, state: str) -> str:
