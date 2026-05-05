@@ -852,6 +852,16 @@ body.dark .workspace-btn.active {
   color: #10b981;
 }
 
+.user-status-link {
+  font-size: 11px;
+  color: #00AEEC;
+  font-weight: 600;
+}
+
+.guest-area:hover .user-status-link {
+  text-decoration: underline;
+}
+
 /* ── 内联下拉菜单 ── */
 .user-dropdown-inline {
   position: absolute;
