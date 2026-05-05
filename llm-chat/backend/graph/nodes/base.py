@@ -1,18 +1,3 @@
-"""
-BaseNode：所有图节点的抽象基类
-
-职责：
-  - 定义统一的节点接口（name / execute）
-  - 提供所有节点共享的工具方法（消息转换、工具 schema 转换、计划步骤操作）
-
-设计要点：
-  - 节点注册到 LangGraph 时使用 node.execute 方法：
-        graph.add_node("xxx", some_node.execute)
-  - execute 返回 dict，由 LangGraph 合并回 GraphState
-  - 共享工具方法定义为 staticmethod，无需实例化即可在子类中调用
-"""
-from __future__ import annotations
-
 import json
 import logging
 from abc import ABC, abstractmethod
@@ -50,15 +35,21 @@ def track_usage(func: T) -> T:
                 # 模型名优先从结果取（可能是 tool_model），其次从 state 取
                 model = result.get("model") or state.get("tool_model") or state.get("model", "unknown")
                 
-                from db.usage_store import record_usage
-                record_usage(
-                    user_id=user_id,
-                    client_id=client_id,
-                    conv_id=conv_id,
-                    node=node,
-                    model=model,
-                    usage=usage
-                )
+                try:
+                    from db.usage_store import record_usage
+                    # record_usage 现在是异步的
+                    await record_usage(
+                        user_id=user_id,
+                        client_id=client_id,
+                        conv_id=conv_id,
+                        node=node,
+                        model=model,
+                        usage=usage
+                    )
+                except (ImportError, ModuleNotFoundError) as e:
+                    logger.error("Usage tracking import failed: %s", e)
+                except Exception as e:
+                    logger.error("Usage tracking recording failed: %s", e)
         return result
     return cast(T, wrapper)
 
