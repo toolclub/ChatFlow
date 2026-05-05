@@ -51,9 +51,10 @@ onMounted(async () => {
       }
     }
 
+    // 1. 核心鉴权：必须等待身份确认，避免 guest/user 状态跳变
     await auth.init()
     
-    // 登录检查：决定是否展示登录框
+    // 2. 登录检查：决定是否展示登录框
     if (!auth.isLoggedIn.value) {
       const guestSince = localStorage.getItem('cf_guest_since')
       if (!guestSince) {
@@ -66,16 +67,21 @@ onMounted(async () => {
         }
       }
     }
+  } catch (err) {
+    console.error('[App] Critical init failed:', err)
+  } finally {
+    // 3. 身份确认后立即结束“白屏”状态，让主框架或登录框渲染出来
+    isInitializing.value = false
+  }
 
-    // 加载基础数据
+  // 4. 后台加载基础数据（对话列表、恢复会话），不阻塞首屏渲染
+  try {
     await Promise.all([
       chat.loadConversations(),
       chat.restoreFromHash()
     ])
   } catch (err) {
-    console.error('[App] Init failed:', err)
-  } finally {
-    isInitializing.value = false
+    console.error('[App] Background data load failed:', err)
   }
 })
 
