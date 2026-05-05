@@ -56,7 +56,7 @@ class ReflectorNode(BaseNode):
     async def execute(self, state: GraphState) -> ReflectorNodeOutput:
         """
         核心反思逻辑：
-
+        """
         plan = state.get("plan", [])
 
         # ── 快速路径 1：无计划 → 直接完成 ──────────────────────────────────────
