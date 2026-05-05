@@ -222,6 +222,7 @@ async def logout_all(response: Response, user: RequiredUser):
     response.delete_cookie(
         "refresh_token",
         secure=settings.cookie_secure, 
-        samesite="none" if settings.cookie_secure else "lax"
+        samesite="none" if settings.cookie_secure else "lax",
+        path="/"
     )
     return {"success": True}
