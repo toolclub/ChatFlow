@@ -196,16 +196,18 @@ class WarmerState:
             last_spot_val = self.last_spot_ok
 
         # spot：行情时间窗 + 间隔到了
-        # 美股和 A 股交易时间不同，这里简单处理，只要在 A 股交易时间或美股交易时间（大致）都刷
         if _is_trading_hours(now) or _is_us_trading_hours(now):
             need = (time.time() - last_spot_val) >= QUANT_WARMER_SPOT_INTERVAL
             if need:
-                await self._refresh_once(["spot"])
+                # 30分钟一次：刷新实时行情 + Top 2000 活跃股 K 线
+                await self._refresh_once(["spot", "bars_top"])
 
-        # bars/index 逻辑同理...（由于已持有 Master 锁，这里会自动单活）
+        # 全量预热：凌晨跑 (4 AM)
         today = date.today()
         if (now.hour >= QUANT_WARMER_BARS_HOUR and self.last_bars_day_ok != today and not _is_weekend(today)):
+            # 凌晨一次：同步指数清单 + 全市场 K 线 + 清理旧数据
             await self._refresh_once(["index", "bars", "prune"])
+        
         if (now.hour >= QUANT_WARMER_INDEX_HOUR and self.last_index_day_ok != today):
             await self._refresh_once(["index"])
 
@@ -248,6 +250,8 @@ class WarmerState:
                         await self._do_spot()
                     elif kind == "bars":
                         await self._do_bars()
+                    elif kind == "bars_top":
+                        await self._do_bars(top_n=2000)
                     elif kind == "index":
                         await self._do_index()
                     elif kind == "prune":
@@ -287,7 +291,7 @@ class WarmerState:
                 logger.warning("    ❌ Spot (%s) 失败: %s", market, exc)
         self.last_spot_ok = time.time()
 
-    async def _do_bars(self, symbols: list[str] | None = None) -> None:
+    async def _do_bars(self, symbols: list[str] | None = None, top_n: int | None = None) -> None:
         """拉取 bars + 回溯 lookback 区间内缺失日期。"""
         if symbols:
             # 按需补仓：自动识别市场
@@ -297,10 +301,10 @@ class WarmerState:
             if us_syms: await self._do_bars_market("us_stock", us_syms)
         else:
             # 全市场预热
-            await self._do_bars_market("cn_a")
-            await self._do_bars_market("us_stock")
+            await self._do_bars_market("cn_a", top_n=top_n)
+            await self._do_bars_market("us_stock", top_n=top_n)
 
-    async def _do_bars_market(self, market: str, symbols: list[str] | None = None) -> None:
+    async def _do_bars_market(self, market: str, symbols: list[str] | None = None, top_n: int | None = None) -> None:
         t0 = time.perf_counter()
         adapter = get_adapter()
         
@@ -313,7 +317,14 @@ class WarmerState:
             if spot is None or spot.empty:
                 logger.warning("warmer bars (%s): spot 为空，跳过", market)
                 return
-            syms = set(spot["symbol"].astype(str))
+            
+            if top_n and "amount" in spot.columns:
+                # 按成交额排序，只取前 top_n
+                spot_sorted = spot.sort_values("amount", ascending=False).head(top_n)
+                syms = set(spot_sorted["symbol"].astype(str))
+                logger.info("    ∟ [%s] 开启 Top %d 预热 (基于成交额)", market, len(syms))
+            else:
+                syms = set(spot["symbol"].astype(str))
 
         if not syms:
             return
