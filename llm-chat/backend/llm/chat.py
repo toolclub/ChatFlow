@@ -23,6 +23,8 @@ from config import (
 )
 from llm.client import LLMClient
 
+from llm.providers import get_provider_for_model
+
 # ── 底层 HTTP 客户端缓存（按 base_url+api_key 复用） ──────────────────────────
 _http_cache: dict[str, AsyncOpenAI] = {}
 
@@ -48,10 +50,15 @@ def _make_client(
     cache_key = f"{base_url}:{model}:{temperature}"
     if cache_key not in _client_cache:
         http_client = _get_http_client(base_url, api_key)
+
+        # ── 适配提供商抽象（DI 注入） ─────────────────────────────────────────
+        provider = get_provider_for_model(model)
+
         _client_cache[cache_key] = LLMClient(
             client=http_client,
             model=model,
             temperature=temperature,
+            provider=provider,
         )
     return _client_cache[cache_key]
 

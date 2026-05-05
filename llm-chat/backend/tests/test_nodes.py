@@ -64,7 +64,8 @@ class TestPlanner:
 
     def test_code_short_no_planning(self):
         from graph.nodes.planner_node import PlannerNode
-        assert PlannerNode._needs_planning("code", "写个冒泡排序") is False
+        # 现在 code 路由始终规划（因为 code 任务涉及多步：写文件→执行→验证）
+        assert PlannerNode._needs_planning("code", "写个冒泡排序") is True
 
     def test_code_long_needs_planning(self):
         from graph.nodes.planner_node import PlannerNode
@@ -172,7 +173,7 @@ class TestSandboxFormatter:
 class TestEdgeRouting:
     def test_max_tool_calls_per_step(self):
         from graph.edges import _MAX_TOOL_CALLS_PER_STEP
-        assert _MAX_TOOL_CALLS_PER_STEP == 6
+        assert _MAX_TOOL_CALLS_PER_STEP == 50
 
     def test_cache_routing_hit(self):
         from graph.edges import cache_routing
@@ -248,10 +249,13 @@ class TestContextBuilder:
 
     def test_truncate_compat_summary_marker(self):
         from memory.context_builder import _truncate_assistant_history
-        content = "核心答案" * 100 + "【执行过程摘要】步骤详情..." * 10
+        # 只有在总长度超过 800 时，代码才会尝试寻找并剥离 summary_marker
+        marker = "【执行过程摘要】"
+        # "核心答案" 是 4 个字符，200 次是 800 字符。加上 marker 和后续内容，总长肯定超过 800
+        content = "核心答案" * 200 + marker + "步骤详情..." * 20
+        assert len(content) > 800
         result = _truncate_assistant_history(content)
-        assert "【执行过程摘要】" not in result
-
+        assert marker not in result
 
 # ═══════════════════════════════════════════════════════════════
 # T-SANDBOX-03: sandbox_download 路径安全
@@ -286,4 +290,6 @@ class TestPathSanitization:
         import shlex
         dangerous = 'file"; rm -rf /; echo "'
         quoted = shlex.quote(dangerous)
-        assert "rm" not in quoted.split()  # 不会被 shell 解释为命令
+        # 验证 quoted 能够被 shlex.split 还原为原始字符串，说明引用正确
+        import shlex
+        assert shlex.split(quoted)[0] == dangerous

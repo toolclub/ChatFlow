@@ -18,12 +18,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Any
 
 from openai import AsyncOpenAI, AsyncStream
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from openai.types.chat.chat_completion_message_param import ChatCompletionMessageParam
 from openai.types.chat.chat_completion_tool_param import ChatCompletionToolParam
+
+# 避免循环引用，仅在类型提示中使用
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from llm.providers import LLMProvider
 
 logger = logging.getLogger("llm.client")
 
@@ -32,9 +37,7 @@ class LLMClient:
     """
     封装 AsyncOpenAI，绑定模型名和默认 temperature。
 
-    不依赖 LangChain，消息格式使用 OpenAI 原生 dict 列表。
-    上层（节点）负责将 LangChain BaseMessage 转换为 dict，
-    以及将 OpenAI tool_calls 转换回 LangChain AIMessage 格式（供 ToolNode 使用）。
+    通过 LLMProvider 注入厂商特有逻辑（如 DeepSeek 的 thinking 模式）。
     """
 
     def __init__(
@@ -42,16 +45,19 @@ class LLMClient:
         client: AsyncOpenAI,
         model: str,
         temperature: float = 0.7,
+        provider: LLMProvider | None = None,
     ) -> None:
         """
         参数：
             client:      共享的 AsyncOpenAI HTTP 客户端
             model:       模型名称
             temperature: 默认温度，可在 ainvoke 调用时覆盖
+            provider:    提供商抽象（DI 注入），用于获取 extra_body 等厂商参数
         """
         self._client = client
         self.model = model
         self.temperature = temperature
+        self.provider = provider
 
     async def ainvoke(
         self,
@@ -59,21 +65,23 @@ class LLMClient:
         tools: list[ChatCompletionToolParam] | None = None,
         temperature: float | None = None,
         timeout: float = 180.0,
+        extra_body: dict | None = None,
     ) -> ChatCompletion:
         """
         异步调用 LLM，返回原始 ChatCompletion 对象。
 
         参数：
-            messages:    OpenAI 格式消息列表，[{"role": "...", "content": "..."}]
-            tools:       OpenAI function calling schema 列表，不传则不绑定工具
-            temperature: 覆盖实例默认温度（不传则使用 self.temperature）
-            timeout:     超时秒数，默认 180s
-
-        返回：
-            ChatCompletion：直接来自 openai SDK，调用方通过
-            completion.choices[0].message.content / .tool_calls 读取结果
+            messages:    OpenAI 格式消息列表
+            tools:       OpenAI function calling schema 列表
+            temperature: 覆盖实例默认温度
+            timeout:     超时秒数
+            extra_body:  覆盖 Provider 提供的默认参数
         """
         temp = temperature if temperature is not None else self.temperature
+        # 优先使用显式传入的 extra_body，否则从 provider 获取
+        eb = extra_body
+        if eb is None and self.provider:
+            eb = self.provider.get_extra_body(temp)
 
         create_kwargs: dict[str, Any] = {
             "model": self.model,
@@ -82,13 +90,12 @@ class LLMClient:
         }
         if tools:
             create_kwargs["tools"] = tools
+        if eb:
+            create_kwargs["extra_body"] = eb
 
         logger.debug(
             "LLM 请求 | model=%s | messages=%d | tools=%s | temperature=%.2f",
-            self.model,
-            len(messages),
-            len(tools) if tools else 0,
-            temp,
+            self.model, len(messages), len(tools) if tools else 0, temp,
         )
 
         completion: ChatCompletion = await asyncio.wait_for(
@@ -104,21 +111,11 @@ class LLMClient:
         timeout: float = 180.0,
         extra_body: dict | None = None,
     ) -> AsyncGenerator[str, None]:
-        """
-        流式调用 LLM，逐 token yield 内容增量。
-
-        仅用于无工具绑定的纯文本生成场景。
-        工具调用（function calling）需使用 ainvoke，确保拿到完整 JSON。
-
-        参数：
-            messages:    OpenAI 格式消息列表
-            temperature: 覆盖实例默认温度（不传则使用 self.temperature）
-            timeout:     超时秒数（含首 chunk 等待时间），传给 openai SDK
-
-        Yield：
-            str：每个 token 的内容增量（空字符串不 yield）
-        """
+        """流式调用 LLM。"""
         temp = temperature if temperature is not None else self.temperature
+        eb = extra_body
+        if eb is None and self.provider:
+            eb = self.provider.get_extra_body(temp)
 
         logger.debug(
             "LLM 流式请求 | model=%s | messages=%d | temperature=%.2f",
@@ -132,10 +129,9 @@ class LLMClient:
             "stream":      True,
             "timeout":     timeout,
         }
-        if extra_body:
-            create_kwargs["extra_body"] = extra_body
+        if eb:
+            create_kwargs["extra_body"] = eb
 
-        # 显式标注类型：stream=True 时返回 AsyncStream，类型系统无法自动收窄
         stream: AsyncStream[ChatCompletionChunk] = await self._client.chat.completions.create(
             **create_kwargs
         )
@@ -144,10 +140,8 @@ class LLMClient:
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
-            # 普通内容 token
             if delta.content:
                 yield delta.content
-            # 智谱/DeepSeek 等模型的推理 token（thinking_content / reasoning_content）
             elif hasattr(delta, "reasoning_content") and delta.reasoning_content:
                 yield "\x00THINK\x00" + delta.reasoning_content
 
@@ -157,23 +151,13 @@ class LLMClient:
         tools: list[ChatCompletionToolParam],
         temperature: float | None = None,
         timeout: float = 180.0,
+        extra_body: dict | None = None,
     ) -> tuple[str, str, list[dict]]:
-        """
-        流式调用 LLM（绑定工具）：边流式输出 thinking/content，边收集 tool_calls。
-
-        OpenAI 流式 function calling 协议：
-          chunk.choices[0].delta.tool_calls = [{"index":0, "id":"call_xxx", "function":{"name":"...", "arguments":"片段"}}]
-          多个 chunk 的 arguments 拼接成完整 JSON。
-
-        返回 (content, thinking, tool_calls_list)：
-          - content: 完整文本内容
-          - thinking: 推理过程（reasoning_content）
-          - tool_calls_list: [{"id":"...", "name":"...", "arguments":"完整JSON"}]
-
-        调用方（_stream_tokens_with_tools）负责在迭代过程中 dispatch SSE events。
-        此方法只负责 HTTP 流式请求 + 拼装结果。
-        """
+        """流式调用 LLM（绑定工具）。"""
         temp = temperature if temperature is not None else self.temperature
+        eb = extra_body
+        if eb is None and self.provider:
+            eb = self.provider.get_extra_body(temp)
 
         create_kwargs: dict = {
             "model": self.model,
@@ -183,6 +167,8 @@ class LLMClient:
             "stream": True,
             "timeout": timeout,
         }
+        if eb:
+            create_kwargs["extra_body"] = eb
 
         stream: AsyncStream[ChatCompletionChunk] = await self._client.chat.completions.create(
             **create_kwargs
