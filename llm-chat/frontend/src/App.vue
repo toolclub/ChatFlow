@@ -16,6 +16,7 @@ const auth = useAuth()
 const activeWorkspace = ref<'chat' | 'quant' | 'stock_detail' | 'admin'>('chat')
 const selectedStockData = ref<any>(null)
 const showLogin = ref(false)
+const isInitializing = ref(true)
 const GUEST_EXPIRE_DAYS = 3
 
 // ── 管理者页面 ──
@@ -47,15 +48,12 @@ onMounted(async () => {
       if (accessToken) {
         await auth.handleAuthSuccess(accessToken)
         window.history.replaceState({}, '', window.location.pathname)
-        await chat.loadConversations()
       }
     }
 
     await auth.init()
-    await chat.loadConversations()
-    await chat.restoreFromHash()
-  } finally {
-    // 无论加载是否出错，登录检查都执行
+    
+    // 登录检查：决定是否展示登录框
     if (!auth.isLoggedIn.value) {
       const guestSince = localStorage.getItem('cf_guest_since')
       if (!guestSince) {
@@ -68,6 +66,16 @@ onMounted(async () => {
         }
       }
     }
+
+    // 加载基础数据
+    await Promise.all([
+      chat.loadConversations(),
+      chat.restoreFromHash()
+    ])
+  } catch (err) {
+    console.error('[App] Init failed:', err)
+  } finally {
+    isInitializing.value = false
   }
 })
 
@@ -239,124 +247,136 @@ function onDragStart(e: MouseEvent) {
 
 <template>
   <div class="app">
-    <!-- 登录界面 -->
-    <LoginView v-if="showLogin" @skip="onSkipLogin" />
-
-    <Sidebar
-      :conversations="chat.conversations.value"
-      :currentConvId="chat.currentConvId.value"
-      :activeConvIds="chat.activeConvIds.value"
-      :creating="chat.creatingConv.value"
-      :activeWorkspace="activeWorkspace"
-      @new-chat="chat.newConversation()"
-      @select="chat.selectConversation($event)"
-      @delete="chat.removeConversation($event)"
-      @batch-delete="chat.batchRemoveConversations($event)"
-      @switchWorkspace="activeWorkspace = $event"
-      @show-login="showLogin = true"
-      @open-admin="showAdminVerify = true"
-    />
-
-    <!-- 管理员密钥验证 -->
-    <el-dialog v-model="showAdminVerify" title="管理员验证" width="340px" center border-radius="16px">
-      <div style="padding: 10px 0;">
-        <el-input 
-          v-model="adminKeyInput" 
-          type="password" 
-          placeholder="请输入管理密钥..." 
-          show-password
-          @keydown.enter="verifyAdmin"
-        />
-      </div>
-      <template #footer>
-        <el-button @click="showAdminVerify = false">取消</el-button>
-        <el-button type="primary" @click="verifyAdmin">验证并进入</el-button>
-      </template>
-    </el-dialog>
-
-    <!-- 全局加载遮罩（刷新恢复数据时）— Bilibili 颜文字风格 -->
-    <div v-if="chat.initialLoading.value" class="global-loading-overlay">
+    <!-- 全局初始加载遮罩（鉴权 + 恢复对话） -->
+    <div v-if="isInitializing" class="global-loading-overlay auth-loading">
       <div class="global-loading-content">
-        <div class="bili-kaomoji">(｡･ω･｡)</div>
-        <div class="bili-loading-dots">正在恢复对话<span class="dots-anim"></span></div>
+        <div class="bili-kaomoji">{{ auth.initialized.value ? '(｡･ω･｡)' : '(´･ω･`)' }}</div>
+        <div class="bili-loading-dots">
+          {{ auth.initialized.value ? '正在恢复对话' : '正在确认身份' }}<span class="dots-anim"></span>
+        </div>
       </div>
     </div>
 
-    <!-- 主内容区 -->
-    <div class="main-area">
-      <!-- 聊天工作台 -->
-      <ChatView
-        v-show="activeWorkspace === 'chat'"
-        :messages="chat.messages.value"
-        :loading="chat.loading.value"
-        :agentStatus="chat.agentStatus.value"
-        :cognitive="chat.cognitive.value"
-        :has-cognitive-content="hasCognitiveContent"
-        :panel-open="panelOpen"
-        :conv-title="currentConvTitle"
-        :can-continue="chat.canContinue.value"
-        :current-conv-id="chat.currentConvId.value"
+    <template v-else>
+      <!-- 登录界面 -->
+      <LoginView v-if="showLogin" @skip="onSkipLogin" />
+
+      <Sidebar
+        :conversations="chat.conversations.value"
+        :currentConvId="chat.currentConvId.value"
+        :activeConvIds="chat.activeConvIds.value"
         :creating="chat.creatingConv.value"
-        :class="showCognitivePanel ? 'chat-with-panel' : 'chat-full'"
-        @send="chat.send($event)"
-        @stop="chat.stopConversation()"
-        @toggle-panel="panelOpen = !panelOpen"
-        @clarification-submit="chat.submitClarification($event)"
-        @continue="chat.continueLast()"
-        @dismiss-continue="chat.dismissContinue()"
-        @regenerate="chat.regenerate()"
-        @edit-message="chat.editMessage($event.index, $event.content)"
-        @select-file="onSelectFile($event)"
-        @ensure-conv="chat.newConversation()"
+        :activeWorkspace="activeWorkspace"
+        @new-chat="chat.newConversation()"
+        @select="chat.selectConversation($event)"
+        @delete="chat.removeConversation($event)"
+        @batch-delete="chat.batchRemoveConversations($event)"
+        @switchWorkspace="activeWorkspace = $event"
+        @show-login="showLogin = true"
+        @open-admin="showAdminVerify = true"
       />
 
-      <!-- 右侧：认知面板（内含拖拽手柄） -->
-      <div
-        v-show="activeWorkspace === 'chat' && showCognitivePanel"
-        class="panel-wrapper"
-        :style="{ width: panelWidth + 'px' }"
-      >
-        <!-- 拖拽手柄 — absolute 在左边缘 -->
-        <div
-          class="panel-drag-handle"
-          :class="{ 'panel-drag-handle--active': isDragging }"
-          @mousedown.prevent="onDragStart"
-        ></div>
-        <CognitivePanel
-          :cognitive="chat.cognitive.value"
+      <!-- 管理员密钥验证 -->
+      <el-dialog v-model="showAdminVerify" title="管理员验证" width="340px" center border-radius="16px">
+        <div style="padding: 10px 0;">
+          <el-input 
+            v-model="adminKeyInput" 
+            type="password" 
+            placeholder="请输入管理密钥..." 
+            show-password
+            @keydown.enter="verifyAdmin"
+          />
+        </div>
+        <template #footer>
+          <el-button @click="showAdminVerify = false">取消</el-button>
+          <el-button type="primary" @click="verifyAdmin">验证并进入</el-button>
+        </template>
+      </el-dialog>
+
+      <!-- 局部加载遮罩（仅用于后续手动切换对话时） -->
+      <div v-if="chat.initialLoading.value" class="global-loading-overlay">
+        <div class="global-loading-content">
+          <div class="bili-kaomoji">(｡･ω･｡)</div>
+          <div class="bili-loading-dots">正在恢复对话<span class="dots-anim"></span></div>
+        </div>
+      </div>
+
+      <!-- 主内容区 -->
+      <div class="main-area">
+        <!-- 聊天工作台 -->
+        <ChatView
+          v-show="activeWorkspace === 'chat'"
+          :messages="chat.messages.value"
           :loading="chat.loading.value"
-          :user-message="currentGoal"
-          :selected-file="selectedFile"
-          :file-loading="fileLoading"
-          style="width:100%;height:100%;"
-          @collapse="panelOpen = false"
-          @modify-plan="chat.applyModifiedPlan($event)"
-          @close-file="selectedFile = null"
+          :agentStatus="chat.agentStatus.value"
+          :cognitive="chat.cognitive.value"
+          :has-cognitive-content="hasCognitiveContent"
+          :panel-open="panelOpen"
+          :conv-title="currentConvTitle"
+          :can-continue="chat.canContinue.value"
+          :current-conv-id="chat.currentConvId.value"
+          :creating="chat.creatingConv.value"
+          :class="showCognitivePanel ? 'chat-with-panel' : 'chat-full'"
+          @send="chat.send($event)"
+          @stop="chat.stopConversation()"
+          @toggle-panel="panelOpen = !panelOpen"
+          @clarification-submit="chat.submitClarification($event)"
+          @continue="chat.continueLast()"
+          @dismiss-continue="chat.dismissContinue()"
+          @regenerate="chat.regenerate()"
+          @edit-message="chat.editMessage($event.index, $event.content)"
+          @select-file="onSelectFile($event)"
+          @ensure-conv="chat.newConversation()"
+        />
+
+        <!-- 右侧：认知面板（内含拖拽手柄） -->
+        <div
+          v-show="activeWorkspace === 'chat' && showCognitivePanel"
+          class="panel-wrapper"
+          :style="{ width: panelWidth + 'px' }"
+        >
+          <!-- 拖拽手柄 — absolute 在左边缘 -->
+          <div
+            class="panel-drag-handle"
+            :class="{ 'panel-drag-handle--active': isDragging }"
+            @mousedown.prevent="onDragStart"
+          ></div>
+          <CognitivePanel
+            :cognitive="chat.cognitive.value"
+            :loading="chat.loading.value"
+            :user-message="currentGoal"
+            :selected-file="selectedFile"
+            :file-loading="fileLoading"
+            style="width:100%;height:100%;"
+            @collapse="panelOpen = false"
+            @modify-plan="chat.applyModifiedPlan($event)"
+            @close-file="selectedFile = null"
+          />
+        </div>
+
+        <!-- 量化工作台 -->
+        <QuantView
+          v-show="activeWorkspace === 'quant'"
+          @switch-workspace="activeWorkspace = $event"
+          @continue-with-snapshot="continueWithSnapshot"
+          @open-stock-detail="openStockDetail"
+        />
+
+        <!-- 个股详情页 -->
+        <StockDetailView
+          v-if="activeWorkspace === 'stock_detail' && selectedStockData"
+          :stock="selectedStockData"
+          @back="backToQuant"
+        />
+
+        <!-- 管理者面板 -->
+        <SysDashboard
+          v-if="activeWorkspace === 'admin'"
+          :admin-key="verifiedAdminKey"
+          @back="activeWorkspace = 'chat'"
         />
       </div>
-
-      <!-- 量化工作台 -->
-      <QuantView
-        v-show="activeWorkspace === 'quant'"
-        @switch-workspace="activeWorkspace = $event"
-        @continue-with-snapshot="continueWithSnapshot"
-        @open-stock-detail="openStockDetail"
-      />
-
-      <!-- 个股详情页 -->
-      <StockDetailView
-        v-if="activeWorkspace === 'stock_detail' && selectedStockData"
-        :stock="selectedStockData"
-        @back="backToQuant"
-      />
-
-      <!-- 管理者面板 -->
-      <SysDashboard
-        v-if="activeWorkspace === 'admin'"
-        :admin-key="verifiedAdminKey"
-        @back="activeWorkspace = 'chat'"
-      />
-    </div>
+    </template>
   </div>
 </template>
 
@@ -568,9 +588,12 @@ body.dark .term-code-inline { background: #222325; border-color: #323335; color:
 /* 整体布局 */
 .global-loading-overlay {
   position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-  z-index: 9999;
+  z-index: 10000;
   background: var(--cf-bg, #F1F2F3);
   display: flex; align-items: center; justify-content: center;
+}
+.auth-loading {
+  background: #ffffff; /* 初始鉴权时使用纯白，避免背景色突变 */
 }
 .global-loading-content {
   display: flex; flex-direction: column; align-items: center; gap: 12px;
