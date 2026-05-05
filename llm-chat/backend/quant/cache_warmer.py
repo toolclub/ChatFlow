@@ -52,6 +52,7 @@ class WarmerState:
         self.last_spot_ok: float = 0.0
         self.last_bars_day_ok: date | None = None
         self.last_index_day_ok: date | None = None
+        self._first_tick = True  # 启动后首次进入循环强制跑一次
 
     def is_running(self) -> bool:
         return self._task is not None and not self._task.done()
@@ -114,9 +115,9 @@ class WarmerState:
 
         logger.debug("warmer 循环开始运行 worker_id=%s", _WORKER_ID)
 
-        # 初始等待：给 Provider 注册留出 45 秒
+        # 初始等待：给 Provider 注册留出 5 秒
         try:
-            await asyncio.wait_for(self._stop.wait(), timeout=45.0)
+            await asyncio.wait_for(self._stop.wait(), timeout=5.0)
             return
         except asyncio.TimeoutError:
             pass
@@ -149,7 +150,7 @@ class WarmerState:
             r = _get_redis()
             cur = await r.get(f"{_LOCK_KEY_PREFIX}:master")
             if cur == _WORKER_ID:
-                await r.expire(f"{_LOCK_KEY_PREFIX}:master", 600)
+                await r.expire(f"{_LOCK_KEY_PREFIX}:master", 90)
         except Exception:
             pass
 
@@ -164,13 +165,13 @@ class WarmerState:
             r = _get_redis()
             ok = await r.set(
                 f"{_LOCK_KEY_PREFIX}:master", _WORKER_ID,
-                nx=True, ex=600,
+                nx=True, ex=90,
             )
             if ok:
                 return True
             cur = await r.get(f"{_LOCK_KEY_PREFIX}:master")
             if cur == _WORKER_ID:
-                await r.expire(f"{_LOCK_KEY_PREFIX}:master", 600)
+                await r.expire(f"{_LOCK_KEY_PREFIX}:master", 90)
                 return True
             # 锁存在但 worker 不同 → 检测是否旧容器残留
             if cur and ":" in cur:
@@ -178,7 +179,7 @@ class WarmerState:
                 my_host = _WORKER_ID.rsplit(":", 1)[0]
                 if cur_host != my_host:
                     logger.info("检测到旧容器 master 锁 (%s)，强制接管", cur[:40])
-                    await r.set(f"{_LOCK_KEY_PREFIX}:master", _WORKER_ID, ex=600)
+                    await r.set(f"{_LOCK_KEY_PREFIX}:master", _WORKER_ID, ex=90)
                     return True
             return False
         except Exception:
@@ -194,13 +195,15 @@ class WarmerState:
             last_spot_val = float(last_spot) if last_spot else 0.0
         except Exception:
             last_spot_val = self.last_spot_ok
+# spot：行情时间窗 + 间隔到了
+if _is_trading_hours(now) or _is_us_trading_hours(now):
+    need = (time.time() - last_spot_val) >= QUANT_WARMER_SPOT_INTERVAL
+    if need or self._first_tick:
+        # 30分钟一次：刷新实时行情 + Top 2000 活跃股 K 线
+        # 注意：这里会静默尝试获取锁，抢不到就跳过，不会踢掉手动任务
+        await self._refresh_once(["spot", "bars_top"])
+        self._first_tick = False
 
-        # spot：行情时间窗 + 间隔到了
-        if _is_trading_hours(now) or _is_us_trading_hours(now):
-            need = (time.time() - last_spot_val) >= QUANT_WARMER_SPOT_INTERVAL
-            if need:
-                # 30分钟一次：刷新实时行情 + Top 2000 活跃股 K 线
-                await self._refresh_once(["spot", "bars_top"])
 
         # 全量预热：凌晨跑 (4 AM)
         today = date.today()
@@ -295,15 +298,26 @@ class WarmerState:
     async def _do_bars(self, symbols: list[str] | None = None, top_n: int | None = None) -> None:
         """拉取 bars + 回溯 lookback 区间内缺失日期。"""
         if symbols:
-            # 按需补仓：自动识别市场
-            cn_syms = [s for s in symbols if not s.endswith(".US")]
+            # 按需补仓：优先美股
             us_syms = [s for s in symbols if s.endswith(".US")]
-            if cn_syms: await self._do_bars_market("cn_a", cn_syms)
+            cn_syms = [s for s in symbols if not s.endswith(".US")]
             if us_syms: await self._do_bars_market("us_stock", us_syms)
-        else:
-            # 全市场预热
-            await self._do_bars_market("cn_a", top_n=top_n)
+            if cn_syms: await self._do_bars_market("cn_a", cn_syms)
+        elif top_n:
+            # 30分钟定时预热：优先美股 Top
             await self._do_bars_market("us_stock", top_n=top_n)
+            await self._do_bars_market("cn_a", top_n=top_n)
+        else:
+            # 全量同步（手动或凌晨）：VIP 优先策略
+            # 1. 先把两个市场的 Top 2000 刷了（保证核心票秒级就绪）
+            logger.info("🚀 [VIP 优先] 开始同步两市核心标的...")
+            await self._do_bars_market("us_stock", top_n=2000)
+            await self._do_bars_market("cn_a", top_n=2000)
+            
+            # 2. 再补齐剩下的长尾标的
+            logger.info("⏳ [长尾补全] 开始同步两市剩余标的...")
+            await self._do_bars_market("us_stock")
+            await self._do_bars_market("cn_a")
 
     async def _do_bars_market(self, market: str, symbols: list[str] | None = None, top_n: int | None = None) -> None:
         t0 = time.perf_counter()
