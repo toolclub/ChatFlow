@@ -481,9 +481,9 @@ async def _acquire_lock(kind: str) -> str | None:
         # 锁已存在 → 检测是否旧容器残留
         cur = await r.get(f"{_LOCK_KEY_PREFIX}:{kind}")
         if cur and ":" in cur:
-            cur_host = cur.rsplit(":", 1)[0]
-            my_host = _WORKER_ID.rsplit(":", 1)[0]
-            if cur_host != my_host:
+            cur_hostname = cur.split(":")[0]
+            my_hostname = _WORKER_ID.split(":")[0]
+            if cur_hostname != my_hostname:
                 logger.info("检测到旧容器 %s 锁 (%s)，强制接管", kind, cur[:40])
                 await r.set(f"{_LOCK_KEY_PREFIX}:{kind}", token, ex=_LOCK_TTL_SECONDS)
                 return token
