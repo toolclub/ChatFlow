@@ -21,12 +21,6 @@ export function useAuth() {
   async function init() {
     if (initialized.value) return
     
-    const token = localStorage.getItem('cf_access_token')
-    if (!token) {
-      initialized.value = true
-      return
-    }
-
     loading.value = true
     try {
       const me = await authApi.fetchMe()

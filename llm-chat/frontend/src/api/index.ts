@@ -90,7 +90,7 @@ async function fetchWithAuth(url: string, options: RequestInit = {}): Promise<Re
     credentials: 'include',
   })
 
-  if (response.status === 401 && token) {
+  if (response.status === 401) {
     try {
       const newToken = await refreshAccessToken()
       headers['Authorization'] = `Bearer ${newToken}`

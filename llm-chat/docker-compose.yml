@@ -36,7 +36,7 @@ services:
       retries: 5
       start_period: 10s
 
-  # ── Redis（含 RedisSearch 模块，用于语义缓存）────────────────────────────
+  # ── Redis（含 RedisSearch 模块，用于语义缓存） ────────────────────────────
   redis:
     image: redis/redis-stack:latest
     pull_policy: missing
