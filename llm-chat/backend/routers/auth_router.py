@@ -205,12 +205,20 @@ async def logout(request: Request, response: Response, user: RequiredUser):
     if refresh_token:
         await session_store.deactivate_session_by_token(user["id"], refresh_token)
 
-    response.delete_cookie("refresh_token")
+    response.delete_cookie(
+        "refresh_token", 
+        secure=settings.cookie_secure, 
+        samesite="none" if settings.cookie_secure else "lax"
+    )
     return {"success": True}
 
 @router.post("/logout/all")
 async def logout_all(response: Response, user: RequiredUser):
     """退出所有设备"""
     await session_store.deactivate_all_sessions(user["id"])
-    response.delete_cookie("refresh_token")
+    response.delete_cookie(
+        "refresh_token",
+        secure=settings.cookie_secure, 
+        samesite="none" if settings.cookie_secure else "lax"
+    )
     return {"success": True}
