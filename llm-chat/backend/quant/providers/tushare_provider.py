@@ -43,7 +43,7 @@ class TushareProvider:
         ProviderCapability.INDEX_WEIGHT,
         ProviderCapability.TRADING_CALENDAR,
     }
-    supported_markets = {"cn_a", "us_stock"}
+    supported_markets = {"cn_a"}  # 锁定 A 股，防止 Tushare 处理美股导致高频积分报错或延迟
 
     def __init__(
         self,

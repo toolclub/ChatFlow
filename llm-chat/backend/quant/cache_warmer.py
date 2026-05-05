@@ -221,9 +221,10 @@ class WarmerState:
         mode = "手动" if manual else "自动"
         
         # 1. 尝试获取全局会话大锁（整个预热过程只能有 1 个 Worker 活跃）
+        # 如果是定时触发，发现有锁直接跳过；如果是手动触发，发现有锁也告知冲突
         session_lock_token = await _acquire_lock("global_session")
         if not session_lock_token:
-            logger.info("⏱️ [%s] 预热跳过：另一个 Worker 正在执行全局任务", mode)
+            logger.info("⏱️ [%s] 预热跳过：当前已有活跃预热任务在运行中", mode)
             return
 
         logger.info("⏱️ [%s] 🚀 开启全局独占预热任务 | Worker: %s | 计划: %s", mode, _WORKER_ID, kinds)
@@ -308,8 +309,10 @@ class WarmerState:
         t0 = time.perf_counter()
         adapter = get_adapter()
         
+        # 1. 确定标的清单并排序
         if symbols:
-            syms = set(symbols)
+            # 手动补仓或按需补仓，保持原顺序或简单排序
+            sym_list = sorted(list(set(symbols)))
         else:
             spot = await cache_disk.read_spot(market)
             if spot is None or spot.empty or not await cache_disk.is_spot_fresh(market):
@@ -318,20 +321,30 @@ class WarmerState:
                 logger.warning("warmer bars (%s): spot 为空，跳过", market)
                 return
             
-            if top_n and "amount" in spot.columns:
-                # 按成交额排序，只取前 top_n
-                spot_sorted = spot.sort_values("amount", ascending=False).head(top_n)
-                syms = set(spot_sorted["symbol"].astype(str))
-                logger.info("    ∟ [%s] 开启 Top %d 预热 (基于成交额)", market, len(syms))
+            # 无论是否限制 top_n，只要有 amount 字段，永远按成交额降序排列
+            # 这确保了苹果、微软等大票永远在第一批被处理
+            if "amount" in spot.columns:
+                spot_sorted = spot.sort_values("amount", ascending=False)
+                if top_n:
+                    spot_sorted = spot_sorted.head(top_n)
+                    logger.info("    ∟ [%s] 开启 Top %d 预热 (基于成交额)", market, len(spot_sorted))
+                else:
+                    logger.info("    ∟ [%s] 开启全市场预热 (已按成交额优先排序)", market)
+                sym_list = spot_sorted["symbol"].astype(str).tolist()
             else:
-                syms = set(spot["symbol"].astype(str))
+                sym_list = sorted(spot["symbol"].astype(str).tolist())
 
-        if not syms:
+        if not sym_list:
             return
 
-        logger.info("    ∟ [%s] 开始拉取 K 线 | 目标数量: %d", market, len(syms))
+        total_count = len(sym_list)
+        logger.info("    ∟ [%s] 开始拉取 K 线 | 目标数量: %d", market, total_count)
 
+        # 2. 分批拉取与写盘（每 200 只一组）
+        # 解决“憋大招”问题：拉完一组存一组，让选股立刻能看到数据
+        chunk_size = 200
         heartbeat_stop = asyncio.Event()
+
         async def _heartbeat():
             cnt = 0
             while not heartbeat_stop.is_set():
@@ -356,15 +369,27 @@ class WarmerState:
         heartbeat_task = asyncio.create_task(_heartbeat())
         end_d = date.today()
         start_d = end_d - timedelta(days=int(QUANT_BARS_LOOKBACK_DAYS * 1.6))
-
+        
+        success_count = 0
         try:
-            df = await adapter.bars(symbols=sorted(syms), start=start_d, end=end_d, market=market)
-            if df is not None and not df.empty:
+            for i in range(0, total_count, chunk_size):
+                chunk = sym_list[i : i + chunk_size]
+                try:
+                    # adapter.bars 内部会自动写盘
+                    df = await adapter.bars(symbols=chunk, start=start_d, end=end_d, market=market)
+                    if df is not None and not df.empty:
+                        chunk_ok = df["symbol"].nunique() if "symbol" in df.columns else 0
+                        success_count += chunk_ok
+                        logger.info("    ∟ [%s] 进度: %d/%d | 本批次入盘: %d 只", market, min(i + chunk_size, total_count), total_count, chunk_ok)
+                    else:
+                        logger.info("    ∟ [%s] 进度: %d/%d | 本批次无新数据", market, min(i + chunk_size, total_count), total_count)
+                except Exception as e:
+                    logger.warning("    ❌ [%s] 批次 %d-%d 拉取失败: %s", market, i, i + len(chunk), e)
+            
+            if success_count > 0:
                 self.last_bars_day_ok = end_d
-                sym_count = df["symbol"].nunique() if "symbol" in df.columns else 0
-                missing = len(syms) - sym_count
-                logger.info("    ∟ [%s] Bars 抓取成功 | 标的: %d/%d (缺失 %d) | 耗时: %.1fs",
-                            market, sym_count, len(syms), missing, time.perf_counter() - t0)
+                logger.info("    ∟ [%s] Bars 抓取完成 | 总计成功: %d/%d | 总耗时: %.1fs",
+                            market, success_count, total_count, time.perf_counter() - t0)
         finally:
             heartbeat_stop.set()
             if not heartbeat_task.done(): heartbeat_task.cancel()
