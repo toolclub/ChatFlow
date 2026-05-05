@@ -164,6 +164,7 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_access_expire_minutes: int = 15
     jwt_refresh_expire_days: int = 7
+    admin_secret_key: str = ""
 
     # ── OAuth 配置 ─────────────────────────────────────────────────────────────
     oauth_proxy: str = ""  # OAuth 请求专用代理（如 http://host.docker.internal:7890）
