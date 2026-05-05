@@ -45,28 +45,64 @@ async function fetchData() {
   }
 }
 
-function renderCharts() {
+const renderCharts = () => {
   if (!stats.value) return
+  const isDark = document.body.classList.contains('dark')
+  const textColor = isDark ? '#A2A7AE' : '#64748B'
+  const splitLineColor = isDark ? '#2B2C30' : '#EBF0F5'
 
   // 1. 趋势图
   if (trendChartRef.value) {
     if (!trendChart) trendChart = echarts.init(trendChartRef.value)
     trendChart.setOption({
-      tooltip: { trigger: 'axis' },
-      legend: { data: ['消息数', 'Token 消耗'], bottom: 0 },
-      grid: { left: '3%', right: '4%', top: '10%', bottom: '15%', containLabel: true },
-      xAxis: { type: 'category', data: stats.value.charts.trend.days },
+      backgroundColor: 'transparent',
+      tooltip: { 
+        trigger: 'axis',
+        backgroundColor: isDark ? '#1F2023' : '#fff',
+        borderColor: isDark ? '#323335' : '#EBF0F5',
+        textStyle: { color: isDark ? '#E6E7E9' : '#18191C' }
+      },
+      legend: { 
+        data: ['消息数', 'Token 消耗'], 
+        bottom: 0,
+        textStyle: { color: textColor }
+      },
+      grid: { left: '3%', right: '4%', top: '12%', bottom: '15%', containLabel: true },
+      xAxis: { 
+        type: 'category', 
+        data: stats.value.charts.trend.days,
+        axisLine: { lineStyle: { color: splitLineColor } },
+        axisLabel: { color: textColor }
+      },
       yAxis: [
-        { type: 'value', name: '消息', position: 'left' },
-        { type: 'value', name: 'Tokens', position: 'right' }
+        { 
+          type: 'value', 
+          name: '消息', 
+          position: 'left',
+          splitLine: { lineStyle: { color: splitLineColor } },
+          axisLabel: { color: textColor }
+        },
+        { 
+          type: 'value', 
+          name: 'Tokens', 
+          position: 'right',
+          splitLine: { show: false },
+          axisLabel: { color: textColor }
+        }
       ],
       series: [
         {
           name: '消息数',
           type: 'bar',
           data: stats.value.charts.trend.messages,
-          itemStyle: { color: '#00AEEC' },
-          barWidth: '40%'
+          itemStyle: { 
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: '#00AEEC' },
+              { offset: 1, color: '#0095CC' }
+            ]),
+            borderRadius: [4, 4, 0, 0]
+          },
+          barWidth: '35%'
         },
         {
           name: 'Token 消耗',
@@ -75,10 +111,12 @@ function renderCharts() {
           data: stats.value.charts.trend.tokens,
           itemStyle: { color: '#FB7299' },
           lineStyle: { width: 3 },
+          symbol: 'circle',
+          symbolSize: 8,
           smooth: true,
           areaStyle: {
             color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-              { offset: 0, color: 'rgba(251, 114, 153, 0.3)' },
+              { offset: 0, color: 'rgba(251, 114, 153, 0.2)' },
               { offset: 1, color: 'rgba(251, 114, 153, 0)' }
             ])
           }
@@ -91,17 +129,41 @@ function renderCharts() {
   if (modelChartRef.value) {
     if (!modelChart) modelChart = echarts.init(modelChartRef.value)
     modelChart.setOption({
-      tooltip: { trigger: 'item' },
-      legend: { orient: 'vertical', left: 'left', top: 'center' },
+      backgroundColor: 'transparent',
+      tooltip: { 
+        trigger: 'item',
+        backgroundColor: isDark ? '#1F2023' : '#fff',
+        borderColor: isDark ? '#323335' : '#EBF0F5',
+        textStyle: { color: isDark ? '#E6E7E9' : '#18191C' }
+      },
+      legend: { 
+        orient: 'vertical', 
+        left: '5%', 
+        top: 'center',
+        textStyle: { color: textColor },
+        itemGap: 15
+      },
       series: [
         {
           name: '模型使用量',
           type: 'pie',
-          radius: ['40%', '70%'],
+          center: ['65%', '50%'],
+          radius: ['50%', '75%'],
           avoidLabelOverlap: false,
-          itemStyle: { borderRadius: 10, borderColor: '#fff', borderWidth: 2 },
-          label: { show: false, position: 'center' },
-          emphasis: { label: { show: true, fontSize: 16, fontWeight: 'bold' } },
+          itemStyle: { 
+            borderRadius: 8, 
+            borderColor: isDark ? '#1F2023' : '#fff', 
+            borderWidth: 2 
+          },
+          label: { show: false },
+          emphasis: { 
+            label: { 
+              show: true, 
+              fontSize: 14, 
+              fontWeight: 'bold',
+              color: isDark ? '#E6E7E9' : '#18191C'
+            } 
+          },
           data: stats.value.charts.models
         }
       ]
@@ -229,12 +291,14 @@ function formatTime(ts: number) {
 
 <style scoped>
 .admin-dashboard {
+  flex: 1;
   height: 100%;
   display: flex;
   flex-direction: column;
-  background: #f8fafc;
+  background: var(--cf-bg);
   overflow-y: auto;
   padding: 24px;
+  min-width: 0;
 }
 
 .admin-header {
@@ -242,6 +306,11 @@ function formatTime(ts: number) {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 24px;
+  background: var(--cf-card);
+  padding: 16px 24px;
+  border-radius: var(--cf-radius-lg);
+  box-shadow: var(--cf-shadow-sm);
+  border: 1px solid var(--cf-border-soft);
 }
 
 .header-left {
@@ -251,123 +320,172 @@ function formatTime(ts: number) {
 }
 
 .header-title {
-  font-size: 22px;
+  font-size: 20px;
   font-weight: 800;
-  color: #1e293b;
+  color: var(--cf-text-1);
 }
 
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(4, 1fr);
   gap: 20px;
   margin-bottom: 24px;
 }
 
+@media (max-width: 1200px) {
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
 .stat-card {
-  background: #fff;
-  border-radius: 16px;
-  padding: 20px;
+  background: var(--cf-card);
+  border-radius: var(--cf-radius-lg);
+  padding: 24px;
   display: flex;
   align-items: center;
-  gap: 16px;
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-  border: 1px solid #f1f5f9;
+  gap: 20px;
+  box-shadow: var(--cf-shadow-sm);
+  border: 1px solid var(--cf-border-soft);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.stat-card:hover {
+  transform: translateY(-4px);
+  box-shadow: var(--cf-shadow-md);
+  border-color: var(--cf-bili-blue);
 }
 
 .stat-icon {
-  width: 52px;
-  height: 52px;
-  border-radius: 12px;
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 24px;
+  font-size: 28px;
 }
 
-.stat-card.blue .stat-icon { background: #e0f2fe; color: #00aeec; }
-.stat-card.pink .stat-icon { background: #fdf2f8; color: #fb7299; }
-.stat-card.purple .stat-icon { background: #f3e8ff; color: #a855f7; }
-.stat-card.green .stat-icon { background: #dcfce7; color: #22c55e; }
+.stat-card.blue .stat-icon { background: rgba(0, 174, 236, 0.1); color: var(--cf-bili-blue); }
+.stat-card.pink .stat-icon { background: rgba(251, 114, 153, 0.1); color: var(--cf-bili-pink); }
+.stat-card.purple .stat-icon { background: rgba(168, 85, 247, 0.1); color: #a855f7; }
+.stat-card.green .stat-icon { background: rgba(34, 197, 94, 0.1); color: var(--cf-green); }
 
 .stat-info {
   display: flex;
   flex-direction: column;
+  gap: 4px;
 }
 
 .stat-label {
   font-size: 13px;
-  color: #64748b;
+  color: var(--cf-text-2);
   font-weight: 500;
 }
 
 .stat-value {
-  font-size: 24px;
-  font-weight: 800;
-  color: #1e293b;
+  font-size: 26px;
+  font-weight: 850;
+  color: var(--cf-text-1);
+  font-family: 'Inter', system-ui, sans-serif;
 }
 
 .stat-value .sub {
   font-size: 14px;
-  color: #94a3b8;
+  color: var(--cf-text-3);
   font-weight: normal;
+  margin-left: 4px;
 }
 
 .charts-row {
   display: grid;
   grid-template-columns: 2fr 1fr;
-  gap: 20px;
+  gap: 24px;
   margin-bottom: 24px;
 }
 
+@media (max-width: 1024px) {
+  .charts-row {
+    grid-template-columns: 1fr;
+  }
+}
+
 .chart-container {
-  background: #fff;
-  border-radius: 16px;
-  padding: 20px;
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-  border: 1px solid #f1f5f9;
+  background: var(--cf-card);
+  border-radius: var(--cf-radius-lg);
+  padding: 24px;
+  box-shadow: var(--cf-shadow-sm);
+  border: 1px solid var(--cf-border-soft);
 }
 
 .chart-header {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  font-size: 16px;
   font-weight: 700;
-  color: #334155;
-  margin-bottom: 20px;
+  color: var(--cf-text-1);
+  margin-bottom: 24px;
+}
+
+.chart-header .el-icon {
+  font-size: 20px;
+  color: var(--cf-bili-blue);
 }
 
 .chart-body {
-  height: 320px;
+  height: 360px;
+  width: 100%;
 }
 
 .users-section {
-  background: #fff;
-  border-radius: 16px;
-  padding: 20px;
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-  border: 1px solid #f1f5f9;
+  background: var(--cf-card);
+  border-radius: var(--cf-radius-lg);
+  padding: 24px;
+  box-shadow: var(--cf-shadow-sm);
+  border: 1px solid var(--cf-border-soft);
+  margin-bottom: 24px;
 }
 
 .section-header {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  font-size: 16px;
   font-weight: 700;
-  color: #334155;
-  margin-bottom: 20px;
+  color: var(--cf-text-1);
+  margin-bottom: 24px;
+}
+
+.section-header .el-icon {
+  font-size: 20px;
+  color: var(--cf-bili-pink);
 }
 
 .admin-table {
-  border-radius: 8px;
+  border-radius: var(--cf-radius-md);
   overflow: hidden;
+  --el-table-border-color: var(--cf-border-soft);
+  --el-table-header-bg-color: var(--cf-bg);
+  --el-table-header-text-color: var(--cf-text-1);
+  --el-table-text-color: var(--cf-text-2);
 }
 
-body.dark .admin-dashboard { background: #0f172a; }
-body.dark .stat-card, body.dark .chart-container, body.dark .users-section {
-  background: #1e293b;
-  border-color: #334155;
+:deep(.el-table) {
+  background-color: transparent;
 }
-body.dark .header-title, body.dark .stat-value, body.dark .chart-header, body.dark .section-header {
-  color: #f1f5f9;
+
+:deep(.el-table tr) {
+  background-color: transparent;
+}
+
+:deep(.el-table__header-wrapper th) {
+  font-weight: 700;
+}
+
+.loading-state {
+  padding: 40px;
+  background: var(--cf-card);
+  border-radius: var(--cf-radius-lg);
 }
 </style>
