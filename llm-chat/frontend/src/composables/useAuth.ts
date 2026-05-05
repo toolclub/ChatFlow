@@ -16,30 +16,30 @@ export function useAuth() {
 
   /**
    * 初始化认证状态
-   * 尝试拉取用户信息，如果失败且没有 access_token，尝试静默刷新一次
+   * 无 access_token 时先尝试 cookie 静默刷新，有则走正常流程（拦截器兜底 401）
    */
   async function init() {
     if (initialized.value) return
-    
+
     loading.value = true
     try {
-      // 1. 尝试直接获取用户信息
+      const hasToken = !!localStorage.getItem('cf_access_token')
+
+      if (!hasToken) {
+        // 无 access_token：主动用 refresh_token cookie 换新 token 后再拉用户信息
+        try {
+          const { refreshAccessToken } = await import('../api/index')
+          await refreshAccessToken()
+        } catch {
+          // cookie 也不存在或已过期，下面 fetchMe 会以匿名身份走到 401
+        }
+      }
+
       const me = await authApi.fetchMe()
       user.value = me.user
       settings.value = me.settings
     } catch (err) {
-      console.warn('[Auth] FetchMe failed, checking if we can refresh...')
-      // 2. 如果失败，且拦截器没有自动处理成功（通常是因为 localStorage 确实空的）
-      // 我们这里可以尝试手动触发一次刷新
-      try {
-        const { refreshAccessToken } = await import('../api/index')
-        await refreshAccessToken()
-        const me = await authApi.fetchMe()
-        user.value = me.user
-        settings.value = me.settings
-      } catch (refreshErr) {
-        console.error('[Auth] Init/Refresh failed:', refreshErr)
-      }
+      console.error('[Auth] Init failed:', err)
     } finally {
       initialized.value = true
       loading.value = false

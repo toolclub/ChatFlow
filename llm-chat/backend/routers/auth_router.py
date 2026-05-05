@@ -62,7 +62,6 @@ async def oauth_callback(
     provider: str,
     code: str,
     state: str,
-    response: Response
 ):
     """OAuth 回调"""
     if provider not in PROVIDERS:
@@ -210,8 +209,9 @@ async def logout(request: Request, response: Response, user: RequiredUser):
         await session_store.deactivate_session_by_token(user["id"], refresh_token)
 
     response.delete_cookie(
-        "refresh_token", 
-        secure=settings.cookie_secure, 
+        key="refresh_token",
+        secure=settings.cookie_secure,
+        httponly=True,
         samesite="none" if settings.cookie_secure else "lax",
         path="/",
     )
@@ -222,9 +222,10 @@ async def logout_all(response: Response, user: RequiredUser):
     """退出所有设备"""
     await session_store.deactivate_all_sessions(user["id"])
     response.delete_cookie(
-        "refresh_token",
-        secure=settings.cookie_secure, 
+        key="refresh_token",
+        secure=settings.cookie_secure,
+        httponly=True,
         samesite="none" if settings.cookie_secure else "lax",
-        path="/"
+        path="/",
     )
     return {"success": True}
