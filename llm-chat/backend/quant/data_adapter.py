@@ -43,10 +43,11 @@ class CachedDataAdapter:
         trace: list[ProviderTrace] | None = None,
         *,
         readonly: bool = False,
+        force: bool = False,
     ) -> pd.DataFrame:
         # 1) disk
-        # 如果是 readonly 或者新鲜，直接读磁盘
-        if readonly or await cache_disk.is_spot_fresh(market):
+        # force=True 时跳过缓存，直接回源（供 warmer 定期刷新用）
+        if not force and (readonly or await cache_disk.is_spot_fresh(market)):
             df = await cache_disk.read_spot(market)
             if df is not None and not df.empty:
                 if trace is not None:

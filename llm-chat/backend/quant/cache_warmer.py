@@ -277,13 +277,23 @@ class WarmerState:
     async def _do_spot(self) -> None:
         t0 = time.perf_counter()
         adapter = get_adapter()
-        for market in ["cn_a", "us_stock"]:
+        now = datetime.now()
+        # 只在各自交易时段拉取对应市场，避免闭市数据污染缓存
+        # force=True 强制回源，不走缓存 freshness 检查
+        if _is_trading_hours(now):
             try:
-                df = await adapter.spot(market)
+                df = await adapter.spot("cn_a", force=True)
                 if df is not None and not df.empty:
-                    logger.info("    ∟ Spot (%s) 更新完成 | 数量: %d", market, len(df))
+                    logger.info("    ∟ Spot (cn_a) 更新完成 | 数量: %d", len(df))
             except Exception as exc:
-                logger.warning("    ❌ Spot (%s) 失败: %s", market, exc)
+                logger.warning("    ❌ Spot (cn_a) 失败: %s", exc)
+        if _is_us_trading_hours(now):
+            try:
+                df = await adapter.spot("us_stock", force=True)
+                if df is not None and not df.empty:
+                    logger.info("    ∟ Spot (us_stock) 更新完成 | 数量: %d", len(df))
+            except Exception as exc:
+                logger.warning("    ❌ Spot (us_stock) 失败: %s", exc)
         self.last_spot_ok = time.time()
 
     async def _do_bars(self, symbols: list[str] | None = None, top_n: int | None = None) -> None:
