@@ -195,21 +195,27 @@ class QuantScreeningService:
         df["ma10"] = df["close"].rolling(10).mean()
         df["ma20"] = df["close"].rolling(20).mean()
 
-        values = df[["open", "close", "low", "high"]].values.tolist()
+        def _safe_float(val):
+            return None if pd.isna(val) else float(val)
+
+        values = [
+            [_safe_float(row["open"]), _safe_float(row["close"]), _safe_float(row["low"]), _safe_float(row["high"])]
+            for _, row in df.iterrows()
+        ]
         dates = df["date"].astype(str).tolist()
         volumes = []
         for i, row in df.iterrows():
             color_flag = 1 if row["close"] >= row["open"] else -1
-            volumes.append([i, row["volume"], color_flag])
+            volumes.append([i, _safe_float(row["volume"]), color_flag])
 
         return {
             "symbol": symbol,
             "dates": dates,
             "values": values,
             "volumes": volumes,
-            "ma5": df["ma5"].replace({float('nan'): None}).tolist(),
-            "ma10": df["ma10"].replace({float('nan'): None}).tolist(),
-            "ma20": df["ma20"].replace({float('nan'): None}).tolist(),
+            "ma5": [_safe_float(x) for x in df["ma5"]],
+            "ma10": [_safe_float(x) for x in df["ma10"]],
+            "ma20": [_safe_float(x) for x in df["ma20"]],
             "pending": False,
         }
 

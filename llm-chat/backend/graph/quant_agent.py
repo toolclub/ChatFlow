@@ -194,6 +194,8 @@ async def stream_analyze(
 
     try:
         async for delta in llm.astream(messages, temperature=0.3, timeout=120.0):
+            if not isinstance(delta, str):
+                continue
             # 推理 token（GLM/DeepSeek-R1）以 \x00THINK\x00 前缀，过滤掉只取最终内容
             if delta.startswith("\x00THINK\x00"):
                 continue
