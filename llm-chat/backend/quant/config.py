@@ -30,7 +30,7 @@ QUANT_WARMER_ENABLED: bool = bool(getattr(settings, "quant_warmer_enabled", True
 # 分布式部署时只让一个容器跑预热：QUANT_WARMER_ROLE=primary 才启动；secondary/off 直接跳过。
 # 同机多 Worker 由 fcntl 文件锁兜底，跨机由这个环境变量决定唯一执行者。
 QUANT_WARMER_ROLE: str = str(getattr(settings, "quant_warmer_role", "primary")).lower()
-QUANT_WARMER_SPOT_INTERVAL: int = int(getattr(settings, "quant_warmer_spot_interval", 1800))
+QUANT_WARMER_SPOT_INTERVAL: int = int(getattr(settings, "quant_warmer_spot_interval", 14400))
 QUANT_WARMER_BARS_HOUR: int = int(getattr(settings, "quant_warmer_bars_hour", 4))
 QUANT_WARMER_INDEX_HOUR: int = int(getattr(settings, "quant_warmer_index_hour", 7))
 # tushare bulk-by-date 的并发线程数（pro.daily 限频通常 500/min，8 线程足够安全）

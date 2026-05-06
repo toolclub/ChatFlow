@@ -1,7 +1,7 @@
 """量化数据后台预热
 
 设计：
-  - 单 asyncio.Task 主循环，每 60s 检查一次"该刷什么"
+  - 单 asyncio.Task 主循环，每 5min 检查一次"该刷什么"
   - 多 worker 互斥：通过 Redis SETNX 抢锁；抢不到就观察
   - 行情时间窗（9:15-15:30）每 N 分钟刷 spot
   - 收盘后（默认 16:00）刷当日 bars + 滚窗 prune
@@ -151,7 +151,7 @@ class WarmerState:
             await self._renew_master_lock()
 
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=60.0)
+                await asyncio.wait_for(self._stop.wait(), timeout=300.0)
                 break
             except asyncio.TimeoutError:
                 continue
