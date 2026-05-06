@@ -177,15 +177,11 @@ class WarmerState:
         except Exception:
             last_spot_val = self.last_spot_ok
 
-        # 首次 tick：无条件拉取全部 spot + bars_top（保证重启后缓存立即可用）
-        if self._first_tick:
+        # spot + bars_top：每 30 分钟无条件刷新（不区分交易时段/节假日）
+        need = (time.time() - last_spot_val) >= QUANT_WARMER_SPOT_INTERVAL
+        if need or self._first_tick:
             await self._refresh_once(["spot", "bars_top"])
             self._first_tick = False
-        # 后续：仅在交易时段按节奏刷新
-        elif _is_trading_hours(now) or _is_us_trading_hours(now):
-            need = (time.time() - last_spot_val) >= QUANT_WARMER_SPOT_INTERVAL
-            if need:
-                await self._refresh_once(["spot", "bars_top"])
 
         # 全量预热：凌晨跑 (4 AM)
         today = date.today()
