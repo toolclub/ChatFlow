@@ -55,6 +55,17 @@ def _build_provider(name: str, priority: int):
             max_concurrency=QUANT_BARS_CONCURRENCY,
         )
 
+    if name == "yfinance_us":
+        try:
+            from quant.providers.yfinance_us_provider import YFinanceUSProvider
+        except ImportError as exc:
+            logger.warning("YFinance US provider 加载失败：%s", exc)
+            return None
+        return YFinanceUSProvider(
+            priority=priority,
+            max_concurrency=QUANT_BARS_CONCURRENCY,
+        )
+
     if name == "akshare_us":
         try:
             from quant.providers.akshare_us_provider import AKShareUSProvider

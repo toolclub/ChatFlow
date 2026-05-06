@@ -62,6 +62,7 @@ dependencies = [
 
     # ── 量化模块（A 股选股） ──
     "akshare>=1.13.0",
+    "yfinance>=0.2.0",
     "pandas>=2.1.0",
     "baostock>=0.8.8",     # 免费 A 股数据，主源
     "tushare>=1.2.89",     # 需 token + 积分，骨架已就位
