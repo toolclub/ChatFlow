@@ -150,7 +150,6 @@ async def lifespan(app: FastAPI):
             print(f"[WARMER] delayed_quant_init FAILED: {exc}", file=sys.stderr, flush=True)
 
     # 抛出后台任务，不阻塞 lifespan yield
-    print("[WARMER] scheduling delayed_quant_init as background task", file=sys.stderr, flush=True)
     asyncio.create_task(delayed_quant_init())
 
     logger.info(
