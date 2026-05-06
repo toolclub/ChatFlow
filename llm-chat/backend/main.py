@@ -162,11 +162,12 @@ async def lifespan(app: FastAPI):
 
     yield
     # ── 关闭 ──
-    if quant_warmer_ref is not None:
+    if quant_warmer_process is not None:
         try:
-            await quant_warmer_ref.stop(timeout=3.0)
+            quant_warmer_process.terminate()
+            quant_warmer_process.join(timeout=3.0)
         except Exception as exc:
-            logger.warning("warmer 停止异常（忽略）: %s", exc)
+            logger.warning("warmer 进程停止异常（忽略）: %s", exc)
     if sandbox_ok:
         from sandbox.manager import sandbox_manager
         await sandbox_manager.shutdown()

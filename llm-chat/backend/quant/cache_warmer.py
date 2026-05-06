@@ -84,7 +84,7 @@ class WarmerState:
         logger.info("warmer 已停止")
 
     async def trigger_now(self, kinds: list[str] | None = None) -> dict:
-        """REST 手动触发：在后台跑一次完整刷新，立即返回 'scheduled'。"""
+        """REST 手动触发：在独立进程跑一次完整刷新，立即返回 'scheduled'。"""
         # 冷却期保护：基于 Redis 的全局冷却
         try:
             from db.redis_state import _get_redis
@@ -101,7 +101,8 @@ class WarmerState:
             pass
 
         kinds = kinds or ["spot", "index", "bars", "prune"]
-        asyncio.create_task(self._refresh_once(kinds, manual=True))
+        from quant.worker import start_refresh_process
+        start_refresh_process(kinds)
         return {"scheduled": kinds, "worker": _WORKER_ID}
 
     # ── 主循环 ──────────────────────────────────────────────────────────────
