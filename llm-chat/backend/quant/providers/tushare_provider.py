@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -31,6 +33,14 @@ logger = logging.getLogger("quant.tushare")
 def _is_permission_error(exc: BaseException) -> bool:
     msg = str(exc)
     return "没有接口" in msg or "权限" in msg or "积分" in msg
+
+
+def _parse_date(v):
+    """字符串/date → date。"""
+    from datetime import date as _date
+    if isinstance(v, _date):
+        return v
+    return datetime.strptime(str(v)[:10], "%Y-%m-%d").date()
 
 
 class TushareProvider:
@@ -280,6 +290,122 @@ class TushareProvider:
         if "trade_date" in df.columns:
             df = df.drop(columns=["trade_date"])
         return df.reset_index(drop=True)
+
+    async def daily_bars_bulk(
+        self,
+        start: str,
+        end: str,
+        *,
+        max_workers: int = 8,
+        adjust: str = "qfq",
+    ) -> pd.DataFrame:
+        """按交易日并行拉取全市场 daily_bars + adj_factor，合成 qfq 后返回。
+
+        相比 per-symbol 串行（5500 只 × 0.5s = 50min），按日并行只需 ~120 个交易日 ÷
+        max_workers ≈ 15 个 round trip，单次 ~1s，全量 ~20-60s 完成。
+
+        返回 DataFrame schema 与 baostock daily_bars 兼容：
+            symbol, date, open, high, low, close, pre_close, volume, amount, change_pct
+        """
+        s_d = _parse_date(start)
+        e_d = _parse_date(end)
+        # pro.daily 接受 trade_date=YYYYMMDD，非交易日返回空 DF——直接逐日枚举即可，
+        # 周末跳过减少无效请求；节假日由 pro.daily 自己返回空。
+        trade_dates: list[str] = []
+        cur = s_d
+        while cur <= e_d:
+            if cur.weekday() < 5:
+                trade_dates.append(cur.strftime("%Y%m%d"))
+            cur += timedelta(days=1)
+        if not trade_dates:
+            return pd.DataFrame()
+
+        pro = self._get_pro()
+
+        def _fetch_one_day(d: str) -> pd.DataFrame:
+            for attempt in range(3):
+                try:
+                    daily = pro.daily(trade_date=d)
+                    if daily is None or daily.empty:
+                        return pd.DataFrame()
+                    if adjust in ("qfq", "hfq"):
+                        try:
+                            adj = pro.adj_factor(trade_date=d)
+                            if adj is not None and not adj.empty:
+                                daily = daily.merge(
+                                    adj[["ts_code", "adj_factor"]],
+                                    on="ts_code", how="left",
+                                )
+                            else:
+                                daily["adj_factor"] = 1.0
+                        except Exception as exc:
+                            if _is_permission_error(exc):
+                                raise
+                            daily["adj_factor"] = 1.0
+                    else:
+                        daily["adj_factor"] = 1.0
+                    return daily
+                except Exception as exc:
+                    if _is_permission_error(exc):
+                        raise
+                    if attempt < 2:
+                        time.sleep(0.5 * (2 ** attempt))
+            return pd.DataFrame()
+
+        loop = asyncio.get_running_loop()
+        with ThreadPoolExecutor(max_workers=max(1, max_workers)) as ex:
+            futures = [
+                loop.run_in_executor(ex, _fetch_one_day, d) for d in trade_dates
+            ]
+            results = await asyncio.gather(*futures, return_exceptions=True)
+
+        dfs: list[pd.DataFrame] = []
+        for r in results:
+            if isinstance(r, pd.DataFrame) and not r.empty:
+                dfs.append(r)
+            elif isinstance(r, Exception):
+                if _is_permission_error(r):
+                    raise r
+        if not dfs:
+            return pd.DataFrame()
+
+        df = pd.concat(dfs, ignore_index=True)
+
+        if adjust == "qfq" and "adj_factor" in df.columns:
+            # qfq = price * adj_factor / max(adj_factor in window) per symbol
+            df["adj_factor"] = pd.to_numeric(df["adj_factor"], errors="coerce").fillna(1.0)
+            base = df.groupby("ts_code")["adj_factor"].transform("max")
+            ratio = (df["adj_factor"] / base).where(base > 0, 1.0)
+            for col in ("open", "high", "low", "close", "pre_close"):
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce") * ratio
+        elif adjust == "hfq" and "adj_factor" in df.columns:
+            df["adj_factor"] = pd.to_numeric(df["adj_factor"], errors="coerce").fillna(1.0)
+            base = df.groupby("ts_code")["adj_factor"].transform("min")
+            ratio = (df["adj_factor"] / base).where(base > 0, 1.0)
+            for col in ("open", "high", "low", "close", "pre_close"):
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce") * ratio
+
+        df = df.rename(columns={
+            "ts_code": "symbol",
+            "trade_date": "date",
+            "vol": "volume",
+            "pct_chg": "change_pct",
+        })
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(
+                df["date"], format="%Y%m%d", errors="coerce",
+            ).dt.strftime("%Y-%m-%d")
+        for col in ("open", "high", "low", "close", "pre_close",
+                    "volume", "amount", "change_pct"):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        if "amount" in df.columns:
+            df["amount"] = df["amount"] / 1e5  # tushare daily.amount 单位千元 → 亿元
+        if "adj_factor" in df.columns:
+            df = df.drop(columns=["adj_factor"])
+        return df.sort_values(["symbol", "date"]).reset_index(drop=True)
 
     async def daily_bars(
         self,

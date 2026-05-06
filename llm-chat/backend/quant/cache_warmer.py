@@ -24,11 +24,14 @@ from datetime import date, datetime, timedelta
 from quant import cache_disk
 from quant.config import (
     QUANT_BARS_LOOKBACK_DAYS,
+    QUANT_TUSHARE_BULK_WORKERS,
     QUANT_WARMER_BARS_HOUR,
     QUANT_WARMER_ENABLED,
     QUANT_WARMER_INDEX_HOUR,
+    QUANT_WARMER_ROLE,
     QUANT_WARMER_SPOT_INTERVAL,
 )
+from quant.domain import ProviderCapability
 from quant.data_adapter import get_adapter
 from quant.provider_registry import NoProviderAvailable, get_registry
 
@@ -53,19 +56,29 @@ class WarmerState:
         self.last_bars_day_ok: date | None = None
         self.last_index_day_ok: date | None = None
         self._first_tick = True  # 启动后首次进入循环强制跑一次
+        # tushare bulk 冷却：同一轮内 VIP→长尾两次调用不要重复拉全市场
+        self._last_bulk_cn_a: float = 0.0
 
     def is_running(self) -> bool:
         return self._task is not None and not self._task.done()
 
     async def start(self, *, initial_delay: float = 5.0) -> None:
+        import sys
+        print(f"[WARMER] start() called, enabled={QUANT_WARMER_ENABLED}, running={self.is_running()}", file=sys.stderr, flush=True)
         if not QUANT_WARMER_ENABLED:
             logger.info("warmer 未启用（QUANT_WARMER_ENABLED=false）")
             return
+        # 分布式单一执行者：非 primary 角色直接退出
+        if QUANT_WARMER_ROLE != "primary":
+            logger.info("warmer 角色=%s，非 primary 不启动预热", QUANT_WARMER_ROLE)
+            return
         if self.is_running():
+            print(f"[WARMER] already running, returning", file=sys.stderr, flush=True)
             return
         self._stop.clear()
         self._task = asyncio.create_task(self._loop(initial_delay))
         logger.info("warmer 启动 worker_id=%s", _WORKER_ID)
+        print(f"[WARMER] task created, entering _loop", file=sys.stderr, flush=True)
 
     async def stop(self, timeout: float = 5.0) -> None:
         if not self.is_running():
@@ -234,23 +247,29 @@ class WarmerState:
             # 记录开始时间到 Redis 供全局冷却参考
             await r.set("chatflow:quant:last_refresh_ts", str(time.time()), ex=1800)
 
+            # 单阶段总超时（兜底）：bars 全市场 25 min；其它 5 min。
+            # 任何阶段卡死都不会拖垮整轮，下一轮 30min tick 会重试。
+            phase_timeout = {"bars": 1500.0, "bars_top": 600.0}
             for kind in kinds:
                 t0 = time.perf_counter()
                 logger.info("  ▶️ 阶段开始: %s", kind)
+                timeout_s = phase_timeout.get(kind, 300.0)
                 try:
                     if kind == "spot":
-                        await self._do_spot()
+                        await asyncio.wait_for(self._do_spot(), timeout=timeout_s)
                     elif kind == "bars":
-                        await self._do_bars()
+                        await asyncio.wait_for(self._do_bars(), timeout=timeout_s)
                     elif kind == "bars_top":
-                        await self._do_bars(top_n=2000)
+                        await asyncio.wait_for(self._do_bars(top_n=2000), timeout=timeout_s)
                     elif kind == "index":
-                        await self._do_index()
+                        await asyncio.wait_for(self._do_index(), timeout=timeout_s)
                     elif kind == "prune":
-                        await cache_disk.prune()
+                        await asyncio.wait_for(cache_disk.prune(), timeout=timeout_s)
+                except asyncio.TimeoutError:
+                    logger.warning("  ⏱️ 阶段超时跳过: %s | 上限: %.0fs", kind, timeout_s)
                 except Exception as exc:
                     logger.exception("  ❌ 阶段失败: %s | %s", kind, exc)
-                
+
                 elapsed = (time.perf_counter() - t0) * 1000
                 logger.info("  ✅ 阶段完成: %s | 耗时: %.0fms", kind, elapsed)
 
@@ -343,9 +362,34 @@ class WarmerState:
         total_count = len(sym_list)
         logger.info("    ∟ [%s] 开始拉取 K 线 | 目标数量: %d", market, total_count)
 
-        # 2. 分批拉取与写盘（每 200 只一组）
-        # 解决“憋大招”问题：拉完一组存一组，让选股立刻能看到数据
-        chunk_size = 200
+        # 2.0 准备日期窗口（bulk 与回退路径共用）
+        end_d = date.today()
+        start_d = end_d - timedelta(days=int(QUANT_BARS_LOOKBACK_DAYS * 1.6))
+
+        # 2.1 cn_a 快速路径：tushare 按交易日并发批量拉，几十秒覆盖全市场
+        # 命中后从 sym_list 里剔除已覆盖标的，余下再走单点回退路径
+        # 只对计划性全量/Top 预热触发；按需补仓（指定 symbols）不走 bulk，避免小请求触发全市场拉取
+        if market == "cn_a" and symbols is None:
+            covered = await self._bulk_fetch_cn_a(sym_list, start_d, end_d)
+            if covered:
+                covered_set = set(covered)
+                sym_list = [s for s in sym_list if s not in covered_set]
+                if not sym_list:
+                    self.last_bars_day_ok = end_d
+                    logger.info(
+                        "    ∟ [%s] Bars 抓取完成（tushare bulk 全覆盖） | 总耗时: %.1fs",
+                        market, time.perf_counter() - t0,
+                    )
+                    return
+                logger.info(
+                    "    ∟ [%s] tushare bulk 已覆盖 %d 只，剩余 %d 只走单点回退",
+                    market, len(covered), len(sym_list),
+                )
+                total_count = len(sym_list)
+
+        # 2.2 回退路径：分批走 registry（baostock per-symbol with 超时 / akshare 并发）
+        # chunk_size 缩小到 50，单批被卡死时损失更可控
+        chunk_size = 50
         heartbeat_stop = asyncio.Event()
 
         async def _heartbeat():
@@ -370,25 +414,30 @@ class WarmerState:
                     logger.info("    ∟ [%s] 仍在拉取 K 线… 已耗时 ~%d min", market, cnt)
 
         heartbeat_task = asyncio.create_task(_heartbeat())
-        end_d = date.today()
-        start_d = end_d - timedelta(days=int(QUANT_BARS_LOOKBACK_DAYS * 1.6))
-        
+
+        # 单批 watchdog：超过 5 分钟视为该批被卡死，跳过继续
+        CHUNK_TIMEOUT = 300.0
         success_count = 0
         try:
             for i in range(0, total_count, chunk_size):
                 chunk = sym_list[i : i + chunk_size]
                 try:
-                    # adapter.bars 内部会自动写盘
-                    df = await adapter.bars(symbols=chunk, start=start_d, end=end_d, market=market)
+                    df = await asyncio.wait_for(
+                        adapter.bars(symbols=chunk, start=start_d, end=end_d, market=market),
+                        timeout=CHUNK_TIMEOUT,
+                    )
                     if df is not None and not df.empty:
                         chunk_ok = df["symbol"].nunique() if "symbol" in df.columns else 0
                         success_count += chunk_ok
                         logger.info("    ∟ [%s] 进度: %d/%d | 本批次入盘: %d 只", market, min(i + chunk_size, total_count), total_count, chunk_ok)
                     else:
                         logger.info("    ∟ [%s] 进度: %d/%d | 本批次无新数据", market, min(i + chunk_size, total_count), total_count)
+                except asyncio.TimeoutError:
+                    logger.warning("    ❌ [%s] 批次 %d-%d 超时 %.0fs，跳过",
+                                   market, i, i + len(chunk), CHUNK_TIMEOUT)
                 except Exception as e:
                     logger.warning("    ❌ [%s] 批次 %d-%d 拉取失败: %s", market, i, i + len(chunk), e)
-            
+
             if success_count > 0:
                 self.last_bars_day_ok = end_d
                 logger.info("    ∟ [%s] Bars 抓取完成 | 总计成功: %d/%d | 总耗时: %.1fs",
@@ -396,6 +445,75 @@ class WarmerState:
         finally:
             heartbeat_stop.set()
             if not heartbeat_task.done(): heartbeat_task.cancel()
+
+    async def _bulk_fetch_cn_a(
+        self, sym_list: list[str], start_d: date, end_d: date,
+    ) -> set[str]:
+        """tushare 按交易日并发批量拉 A 股全市场 daily_bars，写盘后返回已覆盖 symbol 集。
+
+        失败/不可用时返回空集——调用方继续走 per-symbol 回退路径。
+        """
+        try:
+            registry = get_registry()
+            tushare = registry.get_provider("tushare")
+        except Exception as exc:
+            logger.debug("registry 不可用，跳过 tushare bulk: %s", exc)
+            return set()
+        if tushare is None:
+            return set()
+        if ProviderCapability.DAILY_BARS not in getattr(tushare, "capabilities", set()):
+            logger.info("    ∟ [cn_a] tushare 无 daily_bars 能力，跳过 bulk 路径")
+            return set()
+        if not hasattr(tushare, "daily_bars_bulk"):
+            return set()
+
+        # 冷却：上次 bulk 完成 < 10min，盘中数据无变化，直接报告全覆盖
+        # 一轮 _do_bars 里 VIP-Top 与全量长尾会先后各调一次，第二次走这里跳过
+        if time.time() - self._last_bulk_cn_a < 600:
+            logger.info(
+                "    ∟ [cn_a] tushare bulk 冷却中（<10min），跳过重复拉取，假定全覆盖",
+            )
+            return set(sym_list)
+
+        t0 = time.perf_counter()
+        logger.info(
+            "    ∟ [cn_a] 🚀 tushare bulk-by-date 开始 | %s ~ %s | 并发 %d",
+            start_d, end_d, QUANT_TUSHARE_BULK_WORKERS,
+        )
+        try:
+            # 给 bulk 一个总超时：120 个交易日 × 2 RPC × 安全系数，6 分钟够了
+            df = await asyncio.wait_for(
+                tushare.daily_bars_bulk(
+                    start=start_d.strftime("%Y-%m-%d"),
+                    end=end_d.strftime("%Y-%m-%d"),
+                    max_workers=QUANT_TUSHARE_BULK_WORKERS,
+                ),
+                timeout=360.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("    ❌ [cn_a] tushare bulk 超时（>360s），降级回退路径")
+            return set()
+        except Exception as exc:
+            logger.warning("    ❌ [cn_a] tushare bulk 失败: %s（降级回退路径）", exc)
+            return set()
+
+        if df is None or df.empty or "symbol" not in df.columns:
+            logger.info("    ∟ [cn_a] tushare bulk 无数据返回")
+            return set()
+
+        try:
+            await cache_disk.write_bars("cn_a", df)
+        except Exception as exc:
+            logger.warning("    ❌ [cn_a] tushare bulk 写盘失败: %s", exc)
+            return set()
+
+        covered = set(df["symbol"].astype(str).unique()) & set(sym_list)
+        self._last_bulk_cn_a = time.time()
+        logger.info(
+            "    ∟ [cn_a] ✅ tushare bulk 完成 | 覆盖 %d/%d | 行数 %d | 耗时: %.1fs",
+            len(covered), len(sym_list), len(df), time.perf_counter() - t0,
+        )
+        return covered
 
     async def _do_index(self) -> None:
         adapter = get_adapter()

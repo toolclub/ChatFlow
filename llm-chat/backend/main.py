@@ -133,18 +133,24 @@ async def lifespan(app: FastAPI):
 
     # 8. 延迟初始化量化模块
     async def delayed_quant_init():
+        import sys
         try:
-            # 等待 15s，确保错峰完成基础启动，且 Web 端口已就绪
+            print("[WARMER] delayed_quant_init started, sleeping 15s...", file=sys.stderr, flush=True)
             await asyncio.sleep(15.0)
+            print("[WARMER] sleep done, calling init_quant...", file=sys.stderr, flush=True)
             from quant.bootstrap import init_quant
             await init_quant()
+            print("[WARMER] init_quant done, calling warmer.start...", file=sys.stderr, flush=True)
             from quant.cache_warmer import get_warmer
             await get_warmer().start(initial_delay=2.0)
             logger.info("量化缓存预热器启动完成")
+            print("[WARMER] warmer.start() completed successfully", file=sys.stderr, flush=True)
         except Exception as exc:
             logger.error("量化模块延迟初始化失败: %s", exc)
+            print(f"[WARMER] delayed_quant_init FAILED: {exc}", file=sys.stderr, flush=True)
 
     # 抛出后台任务，不阻塞 lifespan yield
+    print("[WARMER] scheduling delayed_quant_init as background task", file=sys.stderr, flush=True)
     asyncio.create_task(delayed_quant_init())
 
     logger.info(

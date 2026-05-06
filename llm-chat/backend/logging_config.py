@@ -83,13 +83,10 @@ def setup_logging(log_dir: str) -> None:
     )
     tf.setFormatter(fmt)
 
-    # quant 父 logger：统一收纳所有量化子模块到 timer.log
+    # quant 父 logger：量化子模块同时写 timer.log 和 chatflow.log
     quant_logger = logging.getLogger("quant")
-    quant_logger.propagate = False          # 不写入 chatflow.log
     quant_logger.setLevel(logging.INFO)
     quant_logger.addHandler(tf)
-
-    # quant.timer 传播到 quant（quant.propagate=False 已阻断到 root）
 
 
 def log_prompt(
