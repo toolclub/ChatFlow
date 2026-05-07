@@ -141,17 +141,39 @@ class WarmerState:
             return
 
         logger.info("获得 master 锁，开始定时预热 worker_id=%s", _WORKER_ID)
+
+        # 防堆积：用 reentrancy 标记保证同一时间只有一个 _tick 在跑。
+        # while 串行结构本身已串行执行，但加保护更稳（避免未来误改并发触发）。
+        tick_running = False
+
         while not self._stop.is_set():
-            try:
-                await self._tick()
-            except Exception as exc:
-                logger.exception("warmer tick 异常: %s", exc)
+            if tick_running:
+                logger.warning("warmer 上一轮 _tick 仍在跑，跳过本次唤醒（防堆积）")
+            else:
+                tick_running = True
+                t0 = time.time()
+                try:
+                    await self._tick()
+                except Exception as exc:
+                    logger.exception("warmer tick 异常: %s", exc)
+                finally:
+                    elapsed = time.time() - t0
+                    if elapsed > QUANT_WARMER_SPOT_INTERVAL:
+                        logger.warning(
+                            "warmer _tick 耗时 %.0fs 超过 spot_interval %ds，"
+                            "数据更新可能落后；考虑减小预热范围或加大间隔",
+                            elapsed, QUANT_WARMER_SPOT_INTERVAL,
+                        )
+                    tick_running = False
 
             # 续期 master 锁（_tick 可能阻塞数分钟，返回后立即续）
             await self._renew_master_lock()
 
+            # 主循环唤醒间隔：取 spot_interval 的 1/4，但下限 60s 上限 600s。
+            # 例如 spot_interval=14400(4h) → 每 600s 唤醒检查一次（够及时）。
+            poll = max(60, min(600, QUANT_WARMER_SPOT_INTERVAL // 4))
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=300.0)
+                await asyncio.wait_for(self._stop.wait(), timeout=poll)
                 break
             except asyncio.TimeoutError:
                 continue

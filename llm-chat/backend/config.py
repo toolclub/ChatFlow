@@ -145,7 +145,7 @@ class Settings(BaseSettings):
     quant_cache_retention_days: int = 90       # bars 保留天数
     quant_cache_max_size_mb: int = 200         # 整个 cache 目录硬上限
     quant_warmer_enabled: bool = True
-    quant_warmer_spot_interval: int = 300      # 行情时间窗内 spot 刷新间隔（秒）
+    quant_warmer_spot_interval: int = 14400    # spot/bars_top 预热间隔（秒）；默认 4 小时
     quant_warmer_bars_hour: int = 16           # 每天此小时（本地）跑当天 bars
     quant_warmer_index_hour: int = 7
     quant_spot_fresh_seconds: int = 600        # spot 多久内算新鲜，过期才回源

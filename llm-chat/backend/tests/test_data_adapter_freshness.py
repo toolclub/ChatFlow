@@ -229,6 +229,60 @@ def test_bars_partial_cover_and_stale_forces_full_refetch(monkeypatch, tmp_path)
 
 
 @pytest.mark.unit
+def test_bars_per_symbol_freshness_dirty_partial_write(monkeypatch, tmp_path):
+    """T-ADAPTER-FRESH-08c：全局 max_date 已到 expected，但请求 symbol 在 expected
+    那天覆盖率不足 → 触发回源（修复"5/6 文件只含 PLTR，AAPL 还是 5/5"的脏写）。
+    """
+    from quant import cache_disk
+    from quant.data_adapter import CachedDataAdapter
+
+    monkeypatch.setattr("quant.cache_disk.QUANT_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "quant.data_adapter._expected_last_trading_day",
+        lambda market, now=None: date(2026, 5, 6),
+    )
+
+    # cache：5/4 含全部股票；5/6 只有 PLTR 一只（部分写盘脏数据）
+    requested_syms = ["AAPL.US", "MSFT.US", "NVDA.US", "PLTR.US"]
+    cached_df = pd.concat([
+        # 5/4 全部股票
+        pd.DataFrame([{"symbol": s, "date": "2026-05-04", "close": 100.0} for s in requested_syms]),
+        # 5/6 只有 PLTR（脏写场景）
+        pd.DataFrame([{"symbol": "PLTR.US", "date": "2026-05-06", "close": 50.0}]),
+    ], ignore_index=True)
+
+    async def _fake_read(market, s, e):
+        return cached_df, None
+    monkeypatch.setattr(cache_disk, "read_bars_range", _fake_read)
+    async def _fake_read_sym(market, sym, s, e):
+        return cached_df[cached_df["symbol"] == sym]
+    monkeypatch.setattr(cache_disk, "read_bars_for_symbol", _fake_read_sym)
+
+    fresh = pd.DataFrame([
+        {"symbol": s, "date": d, "close": 999.0}
+        for s in requested_syms
+        for d in ("2026-05-05", "2026-05-06")
+    ])
+    written: list = []
+    async def _fake_write(market, df):
+        written.append(df)
+    monkeypatch.setattr(cache_disk, "write_bars", _fake_write)
+
+    fake_reg = _FakeRegistry(fresh)
+    adapter = CachedDataAdapter(registry=fake_reg)
+    asyncio.run(adapter.bars(
+        symbols=requested_syms,
+        start="2026-04-01", end="2026-05-06",
+        market="us_stock",
+    ))
+
+    # 关键：尽管 cached_max_date=5/6（全局新鲜），但 5/6 当天只有 PLTR（25% 覆盖 < 80%）
+    # 应触发回源，把所有股票的 5/5、5/6 数据补上
+    assert len(fake_reg.calls) == 1, "5/6 文件只含 PLTR 时应触发回源"
+    assert len(written) == 1
+
+
+@pytest.mark.unit
 def test_bars_cover_full_and_fresh_uses_cache(monkeypatch, tmp_path):
     """T-ADAPTER-FRESH-09：缓存覆盖 + 日期新鲜 → 命中缓存，不回源。"""
     from quant import cache_disk

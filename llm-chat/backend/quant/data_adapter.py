@@ -169,19 +169,43 @@ class CachedDataAdapter:
             cover_ratio = 0.0
 
         # ── 日期新鲜度判定（spec §"原则：永远不信任进程内数据"在缓存上的体现）──
-        # 单看 cover_ratio 会让缓存永久卡在首次拉取那天的数据（详见 cache_warmer
-        # 跑了几天但 K 线日期不更新的 bug）。必须叠加"最新日期 ≥ 预期交易日"。
+        # 单看 cover_ratio 会让缓存永久卡在首次拉取那天的数据。必须叠加：
+        #   ① 全局最新日期 ≥ 预期交易日（粗判）
+        #   ② 请求的 symbol 在 expected 日期文件里覆盖率 ≥ 80%（细判）
+        # 仅 ① 不够：之前写盘部分成功时（比如 5/6 文件只含 50 只），全局 max_date=5/6
+        # 但 AAPL 在 5/6 文件里其实没有，cached 命中却返回不到最新数据。
         cached_max_date = _max_cached_date(cached)
         # readonly 不判预期：调用方明确"绝不回源"
         request_end_date = e_date if e_date else date.today()
         expected_last = _expected_last_trading_day(market) if not readonly else cached_max_date
         # 若用户请求的 end 早于预期最新日（请求历史区间），按 end 比对
         compare_target = min(expected_last, request_end_date) if expected_last else request_end_date
-        is_fresh = (
+
+        global_fresh = (
             cached_max_date is not None
             and compare_target is not None
             and cached_max_date >= compare_target
         )
+        # per-symbol 覆盖率：cached 在 compare_target 当天的请求 symbol 占比
+        per_sym_fresh = True  # 默认 True，单只 / cached 空 / 没 date 列时不卡这层
+        if global_fresh and not readonly and cached is not None and not cached.empty \
+                and "date" in cached.columns and "symbol" in cached.columns and len(symbols) > 1:
+            target_str = compare_target.strftime("%Y-%m-%d")
+            try:
+                day_df = cached[cached["date"].astype(str).str.startswith(target_str)]
+                day_syms = set(day_df["symbol"].astype(str).unique()) if not day_df.empty else set()
+                per_sym_cover = len(sym_set & day_syms) / max(len(sym_set), 1)
+                if per_sym_cover < 0.8:
+                    per_sym_fresh = False
+                    logger.info(
+                        "bars 单标新鲜度不足 market=%s target=%s 请求覆盖=%.0f%% (%d/%d) → 回源",
+                        market, target_str, per_sym_cover * 100,
+                        len(sym_set & day_syms), len(sym_set),
+                    )
+            except Exception as exc:
+                logger.warning("per-symbol freshness 检查异常 (降级当作新鲜): %s", exc)
+
+        is_fresh = global_fresh and per_sym_fresh
 
         if cover_ratio >= 0.8 and is_fresh:
             if trace is not None:

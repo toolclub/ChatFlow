@@ -101,6 +101,54 @@ def test_akshare_universe_parses_em_code_and_dot_tickers(monkeypatch):
 
 
 @pytest.mark.unit
+def test_universe_registers_builtin_cn_names(monkeypatch):
+    """T-YF-UNIV-07：_get_universe_tickers 始终预填 45 只大盘中文名映射。
+
+    保证即使 universe 走 stockanalysis / wikipedia（源本身无中文名），
+    spot 阶段对常见大盘股也能显示中文。
+    """
+    from quant.providers import yfinance_us_provider as yf_mod
+
+    # 清空 cache
+    yf_mod._TICKER_TO_CN_NAME.clear()
+    monkeypatch.setattr(yf_mod, "_universe_from_akshare", lambda size: [])
+    monkeypatch.setattr(yf_mod, "_universe_from_stockanalysis", lambda size: [])
+    monkeypatch.setattr(yf_mod, "_universe_from_wikipedia", lambda size: [])
+
+    yf_mod.YFinanceUSProvider._get_universe_tickers()
+
+    assert yf_mod._TICKER_TO_CN_NAME["AAPL"] == "苹果"
+    assert yf_mod._TICKER_TO_CN_NAME["NVDA"] == "英伟达"
+    assert yf_mod._TICKER_TO_CN_NAME["BRK-B"] == "伯克希尔哈撒韦"
+
+
+@pytest.mark.unit
+def test_akshare_universe_extracts_cn_names(monkeypatch):
+    """T-YF-UNIV-08：akshare 源解析时把"名称"列写入中文名 cache。"""
+    from quant.providers import yfinance_us_provider as yf_mod
+
+    yf_mod._TICKER_TO_CN_NAME.clear()
+
+    fake_df = pd.DataFrame([
+        {"代码": "105.AAPL", "名称": "苹果", "成交额": 1e10},
+        {"代码": "105.GOOGL", "名称": "谷歌-A", "成交额": 5e9},
+        {"代码": "105.PLTR", "名称": "Palantir", "成交额": 8e9},
+    ])
+
+    class _FakeAk:
+        @staticmethod
+        def stock_us_spot_em():
+            return fake_df
+
+    monkeypatch.setitem(__import__("sys").modules, "akshare", _FakeAk)
+    yf_mod._universe_from_akshare(size=10)
+
+    assert yf_mod._TICKER_TO_CN_NAME["AAPL"] == "苹果"
+    assert yf_mod._TICKER_TO_CN_NAME["GOOGL"] == "谷歌-A"
+    assert yf_mod._TICKER_TO_CN_NAME["PLTR"] == "Palantir"
+
+
+@pytest.mark.unit
 def test_stockanalysis_universe_dedup_across_pages(monkeypatch):
     """T-YF-UNIV-06：stockanalysis 多页（SP500 + NDX100）抓取后去重。"""
     from quant.providers import yfinance_us_provider as yf_mod
