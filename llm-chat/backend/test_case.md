@@ -560,6 +560,39 @@ pytest tests/ -m smoke         # 冒烟拨测（端到端）
 | 参数错误 | top_n 类型不对 | 422 | smoke |
 | 全 provider down | service 抛 NoProviderAvailable | 路由转 503 | unit |
 
+### T-QUANT-ANALYZE: 分析 thinking 透传（spec §模型思考流程）
+
+| 用例 | 操作 | 期望 | 标记 |
+|------|------|------|------|
+| T-QUANT-ANALYZE-01 | FakeLLM 推 reasoning + content；`stream_analyze` 消费 | 输出包含 `thinking`/`delta`/`done` 三类事件；done 携带 `analysis`/`risk_notes`/`thinking_segments`（segment.node="quant_analyze", step_index=null, phase∈{reasoning,content}） | unit |
+| T-QUANT-ANALYZE-02 | rows=[]，stream_analyze 短路 | 仅 1 个 done 事件，文案"未筛选到任何符合条件的股票。"，LLM 不被调用 | unit |
+
+### T-FINANCE-DATA: 财经数据层（quant/data/）
+
+| 用例 | 操作 | 期望 | 标记 |
+|------|------|------|------|
+| T-FINANCE-DATA-01 | `cache.get_or_fetch` 同 key 调两次 | fetcher 只执行 1 次（第二次命中） | unit |
+| T-FINANCE-DATA-02 | Redis `get`/`set` 全部抛错 | 不阻断主流程，每次直连 fetcher，返回值正常 | unit |
+| T-FINANCE-DATA-03 | news 归一化：列名映射 + 空标题过滤 | 中文列名转英文 key，空 title 行被过滤 | unit |
+| T-FINANCE-DATA-04 | money_flow 归一化：取最后一行为 today，history ≤5 行 | today.date 是最新日期，main_net_inflow 数值正确 | unit |
+| T-FINANCE-DATA-05 | industry 归一化：按涨跌幅降序 + top_n 截断 | 输出顺序按 change_pct 从大到小，长度 ≤ top_n | unit |
+
+### T-FINANCE-TOOL: finance 工具按 route 隔离
+
+| 用例 | 操作 | 期望 | 标记 |
+|------|------|------|------|
+| T-FINANCE-TOOL-01 | discover finance 子包后查询 7 个工具 tag | 全部带 `"finance"` tag | unit |
+| T-FINANCE-TOOL-02 | `filter_tools_by_route(tools, "chat")` | 7 个 finance 工具被剔除；calculator/web_search 仍存在 | unit |
+| T-FINANCE-TOOL-03 | `filter_tools_by_route(tools, "finance")` | 7 个 finance 工具全部保留 | unit |
+
+### T-FINANCE-ROUTE: finance 路由 + 路由专用 system prompt
+
+| 用例 | 操作 | 期望 | 标记 |
+|------|------|------|------|
+| T-FINANCE-ROUTE-01 | 检查 `_ROUTE_CANDIDATES` | 含 `finance`；`search_code` 在 `search` 之前（防止部分匹配） | unit |
+| T-FINANCE-ROUTE-02 | `build_messages(conv, route="finance")` | SystemMessage 含"金融分析模式"+"不构成投资建议" | unit |
+| T-FINANCE-ROUTE-03 | `build_messages(conv, route="chat")` | SystemMessage 不含 finance prompt | unit |
+
 ---
 
 ## 十一、spec 对照检查（改代码后必跑）
@@ -575,6 +608,10 @@ pytest tests/ -m smoke         # 冒烟拨测（端到端）
 | llm/ 客户端 | T-LLM-* |
 | graph/edges.py 路由 | T-EDGE-* |
 | quant/ 量化模块 | T-QUANT-* |
+| quant/ analyze thinking | T-QUANT-ANALYZE-* |
+| quant/data/ 财经数据层 | T-FINANCE-DATA-* |
+| tools/builtin/finance/ 工具 | T-FINANCE-TOOL-* |
+| route_node + finance prompt | T-FINANCE-ROUTE-* |
 | 任何改动 | T-SMOKE-* (冒烟) |
 | 新增工具 | T-SANDBOX-03 + T-SMOKE-03 |
 | 新增 SSE 事件 | T-FSM-05 + T-STREAM-03 |

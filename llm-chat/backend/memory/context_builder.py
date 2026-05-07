@@ -70,6 +70,16 @@ def build_messages(
         f"{base_prompt}\n\n当前日期：{today}。搜索时直接用核心关键词，不要手动添加年份。"
     )
 
+    # Layer 1.5: 路由专用约束（如有 prompts/routes/{route}.md 文件就注入）
+    if route:
+        try:
+            from prompts import load_prompt
+            route_prompt = load_prompt(f"routes/{route}")
+            if route_prompt:
+                layers.append(route_prompt)
+        except FileNotFoundError:
+            pass  # 该路由无专用 prompt，跳过
+
     # Layer 2: 项目规则（硬约束 —— 用户显式声明的项目级约束）
     if core["project_rules"]:
         layers.append(_format_list("项目规则（硬约束，优先遵守）", core["project_rules"]))

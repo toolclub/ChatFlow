@@ -28,7 +28,7 @@ from prompts import load_prompt
 _ROUTE_PROMPT = load_prompt("nodes/route")
 
 # 路由标签优先顺序（search_code 必须在 search 之前，防止部分匹配）
-_ROUTE_CANDIDATES = ("search_code", "search", "code", "chat")
+_ROUTE_CANDIDATES = ("search_code", "search", "finance", "code", "chat")
 
 
 class RouteNode(BaseNode):
@@ -117,7 +117,7 @@ class RouteNode(BaseNode):
         # 仅当 VisionNode 降级失败（vision_desc 为空）且有原始图片时，
         # 才回退到视觉模型，保证降级安全。
         answer_model = ROUTE_MODEL_MAP.get(route, state["model"])
-        needs_tools  = route in ("search", "search_code")
+        needs_tools  = route in ("search", "search_code", "finance")
         tool_model   = SEARCH_MODEL if needs_tools else answer_model
 
         if has_images and not vision_desc:

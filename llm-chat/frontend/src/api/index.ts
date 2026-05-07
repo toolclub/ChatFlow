@@ -630,30 +630,66 @@ export async function runQuantScreen(criteria: QuantScreenCriteria): Promise<Qua
   return post('/api/quant/screen', criteria)
 }
 
+export interface StreamQuantAnalyzeHandlers {
+  /** 推理过程 token（reasoning_content）—— 推理模型才会推送，走思考块 UI */
+  onThinking?: (text: string) => void
+  /** 最终内容增量 token */
+  onDelta: (text: string) => void
+  /** 解析后的结构化结果 */
+  onDone: (
+    analysis: string,
+    riskNotes: string[],
+    thinkingSegments?: Array<{ node: string; step_index: number | null; phase: string; content: string }>,
+  ) => void
+  onError: (msg: string) => void
+}
+
 /**
- * 流式订阅快照分析。后端按 SSE 推送 delta / done / error 三类事件。
+ * 流式订阅快照分析。后端按 SSE 推送 thinking / delta / done / error 四类事件。
  *
- *   onDelta:  每个 LLM token（含 JSON 控制字符，调用方负责剥离展示）
- *   onDone:   收到 {analysis, risk_notes} 结构化结果
- *   onError:  服务端报错或网络断开
+ *   onThinking: reasoning_content 增量（推理模型，无则不推）
+ *   onDelta:    最终内容 token 增量（含 JSON 控制字符，调用方负责剥离展示）
+ *   onDone:     {analysis, risk_notes, thinking_segments} 结构化结果
+ *   onError:    服务端报错或网络断开
+ *
+ * 旧调用方式（前 4 个独立回调参数）保留向后兼容。
  */
 export async function streamQuantAnalyze(
   snapshotId: string,
-  onDelta: (text: string) => void,
-  onDone: (analysis: string, riskNotes: string[]) => void,
-  onError: (msg: string) => void,
-  signal?: AbortSignal,
+  ...rest:
+    | [handlers: StreamQuantAnalyzeHandlers, signal?: AbortSignal]
+    | [
+        onDelta: (text: string) => void,
+        onDone: (analysis: string, riskNotes: string[]) => void,
+        onError: (msg: string) => void,
+        signal?: AbortSignal,
+      ]
 ): Promise<void> {
+  // 解析两种调用形态
+  let handlers: StreamQuantAnalyzeHandlers
+  let signal: AbortSignal | undefined
+  if (typeof rest[0] === 'object' && rest[0] !== null && 'onDelta' in (rest[0] as object)) {
+    handlers = rest[0] as StreamQuantAnalyzeHandlers
+    signal = rest[1] as AbortSignal | undefined
+  } else {
+    handlers = {
+      onDelta: rest[0] as (text: string) => void,
+      onDone: rest[1] as (analysis: string, riskNotes: string[]) => void,
+      onError: rest[2] as (msg: string) => void,
+    }
+    signal = rest[3] as AbortSignal | undefined
+  }
+
   const res = await fetchWithAuth(`${API_BASE}/api/quant/snapshot/${snapshotId}/analyze`, {
     signal,
   })
   if (!res.ok) {
-    onError(`分析请求失败 (HTTP ${res.status})`)
+    handlers.onError(`分析请求失败 (HTTP ${res.status})`)
     return
   }
   const reader = res.body?.getReader()
   if (!reader) {
-    onError('浏览器不支持流式读取')
+    handlers.onError('浏览器不支持流式读取')
     return
   }
   const decoder = new TextDecoder()
@@ -663,9 +699,15 @@ export async function streamQuantAnalyze(
     if (!line.startsWith('data: ')) return
     try {
       const ev = JSON.parse(line.slice(6))
-      if (ev.event === 'delta' && typeof ev.text === 'string') onDelta(ev.text)
-      else if (ev.event === 'done') onDone(ev.analysis || '', ev.risk_notes || [])
-      else if (ev.event === 'error') onError(String(ev.message || '分析失败'))
+      if (ev.event === 'thinking' && typeof ev.text === 'string') {
+        handlers.onThinking?.(ev.text)
+      } else if (ev.event === 'delta' && typeof ev.text === 'string') {
+        handlers.onDelta(ev.text)
+      } else if (ev.event === 'done') {
+        handlers.onDone(ev.analysis || '', ev.risk_notes || [], ev.thinking_segments || [])
+      } else if (ev.event === 'error') {
+        handlers.onError(String(ev.message || '分析失败'))
+      }
     } catch {}
   }
 
@@ -680,6 +722,6 @@ export async function streamQuantAnalyze(
     }
     if (buffer.trim()) processLine(buffer.trim())
   } catch (e: any) {
-    if (!signal?.aborted) onError(e?.message || '连接中断')
+    if (!signal?.aborted) handlers.onError(e?.message || '连接中断')
   }
 }

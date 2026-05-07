@@ -81,9 +81,13 @@ class CallModelAfterToolNode(BaseNode):
             last_tool_failed = await self._check_last_tool_failed(state)
             messages = self._inject_boundary(messages, plan, current_idx, last_tool_failed)
 
-        # ── 工具绑定：始终绑定全部工具，让模型自主决定是否搜索/执行代码 ────
-        use_tools = bool(self._tools)
-        tools_schema = self._tools_to_openai_schema(self._tools) if use_tools else None
+        # ── 工具绑定：先按 route 过滤（finance 工具仅在 finance 路由暴露），
+        #            然后让模型自主决定是否搜索/执行代码 ────
+        from tools import filter_tools_by_route
+        route = state.get("route", "")
+        bound_tools = filter_tools_by_route(self._tools, route)
+        use_tools = bool(bound_tools)
+        tools_schema = self._tools_to_openai_schema(bound_tools) if use_tools else None
 
         logger.info(
             "call_model_after_tool 开始 | conv=%s | model=%s | step=%s/%s | "

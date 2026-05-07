@@ -188,6 +188,7 @@ async def read_snapshot(snapshot_id: str, user: CurrentUser) -> dict:
         "provider_trace": snap.provider_trace,
         "analysis":       snap.analysis or "",
         "risk_notes":     snap.risk_notes or [],
+        "thinking_segments": snap.thinking_segments or [],
         "created_at":     snap.created_at,
     }
 
@@ -212,9 +213,10 @@ async def analyze_snapshot(
 ) -> StreamingResponse:
     """SSE 流式分析。前端 fetch ReadableStream 或 EventSource 订阅。
 
-    协议：
-      data: {"event":"delta","text":"..."}
-      data: {"event":"done","analysis":"...","risk_notes":[...]}
+    协议（spec §模型思考流程，phase 与 messages.thinking_segments 同形）：
+      data: {"event":"thinking","text":"..."}                        # reasoning_content
+      data: {"event":"delta","text":"..."}                           # 最终内容增量
+      data: {"event":"done","analysis":"...","risk_notes":[...],"thinking_segments":[...]}
       data: {"event":"error","message":"..."}
     """
     _ensure_enabled()

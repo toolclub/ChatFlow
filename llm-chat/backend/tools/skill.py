@@ -180,6 +180,13 @@ class SkillRegistry:
             return entry[1].display_mode
         return "default"
 
+    def get_tool_tags(self, tool_name: str) -> list[str]:
+        """查询工具的 TAGS 列表（供按 route 过滤等调用方使用）。"""
+        entry = self._tools.get(tool_name)
+        if entry:
+            return list(entry[1].tags)
+        return []
+
     # ── 查询 ─────────────────────────────────────────────────────────────────
 
     def get_all_tools(self) -> list[BaseTool]:

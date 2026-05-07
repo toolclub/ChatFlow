@@ -57,6 +57,7 @@
 | call_model_after_tool | 同上 | — | 同上 | 同上 |
 | reflector | LLM reasoning_content | LLM content（JSON 生成过程） | state.current_step_index | 最终决策由 reflection 事件推送 |
 | vision | — | 视觉模型输出 | null | 图像分析描述作为 content phase 落在思考区 |
+| quant_analyze | LLM reasoning_content | LLM content（JSON 生成过程） | null | 独立 graph（quant_agent.analyze_graph），不在主 chat 流；最终 analysis/risk_notes 解析后回写 `quant_snapshots.analysis`、`quant_snapshots.thinking_segments` |
 
 ### 铁律
 

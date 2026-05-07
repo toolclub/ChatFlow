@@ -219,11 +219,11 @@ class SaveResponseNode(BaseNode):
                 conv, SEMANTIC_CACHE_NAMESPACE_MODE, client_id
             )
             # Write-through 策略：只有 DB 写入成功后才写缓存（防止缓存中毒）
-            # 所有路由都带 TTL 兜底，search 类 2h，chat/code 类 24h
-            # 即使缓存写入了错误数据，TTL 到期后自动过期
+            # 所有路由都带 TTL 兜底：search/finance 类 2h（外部数据时效短），
+            # chat/code 类 24h。即使缓存写入了错误数据，TTL 到期后自动过期。
             ttl = (
                 SEMANTIC_CACHE_SEARCH_TTL_HOURS * 3600
-                if route in ("search", "search_code")
+                if route in ("search", "search_code", "finance")
                 else 24 * 3600  # chat/code 24 小时 TTL 兜底
             )
             await cache.store(user_msg, full_response, namespace, ttl_seconds=ttl)

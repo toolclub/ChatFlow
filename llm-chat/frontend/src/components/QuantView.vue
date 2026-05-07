@@ -249,6 +249,15 @@ watch(activeMarket, (newMarket) => {
               <span v-if="quant.isAnalyzing.value" class="analyze-pulse">分析中…</span>
             </div>
             <div class="analysis-body">
+              <!-- 推理过程（reasoning_content）— 仅推理模型推送，可折叠 -->
+              <details v-if="quant.analysisThinking.value" class="thinking-block">
+                <summary>
+                  <el-icon><ChatLineRound /></el-icon>
+                  推理过程
+                  <span class="thinking-len">({{ quant.analysisThinking.value.length }} 字)</span>
+                </summary>
+                <pre class="thinking-text">{{ quant.analysisThinking.value }}</pre>
+              </details>
               <p class="analysis-text">
                 {{ quant.screenResult.value.analysis
                    || (quant.isAnalyzing.value ? '正在生成深度分析...' : '') }}
@@ -659,6 +668,41 @@ watch(activeMarket, (newMarket) => {
 }
 .analysis-body {
   padding: 16px 20px;
+}
+.thinking-block {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  background: var(--cf-bg-2, #f5f7fa);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--cf-text-3);
+}
+.thinking-block summary {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+}
+.thinking-block .thinking-len {
+  margin-left: 4px;
+  color: var(--cf-text-4);
+  font-weight: 400;
+}
+.thinking-block .thinking-text {
+  margin: 8px 0 0;
+  padding: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--cf-text-3);
+  background: var(--cf-card, #fff);
+  border-radius: 4px;
+  max-height: 240px;
+  overflow-y: auto;
 }
 .analysis-text {
   font-size: 14px;

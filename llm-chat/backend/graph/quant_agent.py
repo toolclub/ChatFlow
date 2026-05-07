@@ -7,22 +7,28 @@
   - 把 LLM 从 /screen 拆出去 = 前端先看到表格（5-10s），再异步流入洞察（5-30s）
   - LLM 调用走流式（spec.md 铁律 #6），通过 yield SSE chunk 推到前端
   - 风险提示用 JSON 结构化输出，避免字符串切割误差
+  - analyze_graph 是真正的 LangGraph，通过 astream_events 驱动，节点内 emit_thinking
+    保证 spec §模型思考流程铁律 #1（thinking 必须走 BaseNode.emit_thinking 统一入口）
 """
 from __future__ import annotations
 
-import json
 import logging
 import time
-import uuid
 from typing import AsyncGenerator, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from config import CHAT_MODEL
-from db.quant_store import save_quant_snapshot, update_quant_analysis, update_quant_snapshot
-from llm.chat import get_chat_llm
+from db.quant_store import update_quant_analysis, update_quant_snapshot
+from graph.nodes.quant import AnalyzeNode
+from graph.nodes.quant.analyze_node import AnalyzeState, _parse_analysis_json  # 向后兼容旧测试
 from quant.domain import ScreenCriteria
 from quant.service import get_service
+
+__all__ = [
+    "screen_graph", "analyze_graph", "quant_graph",
+    "background_screen", "stream_analyze",
+    "_parse_analysis_json",  # 旧测试入口（迁移到 analyze_node 后保留兼容）
+]
 
 logger = logging.getLogger("graph.quant_agent")
 
@@ -123,18 +129,23 @@ async def background_screen(snapshot_id: str, client_id: str, criteria: dict, us
         await update_quant_snapshot(snapshot_id, [], [], status="FAILED")
 
 
-# ── analyze 流式：直接生成器，不入 LangGraph ──────────────────────────────────
-# spec 铁律 #6：LLM 调用必须流式。这里直接走 LLMClient.astream，
-# 同时 yield 给上层封装成 SSE。完成后回写 DB。
+# ── analyze_graph：LangGraph 节点 + astream_events 驱动 ──────────────────────
+# spec §模型思考流程铁律 #1：thinking 必须走 BaseNode.emit_thinking 统一入口，
+# 而 emit_thinking 内部用 adispatch_custom_event 派发，要求在 LangGraph 执行链路中。
+# 因此把 analyze 包成 StateGraph，由 astream_events 接到 llm_thinking 自定义事件。
 
-_ANALYZE_SYSTEM = (
-    "你是一名专业的量化分析师。基于给定的选股结果，按以下 JSON Schema 严格输出（不要 Markdown 代码块）：\n"
-    "{\n"
-    '  "analysis": "2-4 句话总结候选标的的整体特征（行业/估值/动量/集中度等）",\n'
-    '  "risk_notes": ["不超过 3 条独立的风险提示，每条短句"]\n'
-    "}\n"
-    "禁止输出多余文字。"
-)
+_analyze_node = AnalyzeNode()
+
+
+def _build_analyze_graph():
+    builder = StateGraph(AnalyzeState)
+    builder.add_node("quant_analyze", _analyze_node.execute)
+    builder.add_edge(START, "quant_analyze")
+    builder.add_edge("quant_analyze", END)
+    return builder.compile()
+
+
+analyze_graph = _build_analyze_graph()
 
 
 async def stream_analyze(
@@ -144,120 +155,101 @@ async def stream_analyze(
     *,
     top_n_for_llm: int = 5,
 ) -> AsyncGenerator[dict, None]:
-    """
-    流式分析。yield 事件 dict，由路由层包成 SSE：
+    """流式分析。yield 事件 dict，由路由层包成 SSE：
 
-      {"event": "delta", "text": "..."}            # 增量 token
-      {"event": "done",  "analysis": ..., "risk_notes": [...]}
-      {"event": "error", "message": "..."}
+      {"event": "thinking", "text": "..."}                    # reasoning_content（推理过程）
+      {"event": "delta",    "text": "..."}                    # content（最终 JSON 增量）
+      {"event": "done",     "analysis": ..., "risk_notes": [...], "thinking_segments": [...]}
+      {"event": "error",    "message": "..."}
 
-    完成后会把结构化结果回写 DB（update_quant_analysis）。
+    完成后通过 update_quant_analysis 回写 analysis / risk_notes / thinking_segments 到 DB。
     """
     if not rows:
+        empty_msg = "未筛选到任何符合条件的股票。"
         yield {
             "event": "done",
-            "analysis": "未筛选到任何符合条件的股票。",
+            "analysis": empty_msg,
             "risk_notes": [],
+            "thinking_segments": [],
         }
         try:
-            await update_quant_analysis(snapshot_id, "未筛选到任何符合条件的股票。", [])
+            await update_quant_analysis(snapshot_id, empty_msg, [], thinking_segments=[])
         except Exception as exc:
             logger.warning("回写空分析失败: %s", exc)
         return
 
-    payload_rows = [
-        {
-            "symbol": r.get("symbol"),
-            "name": r.get("name"),
-            "total": r.get("total"),
-            "technical": r.get("technical"),
-            "fundamental": r.get("fundamental"),
-            "liquidity": r.get("liquidity"),
-            "reasons": r.get("reasons", []),
-        }
-        for r in rows[:top_n_for_llm]
-    ]
-    user_prompt = (
-        f"选股条件：{json.dumps(criteria, ensure_ascii=False)}\n"
-        f"Top{len(payload_rows)} 结果：{json.dumps(payload_rows, ensure_ascii=False)}\n"
-        "请输出 JSON。"
-    )
+    state: AnalyzeState = {
+        "snapshot_id": snapshot_id,
+        "criteria": criteria,
+        "rows": rows,
+        "top_n_for_llm": top_n_for_llm,
+    }
 
-    messages = [
-        {"role": "system", "content": _ANALYZE_SYSTEM},
-        {"role": "user",   "content": user_prompt},
-    ]
-
-    llm = get_chat_llm(CHAT_MODEL, temperature=0.3)
-    buffer_parts: list[str] = []
+    final_state: dict = {}
     t0 = time.perf_counter()
 
     try:
-        async for delta in llm.astream(messages, temperature=0.3, timeout=120.0):
-            if not isinstance(delta, str):
+        # version="v2" 是 LangGraph 推荐的事件流格式
+        async for ev in analyze_graph.astream_events(state, version="v2"):
+            ev_type = ev.get("event", "")
+
+            # 节点内通过 emit_thinking 派发的自定义事件
+            if ev_type == "on_custom_event" and ev.get("name") == "llm_thinking":
+                data = ev.get("data") or {}
+                phase = data.get("phase", "reasoning")
+                delta = data.get("delta", "")
+                if not delta:
+                    continue
+                if phase == "content":
+                    yield {"event": "delta", "text": delta}
+                else:
+                    yield {"event": "thinking", "text": delta}
                 continue
-            # 推理 token（GLM/DeepSeek-R1）以 \x00THINK\x00 前缀，过滤掉只取最终内容
-            if delta.startswith("\x00THINK\x00"):
-                continue
-            buffer_parts.append(delta)
-            yield {"event": "delta", "text": delta}
+
+            # 节点结束：捕获最终 state（包含 analysis / risk_notes / thinking_segments）
+            if ev_type == "on_chain_end" and ev.get("name") == "quant_analyze":
+                output = (ev.get("data") or {}).get("output") or {}
+                if isinstance(output, dict):
+                    final_state.update(output)
+
+            # graph 结束：兜底捕获最终 state
+            if ev_type == "on_chain_end" and ev.get("name") == "LangGraph":
+                output = (ev.get("data") or {}).get("output") or {}
+                if isinstance(output, dict):
+                    final_state.update(output)
     except Exception as exc:
-        logger.warning("LLM 流式失败 snapshot=%s err=%s", snapshot_id, exc)
+        logger.warning("analyze_graph 流式异常 snapshot=%s err=%s", snapshot_id, exc)
         yield {"event": "error", "message": f"LLM 分析失败：{exc}"}
         return
 
-    raw = "".join(buffer_parts).strip()
-    analysis, risk_notes = _parse_analysis_json(raw)
+    analysis = final_state.get("analysis", "")
+    risk_notes = final_state.get("risk_notes", []) or []
+    thinking_segments = final_state.get("thinking_segments", []) or []
+    err = final_state.get("error", "")
+
     elapsed = (time.perf_counter() - t0) * 1000
     logger.info(
-        "stream_analyze 完成 snapshot=%s tokens=%d elapsed=%.0fms risk=%d",
-        snapshot_id, len(buffer_parts), elapsed, len(risk_notes),
+        "stream_analyze 完成 snapshot=%s elapsed=%.0fms risk=%d thinking_segs=%d err=%s",
+        snapshot_id, elapsed, len(risk_notes), len(thinking_segments), err or "-",
     )
 
     try:
-        await update_quant_analysis(snapshot_id, analysis, risk_notes)
+        await update_quant_analysis(
+            snapshot_id, analysis, risk_notes, thinking_segments=thinking_segments,
+        )
     except Exception as exc:
         logger.warning("回写分析失败 snapshot=%s err=%s", snapshot_id, exc)
 
-    yield {"event": "done", "analysis": analysis, "risk_notes": risk_notes}
+    if err:
+        yield {"event": "error", "message": err}
+        return
 
-
-def _parse_analysis_json(raw: str) -> tuple[str, list[str]]:
-    """容错解析 LLM JSON 输出：
-      1. 优先 json.loads 整段
-      2. 失败则提取首对 { ... }
-      3. 再失败则把整段当 analysis、空风险列表
-    """
-    if not raw:
-        return "", []
-    try:
-        obj = json.loads(raw)
-        return _extract_fields(obj)
-    except json.JSONDecodeError:
-        pass
-
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if 0 <= start < end:
-        snippet = raw[start : end + 1]
-        try:
-            obj = json.loads(snippet)
-            return _extract_fields(obj)
-        except json.JSONDecodeError:
-            pass
-
-    return raw, []
-
-
-def _extract_fields(obj) -> tuple[str, list[str]]:
-    if not isinstance(obj, dict):
-        return str(obj), []
-    analysis = str(obj.get("analysis", "")).strip()
-    rn = obj.get("risk_notes") or []
-    if isinstance(rn, str):
-        rn = [rn]
-    risk_notes = [str(x).strip() for x in rn if str(x).strip()][:5]
-    return analysis, risk_notes
+    yield {
+        "event": "done",
+        "analysis": analysis,
+        "risk_notes": risk_notes,
+        "thinking_segments": thinking_segments,
+    }
 
 
 # ── 向后兼容：保留旧名 quant_graph 指向 screen_graph ──────────────────────────

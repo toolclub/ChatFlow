@@ -107,8 +107,13 @@ async def update_quant_analysis(
     snapshot_id: str,
     analysis: str,
     risk_notes: list[str],
+    thinking_segments: list[dict] | None = None,
 ) -> None:
-    """异步分析完成后回写 analysis / risk_notes（同 snapshot 行）。"""
+    """异步分析完成后回写 analysis / risk_notes / thinking_segments（同 snapshot 行）。
+
+    thinking_segments 遵循 spec §模型思考流程的结构化协议：
+      [{"node":"quant_analyze", "step_index": null, "phase":"reasoning"|"content", "content":"..."}]
+    """
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(QuantSnapshotModel).where(QuantSnapshotModel.id == snapshot_id)
@@ -118,6 +123,8 @@ async def update_quant_analysis(
             return
         snapshot.analysis = analysis or ""
         snapshot.risk_notes = list(risk_notes or [])
+        if thinking_segments is not None:
+            snapshot.thinking_segments = list(thinking_segments)
         await session.commit()
 
 async def cleanup_stale_quant_sessions(timeout_minutes: int | None = None) -> int:

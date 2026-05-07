@@ -20,6 +20,8 @@ export function useQuant(initialMarket?: string) {
   const screenResult = ref<QuantScreenResult | null>(null)
   const errorMsg = ref<string>('')
   const analysisStreaming = ref<string>('')
+  // 推理过程（reasoning_content）— 仅推理模型推送；展示在思考折叠块
+  const analysisThinking = ref<string>('')
 
   const cacheStatus = ref<QuantCacheStatus | null>(null)
 
@@ -125,6 +127,7 @@ export function useQuant(initialMarket?: string) {
     isAnalyzing.value = false
     errorMsg.value = ''
     analysisStreaming.value = ''
+    analysisThinking.value = ''
     _startStageHint()
     try {
       // 1. 发起选股（后端立即返回 ID）
@@ -211,26 +214,32 @@ export function useQuant(initialMarket?: string) {
   async function startAnalyze(snapshotId: string) {
     isAnalyzing.value = true
     analysisStreaming.value = ''
+    analysisThinking.value = ''
     _analyzeAbort = new AbortController()
     try {
       await api.streamQuantAnalyze(
         snapshotId,
-        (delta) => {
-          analysisStreaming.value += delta
-          if (screenResult.value) {
-            screenResult.value.analysis = analysisStreaming.value
-          }
-        },
-        (analysis, riskNotes) => {
-          if (screenResult.value) {
-            screenResult.value.analysis = analysis || analysisStreaming.value
-            screenResult.value.risk_notes = riskNotes || []
-          }
-        },
-        (msg) => {
-          if (screenResult.value && !screenResult.value.analysis) {
-            screenResult.value.analysis = `（分析失败：${msg}）`
-          }
+        {
+          onThinking: (text) => {
+            analysisThinking.value += text
+          },
+          onDelta: (delta) => {
+            analysisStreaming.value += delta
+            if (screenResult.value) {
+              screenResult.value.analysis = analysisStreaming.value
+            }
+          },
+          onDone: (analysis, riskNotes) => {
+            if (screenResult.value) {
+              screenResult.value.analysis = analysis || analysisStreaming.value
+              screenResult.value.risk_notes = riskNotes || []
+            }
+          },
+          onError: (msg) => {
+            if (screenResult.value && !screenResult.value.analysis) {
+              screenResult.value.analysis = `（分析失败：${msg}）`
+            }
+          },
         },
         _analyzeAbort.signal,
       )
@@ -258,6 +267,7 @@ return {
   errorMsg,
   criteria,
   analysisStreaming,
+  analysisThinking,
   cacheStatus,
   cacheAgeText,
   loadProviders,

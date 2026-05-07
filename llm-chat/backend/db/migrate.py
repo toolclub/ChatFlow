@@ -205,6 +205,9 @@ _MIGRATIONS = [
     )""",
     "CREATE INDEX IF NOT EXISTS ix_usage_user_created ON user_usage_logs(user_id, created_at)",
     "CREATE INDEX IF NOT EXISTS ix_usage_client_created ON user_usage_logs(client_id, created_at)",
+
+    # ── quant_snapshots 补字段（结构化思考段，spec §模型思考流程） ──
+    "ALTER TABLE quant_snapshots ADD COLUMN IF NOT EXISTS thinking_segments JSONB NOT NULL DEFAULT '[]'",
 ]
 
 

@@ -252,6 +252,7 @@ class QuantSnapshotModel(Base):
     provider_trace = Column(JSONB, nullable=False)
     analysis = Column(Text, nullable=False, default="")
     risk_notes = Column(JSONB, nullable=False, default=list)
+    thinking_segments = Column(JSONB, nullable=False, default=list)
     status = Column(String(20), nullable=False, default="DONE")
     created_at = Column(Float, nullable=False)
 

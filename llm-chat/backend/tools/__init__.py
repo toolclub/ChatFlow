@@ -64,3 +64,23 @@ def get_tools_info() -> list[dict]:
 
 def get_tools_guidance(route: str = "") -> str:
     return _registry.build_guidance(route=route)
+
+
+def get_tool_tags(tool_name: str) -> list[str]:
+    return _registry.get_tool_tags(tool_name)
+
+
+def filter_tools_by_route(tools: list[BaseTool], route: str) -> list[BaseTool]:
+    """根据路由过滤工具列表。
+
+    规则：
+      - finance 路由：暴露所有工具
+      - 其他路由（chat / code / search / search_code）：剔除带 "finance" tag 的工具
+
+    设计依据（spec.md §"新增功能 checklist" + skill.py 注释）：
+      build_guidance 已避免在 guidance 层做"隐式 tag 字典"映射，
+      工具可见性控制留在工具绑定层（即此处）。
+    """
+    if route == "finance":
+        return list(tools)
+    return [t for t in tools if "finance" not in _registry.get_tool_tags(t.name)]

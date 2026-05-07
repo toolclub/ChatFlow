@@ -102,6 +102,8 @@ async def lifespan(app: FastAPI):
 
     # 5. 注册内置工具（tools/builtin/ 目录，不依赖外部服务）
     discover("tools.builtin")
+    # 5.1 注册 finance 子包（pkgutil.iter_modules 不递归，需显式发现）
+    discover("tools.builtin.finance")
 
     # 5.5 加载 MCP 工具
     if MCP_SERVERS:

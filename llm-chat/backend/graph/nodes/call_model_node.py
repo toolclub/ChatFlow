@@ -116,10 +116,13 @@ class CallModelNode(BaseNode):
         temperature = state["temperature"]
         conv_id     = state.get("conv_id", "")
 
-        # 工具绑定策略：有工具就全部绑定，让模型自主判断何时搜索/执行代码
+        # 工具绑定策略：先按 route 过滤（finance 工具仅在 finance 路由暴露），
+        # 然后让模型自主判断何时搜索/执行代码。
         is_intermediate_plan_step = bool(plan) and cur_idx < len(plan) - 1
-        use_tools = bool(self._tools)
-        tools_schema = self._tools_to_openai_schema(self._tools) if use_tools else None
+        from tools import filter_tools_by_route
+        bound_tools = filter_tools_by_route(self._tools, route)
+        use_tools = bool(bound_tools)
+        tools_schema = self._tools_to_openai_schema(bound_tools) if use_tools else None
 
         # ── 消息列表（本地副本，有计划时做上下文隔离，防止模型提前执行后续步骤） ──
         current_idx = cur_idx
