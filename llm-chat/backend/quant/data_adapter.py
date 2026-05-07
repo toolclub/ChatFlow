@@ -201,23 +201,25 @@ class CachedDataAdapter:
                 return cached[cached["symbol"].astype(str).isin(sym_set)].reset_index(drop=True)
             return pd.DataFrame()
 
-        # 2) 增量回源：仅请求缺失的标的
+        # 2) 回源策略：
+        #    - 缓存日期陈旧（is_fresh=False）→ 全部标的都要拉最新日，不能只拉 missing
+        #    - 缓存日期新鲜但有 missing 标的 → 只拉 missing
         cached_syms = set(cached["symbol"].astype(str).unique()) if cached is not None and not cached.empty else set()
         missing_syms = list(sym_set - cached_syms)
 
-        # 标的齐全但日期陈旧 → 强制全量回源补最新日（drop_duplicates 保留 cached
-        # 的旧记录，新增日期由 new_df 提供，merge 后日期范围扩展）。
-        if not missing_syms and not is_fresh:
+        if not is_fresh:
+            # 不新鲜：无论 missing 多少，全量重拉到最新日（merge 时 drop_duplicates
+            # keep=first 保留 cached 旧记录，new_df 只补足新增日期）。
             missing_syms = list(sym_set)
             logger.info(
-                "bars 缓存日期陈旧 market=%s max_cached=%s expected=%s → 强制全量回源",
-                market, cached_max_date, compare_target,
+                "bars 缓存日期陈旧 market=%s max_cached=%s expected=%s → 强制全量回源 (%d 只)",
+                market, cached_max_date, compare_target, len(missing_syms),
             )
-
-        if not missing_syms:
+        elif not missing_syms:
+            # 新鲜且全部命中 → 直接返回缓存
             return cached[cached["symbol"].astype(str).isin(sym_set)].reset_index(drop=True) if cached is not None else pd.DataFrame()
-
-        logger.info("bars 缓存缺失: %d/%d, 仅请求缺失标的", len(missing_syms), len(sym_set))
+        else:
+            logger.info("bars 缓存缺失: %d/%d, 仅请求缺失标的", len(missing_syms), len(sym_set))
 
         async def invoker(provider):
             df = await provider.daily_bars(

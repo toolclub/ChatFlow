@@ -216,18 +216,28 @@ class YFinanceUSProvider:
         frames: list[pd.DataFrame] = []
         for sym in tickers:
             try:
-                if len(tickers) == 1:
+                if isinstance(raw.columns, pd.MultiIndex):
+                    # 多 ticker（或新版 yfinance 单 ticker）→ MultiIndex；按 ticker 切片
+                    if sym in raw.columns.get_level_values(1):
+                        sym_df = raw.xs(sym, axis=1, level=1)
+                    elif len(tickers) == 1:
+                        # 单 ticker 但 ticker 不在 level=1：可能 level=0；展平取该 ticker 列
+                        sym_df = raw.copy()
+                        sym_df.columns = sym_df.columns.get_level_values(0)
+                    else:
+                        sym_df = None
+                elif len(tickers) == 1:
+                    # 单层 columns（旧版 yfinance 单 ticker 行为）
                     sym_df = raw
-                elif isinstance(raw.columns, pd.MultiIndex):
-                    sym_df = raw.xs(sym, axis=1, level=1)
                 else:
                     sym_df = raw.get(sym)
-                    if sym_df is None:
-                        sym_df = raw.xs(sym, axis=1, level=1) if sym in raw.columns.get_level_values(1) else None
 
                 if sym_df is None or sym_df.empty:
                     continue
                 sym_df = sym_df.reset_index()
+                # 防御：reset_index 后若 columns 仍是 MultiIndex，硬性展平到第 0 级
+                if isinstance(sym_df.columns, pd.MultiIndex):
+                    sym_df.columns = [c[0] if isinstance(c, tuple) else c for c in sym_df.columns]
                 sym_df["symbol"] = sym
                 sym_df = sym_df.rename(columns={
                     "Date": "date",

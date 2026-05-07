@@ -172,6 +172,63 @@ def test_bars_cover_full_but_stale_forces_refetch(monkeypatch, tmp_path):
 
 
 @pytest.mark.unit
+def test_bars_partial_cover_and_stale_forces_full_refetch(monkeypatch, tmp_path):
+    """T-ADAPTER-FRESH-08b：cover_ratio 高（97%）但日期陈旧 → 仍然全量回源（不只拉缺失的）。
+
+    修复 missing=1 + stale 时只拉 1 只导致剩 44 只日期不更新的 bug。
+    """
+    from quant import cache_disk
+    from quant.data_adapter import CachedDataAdapter
+
+    monkeypatch.setattr("quant.cache_disk.QUANT_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "quant.data_adapter._expected_last_trading_day",
+        lambda market, now=None: date(2026, 5, 7),
+    )
+
+    # 缓存：44 只标的，最新日 2026-05-04（陈旧）
+    stale = pd.DataFrame([
+        {"symbol": f"S{i}.US", "date": "2026-05-04", "close": 100.0}
+        for i in range(44)
+    ])
+    async def _fake_read(market, s, e):
+        return stale, None
+    monkeypatch.setattr(cache_disk, "read_bars_range", _fake_read)
+    async def _fake_read_sym(market, sym, s, e):
+        return stale[stale["symbol"] == sym]
+    monkeypatch.setattr(cache_disk, "read_bars_for_symbol", _fake_read_sym)
+
+    fresh = pd.DataFrame([
+        {"symbol": s, "date": d, "close": 999.0}
+        for s in [f"S{i}.US" for i in range(45)]
+        for d in ("2026-05-05", "2026-05-06", "2026-05-07")
+    ])
+    captured: dict = {}
+    async def _fake_write(market, df):
+        captured["written"] = df
+    monkeypatch.setattr(cache_disk, "write_bars", _fake_write)
+
+    fake_reg = _FakeRegistry(fresh)
+    adapter = CachedDataAdapter(registry=fake_reg)
+
+    # 请求 45 只（44 在缓存 + 1 missing）
+    requested = [f"S{i}.US" for i in range(45)]
+    asyncio.run(adapter.bars(
+        symbols=requested,
+        start="2026-04-01", end="2026-05-07",
+        market="us_stock",
+    ))
+
+    # 关键验证：尽管 cover_ratio = 44/45 = 97.7%（>= 80%），
+    # 但 stale 应触发全量回源 → registry 收到的请求含全部 45 只标的
+    assert len(fake_reg.calls) == 1
+    # written df 应含 45 只（不是 1 只）
+    assert "written" in captured
+    written_syms = set(captured["written"]["symbol"].astype(str).unique())
+    assert len(written_syms) == 45, f"陈旧时只回源了 {len(written_syms)} 只，期望 45"
+
+
+@pytest.mark.unit
 def test_bars_cover_full_and_fresh_uses_cache(monkeypatch, tmp_path):
     """T-ADAPTER-FRESH-09：缓存覆盖 + 日期新鲜 → 命中缓存，不回源。"""
     from quant import cache_disk
@@ -228,3 +285,44 @@ def test_yfinance_download_bars_passes_end_plus_one(monkeypatch):
     assert captured["start"] == "2026-05-01"
     assert captured["end"] == "2026-05-08", \
         f"yfinance end 应为请求 end +1 天（exclusive 修正），实际 {captured['end']}"
+
+
+@pytest.mark.unit
+def test_yfinance_download_bars_flattens_multiindex_for_single_ticker():
+    """T-ADAPTER-FRESH-11：yfinance 单 ticker 返回 MultiIndex columns 时正确展平。
+
+    防止 write_bars `drop_duplicates(subset=["symbol","date"])`
+    在 MultiIndex columns 上抛 `Index(['date','symbol'], dtype='str')` 错误。
+    """
+    from quant.providers import yfinance_us_provider as yf_mod
+
+    # 模拟新版 yfinance 单 ticker 也返回 MultiIndex columns
+    dates = pd.to_datetime(["2026-05-05", "2026-05-06", "2026-05-07"])
+    multi_cols = pd.MultiIndex.from_product(
+        [["Open", "High", "Low", "Close", "Volume"], ["AAPL"]]
+    )
+    raw = pd.DataFrame(
+        [[100, 102, 99, 101, 1_000_000],
+         [101, 103, 100, 102, 1_100_000],
+         [102, 104, 101, 103, 1_200_000]],
+        index=dates,
+        columns=multi_cols,
+    )
+    raw.index.name = "Date"
+
+    class _FakeYF:
+        @staticmethod
+        def download(tickers, start, end, auto_adjust, threads):
+            return raw
+
+    out = yf_mod.YFinanceUSProvider._download_bars(
+        _FakeYF, ["AAPL"], start="2026-05-01", end="2026-05-07",
+    )
+    # 列必须是单层（不能是 MultiIndex）
+    assert not isinstance(out.columns, pd.MultiIndex), \
+        f"输出 columns 应展平为单层，实际：{out.columns}"
+    # 关键列存在
+    for col in ("date", "symbol", "open", "close"):
+        assert col in out.columns, f"缺列 {col}: 实际 {list(out.columns)}"
+    assert (out["symbol"] == "AAPL").all()
+    assert len(out) == 3
