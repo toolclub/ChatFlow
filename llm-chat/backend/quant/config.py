@@ -38,3 +38,6 @@ QUANT_TUSHARE_BULK_WORKERS: int = int(getattr(settings, "quant_tushare_bulk_work
 QUANT_SPOT_FRESH_SECONDS: int = int(getattr(settings, "quant_spot_fresh_seconds", 3600))
 QUANT_FORCE_CACHE: bool = bool(getattr(settings, "quant_force_cache", True))
 QUANT_BARS_LOOKBACK_DAYS: int = int(getattr(settings, "quant_bars_lookback_days", 120))
+
+# yfinance_us universe 大小（按成交额降序取 top N，覆盖 K 线预热范围）
+QUANT_YFINANCE_US_UNIVERSE_SIZE: int = int(getattr(settings, "quant_yfinance_us_universe_size", 300))

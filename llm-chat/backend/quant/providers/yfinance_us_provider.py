@@ -133,7 +133,7 @@ class YFinanceUSProvider:
 
                     frames.append({
                         "symbol": f"{sym}.US",
-                        "name": "",
+                        "name": _TICKER_TO_CN_NAME.get(sym, ""),
                         "price": cur_price,
                         "change_pct": round(change_pct, 2),
                         "change_amount": round(cur_price - prev_close, 2),
@@ -258,39 +258,200 @@ class YFinanceUSProvider:
             result["date"] = pd.to_datetime(result["date"]).dt.strftime("%Y-%m-%d")
         return result
 
-    # ── universe ──────────────────────────────────────────────────────────
+    # ── universe（多源 fallback，全免费） ─────────────────────────────────────
 
     @staticmethod
     def _get_universe_tickers() -> list[str]:
-        """获取 S&P 500 成分股作为美股 universe。"""
-        try:
-            tables = pd.read_html(
-                "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-            )
-            tickers = tables[0]["Symbol"].tolist()
-            result = [str(t).replace(".", "-") for t in tickers if str(t).strip()]
-            logger.info("yfinance_us: Wikipedia S&P 500 获取成功，%d 只", len(result))
-            return result
-        except Exception as exc:
-            logger.warning("yfinance_us: Wikipedia S&P 500 获取失败: %s", exc)
+        """免费多源获取美股 universe（按优先级 fallback）：
 
-        try:
-            tables = pd.read_html(
-                "https://en.wikipedia.org/wiki/Nasdaq-100"
-            )
-            tickers = tables[4]["Ticker"].tolist()
-            result = [str(t).replace(".", "-") for t in tickers if str(t).strip()]
-            logger.info("yfinance_us: Wikipedia NASDAQ-100 获取成功，%d 只", len(result))
-            return result
-        except Exception as exc:
-            logger.warning("yfinance_us: Wikipedia NASDAQ-100 获取失败: %s", exc)
+          1. akshare `stock_us_spot_em` —— 东方财富全美股快照（5000+ 只），按成交额取 top N
+          2. stockanalysis.com —— S&P 500 + NASDAQ-100（~600 只去重）
+          3. Wikipedia + User-Agent —— 绕反爬抓 S&P 500 / NASDAQ-100
+          4. 内置 45 只兜底
 
-        fallback = [
-            "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B",
-            "JPM", "V", "JNJ", "WMT", "PG", "MA", "UNH", "HD", "BAC", "DIS",
-            "ADBE", "CRM", "NFLX", "INTC", "CSCO", "PEP", "KO", "MRK", "ABBV",
-            "ORCL", "AMD", "QCOM", "TMO", "COST", "ABT", "DHR", "NKE", "TXN",
-            "PM", "BMY", "RTX", "LOW", "UPS", "MS", "SCHW", "SPGI", "BLK",
-        ]
-        logger.warning("yfinance_us: 使用内置 fallback 列表，%d 只", len(fallback))
+        返回 Yahoo 格式 ticker（`.` 替换为 `-`，例如 BRK.B → BRK-B）。
+        """
+        from quant.config import QUANT_YFINANCE_US_UNIVERSE_SIZE
+        size = max(45, int(QUANT_YFINANCE_US_UNIVERSE_SIZE))
+
+        # 预先注册 45 只大盘股内置中文名（保底）；akshare 源后续会补充更多
+        _register_cn_names(_BUILTIN_FALLBACK_NAMES)
+
+        for src_name, src_fn in (
+            ("akshare",      _universe_from_akshare),
+            ("stockanalysis", _universe_from_stockanalysis),
+            ("wikipedia",    _universe_from_wikipedia),
+        ):
+            try:
+                tickers = src_fn(size)
+            except Exception as exc:
+                logger.warning("yfinance_us: universe 来源 %s 异常: %s", src_name, exc)
+                continue
+            if tickers:
+                logger.info("yfinance_us: universe 来源=%s，得到 %d 只", src_name, len(tickers))
+                return tickers[:size]
+
+        fallback = _BUILTIN_FALLBACK_TICKERS
+        # 同时注册内置中文名，让前端展示中文
+        _register_cn_names(_BUILTIN_FALLBACK_NAMES)
+        logger.warning("yfinance_us: 全部源失败，使用内置 fallback 列表，%d 只", len(fallback))
         return fallback
+
+
+# ── 内置 45 只兜底（带中文名，只在所有免费源都失败时用）─────────────────────
+
+_BUILTIN_FALLBACK_NAMES: dict[str, str] = {
+    "AAPL": "苹果", "MSFT": "微软", "GOOGL": "谷歌", "AMZN": "亚马逊",
+    "NVDA": "英伟达", "META": "Meta", "TSLA": "特斯拉", "BRK-B": "伯克希尔哈撒韦",
+    "JPM": "摩根大通", "V": "Visa", "JNJ": "强生", "WMT": "沃尔玛",
+    "PG": "宝洁", "MA": "万事达", "UNH": "联合健康", "HD": "家得宝",
+    "BAC": "美国银行", "DIS": "迪士尼", "ADBE": "Adobe", "CRM": "Salesforce",
+    "NFLX": "奈飞", "INTC": "英特尔", "CSCO": "思科", "PEP": "百事",
+    "KO": "可口可乐", "MRK": "默克", "ABBV": "艾伯维", "ORCL": "甲骨文",
+    "AMD": "AMD", "QCOM": "高通", "TMO": "赛默飞", "COST": "好市多",
+    "ABT": "雅培", "DHR": "丹纳赫", "NKE": "耐克", "TXN": "德州仪器",
+    "PM": "菲利普莫里斯", "BMY": "百时美施贵宝", "RTX": "雷神技术",
+    "LOW": "劳氏", "UPS": "联合包裹", "MS": "摩根士丹利", "SCHW": "嘉信理财",
+    "SPGI": "标普全球", "BLK": "贝莱德",
+}
+
+_BUILTIN_FALLBACK_TICKERS = list(_BUILTIN_FALLBACK_NAMES.keys())
+
+
+# 模块级 ticker → 中文公司名映射缓存。
+# 由 universe 抓取阶段填充（akshare 源天然有中文名；fallback 用内置映射），
+# spot 拉取后用此 dict 覆盖 name 字段，让前端展示中文而非代号。
+_TICKER_TO_CN_NAME: dict[str, str] = {}
+
+
+def _register_cn_names(mapping: dict[str, str]) -> None:
+    """把 ticker → 中文名写入模块级缓存（已有的不覆盖，保留先来源数据）。"""
+    for k, v in mapping.items():
+        if k and v and k not in _TICKER_TO_CN_NAME:
+            _TICKER_TO_CN_NAME[k] = v
+
+
+_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+)
+
+
+# ── universe 来源 1：akshare 全美股快照 ──────────────────────────────────────
+
+def _universe_from_akshare(size: int) -> list[str]:
+    import akshare as ak
+
+    raw = ak.stock_us_spot_em()
+    if raw is None or raw.empty:
+        return []
+
+    df = raw.copy()
+    # 按成交额降序（拉前 size 只热门股，K 线下载更有价值）
+    if "成交额" in df.columns:
+        df["成交额"] = pd.to_numeric(df["成交额"], errors="coerce")
+        df = df.sort_values("成交额", ascending=False, na_position="last")
+
+    code_col = "代码" if "代码" in df.columns else "em_code"
+    name_col = "名称" if "名称" in df.columns else None  # akshare 返回的中文公司名
+
+    tickers: list[str] = []
+    cn_names: dict[str, str] = {}
+    seen: set[str] = set()
+    for _, row in df.iterrows():
+        em_code = str(row[code_col])
+        # em_code 形如 "105.AAPL" 或 "105.BRK.B"；split 第 1 个 . 取后半
+        if "." not in em_code:
+            continue
+        ticker_raw = em_code.split(".", 1)[1].strip()
+        # Yahoo 用 "-" 代替 "."（BRK.B → BRK-B）
+        ticker_yahoo = ticker_raw.replace(".", "-")
+        if not ticker_yahoo or ticker_yahoo in seen:
+            continue
+        seen.add(ticker_yahoo)
+        tickers.append(ticker_yahoo)
+        if name_col is not None:
+            name = str(row[name_col]).strip()
+            if name and name != "nan":
+                cn_names[ticker_yahoo] = name
+        if len(tickers) >= size:
+            break
+    # 把中文名注入模块级缓存，供 spot 阶段填充 name 字段
+    if cn_names:
+        _register_cn_names(cn_names)
+    return tickers
+
+
+# ── universe 来源 2：stockanalysis.com（免费，无反爬）────────────────────────
+
+def _universe_from_stockanalysis(size: int) -> list[str]:
+    import httpx
+
+    urls = (
+        "https://stockanalysis.com/list/sp-500-stocks/",
+        "https://stockanalysis.com/list/nasdaq-100-stocks/",
+    )
+    tickers: list[str] = []
+    seen: set[str] = set()
+    headers = {"User-Agent": _USER_AGENT}
+    with httpx.Client(timeout=10.0, headers=headers, follow_redirects=True) as client:
+        for url in urls:
+            try:
+                r = client.get(url)
+                r.raise_for_status()
+                from io import StringIO
+                tables = pd.read_html(StringIO(r.text))
+            except Exception as exc:
+                logger.warning("yfinance_us: stockanalysis 抓 %s 失败: %s", url, exc)
+                continue
+            for tbl in tables:
+                col = next((c for c in tbl.columns if str(c).strip().lower() == "symbol"), None)
+                if col is None:
+                    continue
+                for sym in tbl[col].astype(str):
+                    sym = sym.strip().replace(".", "-")
+                    if sym and sym not in seen and not sym.startswith("Unnamed"):
+                        seen.add(sym)
+                        tickers.append(sym)
+                break
+            if len(tickers) >= size:
+                break
+    return tickers
+
+
+# ── universe 来源 3：Wikipedia + User-Agent（绕反爬） ────────────────────────
+
+def _universe_from_wikipedia(size: int) -> list[str]:
+    import httpx
+
+    sources = (
+        ("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", "Symbol", 0),
+        ("https://en.wikipedia.org/wiki/Nasdaq-100", "Ticker", 4),
+    )
+    tickers: list[str] = []
+    seen: set[str] = set()
+    headers = {"User-Agent": _USER_AGENT}
+    with httpx.Client(timeout=10.0, headers=headers, follow_redirects=True) as client:
+        for url, col_name, table_idx in sources:
+            try:
+                r = client.get(url)
+                r.raise_for_status()
+                from io import StringIO
+                tables = pd.read_html(StringIO(r.text))
+            except Exception as exc:
+                logger.warning("yfinance_us: Wikipedia 抓 %s 失败: %s", url, exc)
+                continue
+            if table_idx >= len(tables):
+                continue
+            tbl = tables[table_idx]
+            col = next((c for c in tbl.columns if str(c).strip() == col_name), None)
+            if col is None:
+                continue
+            for sym in tbl[col].astype(str):
+                sym = sym.strip().replace(".", "-")
+                if sym and sym not in seen:
+                    seen.add(sym)
+                    tickers.append(sym)
+            if len(tickers) >= size:
+                break
+    return tickers

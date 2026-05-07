@@ -151,6 +151,9 @@ class Settings(BaseSettings):
     quant_spot_fresh_seconds: int = 600        # spot 多久内算新鲜，过期才回源
     quant_bars_lookback_days: int = 120        # bars 默认预热区间
 
+    # ── yfinance_us universe（多源 fallback，全免费） ────────────────────────
+    quant_yfinance_us_universe_size: int = 300   # 美股预热 top N（按成交额降序）
+
     # ── 服务端口 ──────────────────────────────────────────────────────────────
     backend_host: str
     backend_port: int
