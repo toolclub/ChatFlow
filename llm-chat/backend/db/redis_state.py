@@ -149,3 +149,38 @@ async def stop_cache_invalidation_listener() -> None:
     if _sub_task:
         _sub_task.cancel()
         _sub_task = None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 4. 网页搜索预算 + 去重（防止模型反复触发 web_search）
+# ══════════════════════════════════════════════════════════════════════════════
+
+_WEBSEARCH_COUNT_PREFIX = "chatflow:websearch:count:"
+_WEBSEARCH_CACHE_PREFIX = "chatflow:websearch:cache:"
+_WEBSEARCH_TTL = 1800  # 30 分钟，覆盖单轮对话生命周期
+
+
+async def incr_websearch_count(scope: str) -> int:
+    """递增本 scope（一般为 assistant_message_id）的搜索计数，返回新值。"""
+    r = _get_redis()
+    key = f"{_WEBSEARCH_COUNT_PREFIX}{scope}"
+    new_val = await r.incr(key)
+    if new_val == 1:
+        await r.expire(key, _WEBSEARCH_TTL)
+    return int(new_val)
+
+
+async def get_websearch_cache(scope: str, query: str) -> Optional[str]:
+    """读取本 scope 下同 query 的上次结果（JSON 字符串）。"""
+    r = _get_redis()
+    key = f"{_WEBSEARCH_CACHE_PREFIX}{scope}"
+    val = await r.hget(key, query)
+    return val if val else None
+
+
+async def set_websearch_cache(scope: str, query: str, value: str) -> None:
+    """写入本 scope 下 query 的结果，供下次同 query 复用。"""
+    r = _get_redis()
+    key = f"{_WEBSEARCH_CACHE_PREFIX}{scope}"
+    await r.hset(key, query, value)
+    await r.expire(key, _WEBSEARCH_TTL)
