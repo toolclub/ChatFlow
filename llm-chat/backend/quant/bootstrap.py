@@ -82,6 +82,28 @@ def _build_provider(name: str, priority: int):
             max_concurrency=QUANT_BARS_CONCURRENCY,
         )
 
+    if name == "twelvedata_us":
+        try:
+            from quant.providers.twelvedata_us_provider import TwelveDataUSProvider
+        except ImportError as exc:
+            logger.warning("TwelveData US provider 加载失败：%s", exc)
+            return None
+        return TwelveDataUSProvider(
+            priority=priority,
+            max_concurrency=QUANT_BARS_CONCURRENCY,
+        )
+
+    if name == "tiingo_us":
+        try:
+            from quant.providers.tiingo_us_provider import TiingoUSProvider
+        except ImportError as exc:
+            logger.warning("Tiingo US provider 加载失败：%s", exc)
+            return None
+        return TiingoUSProvider(
+            priority=priority,
+            max_concurrency=QUANT_BARS_CONCURRENCY,
+        )
+
     if name == "baostock":
         if not getattr(settings, "baostock_enabled", True):
             logger.info("BaoStock 已禁用（BAOSTOCK_ENABLED=false），跳过注册")

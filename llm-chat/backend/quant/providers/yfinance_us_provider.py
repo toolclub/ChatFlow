@@ -177,22 +177,21 @@ class YFinanceUSProvider:
         tickers = [s.split(".")[0] for s in symbols]
         ticker_to_sym = dict(zip(tickers, symbols))
 
-        import yfinance as yf
-
+        # ★ 顺序很关键：chart 接口是**主路径**，yf.download 是次路径。
+        #   yf.download 走的下载路径需要 cookie+crumb 握手、且被雅虎针对性限流：同一个 IP 上
+        #   它稳定 429（YFRateLimitError），而底层的 v8/finance/chart JSON 接口直连稳定 200。
+        #   更要命的是 yf.download 对 429 有**内部退避重试**，很慢 —— 一旦让它先跑，加上 chart
+        #   兜底的耗时会超过预检 30s 硬超时，在兜底跑完前就被掐断（生产实测「行情预检超时>30s」）。
+        #   所以先走快而可靠的 chart，它拿不到再退回 yf.download。
+        #   这不是绕反爬，是换用雅虎正常对外、不需 crumb 的那个公开接口。
         async with self._sem:
-            df = await asyncio.to_thread(
-                self._download_bars, yf, tickers, start, end,
-            )
+            df = await asyncio.to_thread(self._chart_bars, tickers, start, end)
 
-        # ★ yf.download 走的下载路径需要 cookie+crumb 握手、且被雅虎针对性限流：
-        #   实测生产/本地同一 IP 上它稳定 429（YFRateLimitError），但底层的
-        #   v8/finance/chart JSON 接口用同一个 IP 直连**稳定 200**（连续 3 次 384 根 OHLC）。
-        #   所以 download 拿空时，逐个 ticker 直连 chart 接口兜底 —— 不是绕反爬，就是换用
-        #   雅虎正常对外提供、不需要 crumb 的那个公开接口。
         if df is None or df.empty:
+            import yfinance as yf
             async with self._sem:
                 df = await asyncio.to_thread(
-                    self._chart_bars, tickers, start, end,
+                    self._download_bars, yf, tickers, start, end,
                 )
             if df is None or df.empty:
                 return pd.DataFrame()
@@ -231,7 +230,7 @@ class YFinanceUSProvider:
                     f"?period1={p1}&period2={p2}&interval=1d"
                 )
                 try:
-                    resp = httpx.get(url, headers=headers, timeout=15.0)
+                    resp = httpx.get(url, headers=headers, timeout=8.0)
                     if resp.status_code != 200:
                         logger.warning("chart 接口 %s %s → HTTP %s", ticker, host, resp.status_code)
                         continue
