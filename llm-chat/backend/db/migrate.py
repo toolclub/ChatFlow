@@ -208,6 +208,85 @@ _MIGRATIONS = [
 
     # ── quant_snapshots 补字段（结构化思考段，spec §模型思考流程） ──
     "ALTER TABLE quant_snapshots ADD COLUMN IF NOT EXISTS thinking_segments JSONB NOT NULL DEFAULT '[]'",
+
+    # ── prediction_snapshots 表（股票预测，仿 quant_snapshots + 预测字段） ──
+    """CREATE TABLE IF NOT EXISTS prediction_snapshots (
+        id                   VARCHAR(50)      NOT NULL,
+        client_id            VARCHAR(36)      NOT NULL,
+        user_id              VARCHAR(36)      NOT NULL DEFAULT '',
+        conversation_id      VARCHAR(36)      DEFAULT NULL,
+        criteria             JSONB            NOT NULL DEFAULT '{}',
+        market               VARCHAR(16)      NOT NULL DEFAULT '',
+        symbol               VARCHAR(32)      NOT NULL DEFAULT '',
+        status               VARCHAR(24)      NOT NULL DEFAULT 'queued',
+        horizon              INTEGER          NOT NULL DEFAULT 5,
+        target_date          VARCHAR(16)      DEFAULT NULL,
+        predicted_price      DOUBLE PRECISION DEFAULT NULL,
+        predicted_range      JSONB            DEFAULT NULL,
+        confidence           DOUBLE PRECISION DEFAULT NULL,
+        model_name           VARCHAR(64)      NOT NULL DEFAULT '',
+        news_digest          JSONB            NOT NULL DEFAULT '[]',
+        news_sentiment       DOUBLE PRECISION DEFAULT NULL,
+        forecast             JSONB            NOT NULL DEFAULT '[]',
+        inflection_points    JSONB            NOT NULL DEFAULT '[]',
+        confidence_band      JSONB            NOT NULL DEFAULT '[]',
+        technical_indicators JSONB            NOT NULL DEFAULT '{}',
+        analysis             TEXT             NOT NULL DEFAULT '',
+        risk_notes           JSONB            NOT NULL DEFAULT '[]',
+        thinking_segments    JSONB            NOT NULL DEFAULT '[]',
+        error_message        TEXT             NOT NULL DEFAULT '',
+        created_at           DOUBLE PRECISION NOT NULL,
+        CONSTRAINT pk_prediction_snapshots PRIMARY KEY (id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS ix_prediction_snapshots_client ON prediction_snapshots(client_id)",
+    "CREATE INDEX IF NOT EXISTS ix_prediction_snapshots_user ON prediction_snapshots(user_id)",
+    "CREATE INDEX IF NOT EXISTS ix_prediction_snapshots_status ON prediction_snapshots(status)",
+
+    # ── prediction_snapshots 补字段（阶段进度快照 + 最后更新时间，供刷新续连贯） ──
+    "ALTER TABLE prediction_snapshots ADD COLUMN IF NOT EXISTS progress JSONB NOT NULL DEFAULT '{}'",
+    "ALTER TABLE prediction_snapshots ADD COLUMN IF NOT EXISTS updated_at DOUBLE PRECISION NOT NULL DEFAULT 0",
+
+    # ── prediction_snapshots 补字段（v2：数据型维度 / 公式可解释 / 预测蜡烛 / 事件打点） ──
+    # create_all 只建新表、不会 ALTER 已有表 → 这些列必须在这里显式补，且要能在有存量数据的表上重复执行。
+    "ALTER TABLE prediction_snapshots ADD COLUMN IF NOT EXISTS filing_digest JSONB NOT NULL DEFAULT '[]'",
+    "ALTER TABLE prediction_snapshots ADD COLUMN IF NOT EXISTS model_params JSONB NOT NULL DEFAULT '{}'",
+    "ALTER TABLE prediction_snapshots ADD COLUMN IF NOT EXISTS formula_steps JSONB NOT NULL DEFAULT '[]'",
+    "ALTER TABLE prediction_snapshots ADD COLUMN IF NOT EXISTS forecast_candles JSONB NOT NULL DEFAULT '[]'",
+    "ALTER TABLE prediction_snapshots ADD COLUMN IF NOT EXISTS event_markers JSONB NOT NULL DEFAULT '[]'",
+    "ALTER TABLE prediction_snapshots ADD COLUMN IF NOT EXISTS tool_traces JSONB NOT NULL DEFAULT '[]'",
+    "ALTER TABLE prediction_snapshots ADD COLUMN IF NOT EXISTS event_score DOUBLE PRECISION DEFAULT NULL",
+    # v2：默认 horizon 从 5 改为 7 个交易日（存量行不动，只改列默认值）
+    "ALTER TABLE prediction_snapshots ALTER COLUMN horizon SET DEFAULT 7",
+
+    # ── announcement_cache 表（公告 LLM 判定缓存，防止重复烧钱） ──
+    """CREATE TABLE IF NOT EXISTS announcement_cache (
+        id             SERIAL           NOT NULL,
+        market         VARCHAR(16)      NOT NULL,
+        symbol         VARCHAR(32)      NOT NULL,
+        ann_date       VARCHAR(16)      NOT NULL,
+        title_hash     VARCHAR(64)      NOT NULL,
+        title          TEXT             NOT NULL DEFAULT '',
+        ann_type       VARCHAR(64)      NOT NULL DEFAULT '',
+        url            TEXT             NOT NULL DEFAULT '',
+        source         VARCHAR(24)      NOT NULL DEFAULT '',
+        event_type     VARCHAR(32)      NOT NULL DEFAULT '',
+        negative_score DOUBLE PRECISION DEFAULT NULL,
+        reason         TEXT             NOT NULL DEFAULT '',
+        judged_by      VARCHAR(16)      NOT NULL DEFAULT '',
+        fetched_at     DOUBLE PRECISION NOT NULL,
+        CONSTRAINT pk_announcement_cache PRIMARY KEY (id)
+    )""",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_anncache_key ON announcement_cache(market, symbol, ann_date, title_hash)",
+    "CREATE INDEX IF NOT EXISTS ix_anncache_symbol ON announcement_cache(symbol, ann_date)",
+    # 上面的 CREATE TABLE 在 create_all 已建过表的库里是 no-op（表已存在），
+    # 补齐文本列的 DEFAULT ''，保证「create_all 建的表」与「migration 建的表」结构一致
+    "ALTER TABLE announcement_cache ALTER COLUMN title SET DEFAULT ''",
+    "ALTER TABLE announcement_cache ALTER COLUMN ann_type SET DEFAULT ''",
+    "ALTER TABLE announcement_cache ALTER COLUMN url SET DEFAULT ''",
+    "ALTER TABLE announcement_cache ALTER COLUMN source SET DEFAULT ''",
+    "ALTER TABLE announcement_cache ALTER COLUMN event_type SET DEFAULT ''",
+    "ALTER TABLE announcement_cache ALTER COLUMN reason SET DEFAULT ''",
+    "ALTER TABLE announcement_cache ALTER COLUMN judged_by SET DEFAULT ''",
 ]
 
 

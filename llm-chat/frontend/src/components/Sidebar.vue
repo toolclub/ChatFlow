@@ -2,7 +2,7 @@
 import { ref, computed, nextTick, onMounted, watch } from 'vue'
 import type { ConversationInfo } from '../types'
 import {
-  Plus, Search, ChatDotRound, Delete, Check, Close, Select, Monitor, User,
+  Plus, Search, ChatDotRound, Delete, Check, Close, Select, Monitor, User, TrendCharts,
 } from '@element-plus/icons-vue'
 
 const props = defineProps<{
@@ -10,7 +10,7 @@ const props = defineProps<{
   currentConvId: string | null
   activeConvIds?: Set<string>
   creating?: boolean
-  activeWorkspace?: 'chat' | 'quant' | 'stock_detail' | 'admin'
+  activeWorkspace?: 'chat' | 'quant' | 'prediction' | 'stock_detail' | 'admin'
 }>()
 
 const emit = defineEmits<{
@@ -18,7 +18,7 @@ const emit = defineEmits<{
   select: [id: string]
   delete: [id: string]
   batchDelete: [ids: string[]]
-  switchWorkspace: [workspace: 'chat' | 'quant' | 'admin']
+  switchWorkspace: [workspace: 'chat' | 'quant' | 'prediction' | 'admin']
   openAdmin: []
 }>()
 
@@ -139,9 +139,27 @@ async function finishRename(id: string) {
 }
 function cancelRename() { editingId.value = null }
 
+// ── 智能选股开关（后端 QUANT_SCREENING_ENABLED）──
+// 关闭时隐藏「量化」入口：预热器会打爆雅虎财经限流额度，本地默认关掉把额度让给股票预测。
+const quantEnabled = ref(false)
+
+async function loadQuantEnabled() {
+  try {
+    const res = await fetch('/api/quant/enabled')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await res.json()
+    quantEnabled.value = !!data.enabled
+  } catch (e) {
+    // 探测失败按禁用处理：宁可少一个入口，也不要点进去满屏 503
+    quantEnabled.value = false
+    console.warn('[Sidebar] 智能选股开关探测失败，按禁用处理', e)
+  }
+}
+
 onMounted(() => {
   const savedDark = localStorage.getItem('cf_dark') === '1'
   document.body.classList.toggle('dark', savedDark)
+  loadQuantEnabled()
 })
 </script>
 
@@ -162,19 +180,28 @@ onMounted(() => {
 
     <!-- 工作台切换 -->
     <div class="workspace-switcher">
-      <button 
-        class="workspace-btn" 
+      <button
+        class="workspace-btn"
         :class="{ active: props.activeWorkspace === 'chat' }"
         @click="emit('switchWorkspace', 'chat')"
       >
         <el-icon><ChatDotRound /></el-icon> 对话
       </button>
-      <button 
-        class="workspace-btn" 
+      <!-- 智能选股禁用时（QUANT_SCREENING_ENABLED=false）隐藏入口：后端选股端点会返回 503 -->
+      <button
+        v-if="quantEnabled"
+        class="workspace-btn"
         :class="{ active: props.activeWorkspace === 'quant' }"
         @click="emit('switchWorkspace', 'quant')"
       >
         <el-icon><Monitor /></el-icon> 量化
+      </button>
+      <button
+        class="workspace-btn"
+        :class="{ active: props.activeWorkspace === 'prediction' }"
+        @click="emit('switchWorkspace', 'prediction')"
+      >
+        <el-icon><TrendCharts /></el-icon> 预测
       </button>
     </div>
 

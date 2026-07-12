@@ -7,35 +7,62 @@ import Sidebar from './components/Sidebar.vue'
 import ChatView from './components/ChatView.vue'
 import CognitivePanel from './components/CognitivePanel.vue'
 import QuantView from './components/QuantView.vue'
+import PredictionView from './components/PredictionView.vue'
 import StockDetailView from './components/StockDetailView.vue'
 import LoginView from './components/LoginView.vue'
 import SysDashboard from './components/SysDashboard.vue'
+import { useAdmin } from './composables/useAdmin'
 
 const chat = useChat()
 const auth = useAuth()
-const activeWorkspace = ref<'chat' | 'quant' | 'stock_detail' | 'admin'>('chat')
+const admin = useAdmin()
+const activeWorkspace = ref<'chat' | 'quant' | 'prediction' | 'stock_detail' | 'admin'>('chat')
 const selectedStockData = ref<any>(null)
 const showLogin = ref(false)
 const isInitializing = ref(true)
 const GUEST_EXPIRE_DAYS = 3
 
 // ── 管理者页面 ──
+// useAdmin() 是全局单例，智能选股 + 股票预测 + 系统看板共享同一已验证会话。
 const showAdminVerify = ref(false)
 const adminKeyInput = ref('')
-const verifiedAdminKey = ref('')
+// 用户被门禁拦截时想进的工作区（quant/prediction）；为 null 表示进系统看板
+const pendingWorkspace = ref<'quant' | 'prediction' | null>(null)
 
 async function verifyAdmin() {
-  try {
-    const res = await import('./api').then(m => m.post<any>('/api/admin/verify', { key: adminKeyInput.value }))
-    if (res.ok) {
-      verifiedAdminKey.value = adminKeyInput.value
+  const ok = await admin.verify(adminKeyInput.value)
+  if (ok) {
+    if (pendingWorkspace.value) {
+      activeWorkspace.value = pendingWorkspace.value
+      pendingWorkspace.value = null
+    } else {
       activeWorkspace.value = 'admin'
-      showAdminVerify.value = false
-      adminKeyInput.value = ''
     }
-  } catch (err: any) {
-    import('element-plus').then(m => m.ElMessage.error(err.message || '密钥验证失败'))
+    showAdminVerify.value = false
+    adminKeyInput.value = ''
+  } else {
+    import('element-plus').then(m => m.ElMessage.error('密钥验证失败'))
   }
+}
+
+// 工作区切换拦截：量化 + 股票预测 需管理员密钥（D5 全量）。
+// 未验证 → 弹管理员密码框（记录原意图）；已验证 → 直接切。
+function onSwitchWorkspace(workspace: 'chat' | 'quant' | 'prediction' | 'admin') {
+  if (workspace === 'quant' || workspace === 'prediction') {
+    if (!admin.isVerified.value) {
+      pendingWorkspace.value = workspace
+      showAdminVerify.value = true
+      return
+    }
+  }
+  // 进系统看板走原 open-admin 流程（pendingWorkspace=null）
+  activeWorkspace.value = workspace
+}
+
+// 系统看板入口（dropdown 「系统管理」）：清除 pending，走 admin 路径
+function onOpenAdmin() {
+  pendingWorkspace.value = null
+  showAdminVerify.value = true
 }
 
 onMounted(async () => {
@@ -208,6 +235,24 @@ function openStockDetail(stock: any) {
   activeWorkspace.value = 'stock_detail'
 }
 
+// ── 股票预测 → 对话续接 ──────────────────────────────────────────────────────
+// 仿 continueWithSnapshot：开新会话，把 prediction_id 经 contextRefs 喂给对话，
+// LLM 查 prediction_snapshots 库深挖（contextRefs type='prediction_snapshot'）。
+async function continueWithPrediction(predictionId: string) {
+  await chat.newConversation()
+  await Promise.resolve()
+  await chat.send({
+    text: '我刚才做了一次股票预测，请基于这次预测结果做深度分析：\n' +
+          '1) 技术面信号与资讯情绪的一致性/分歧点\n' +
+          '2) 置信区间宽度反映的不确定性，以及关键拐点的触发条件\n' +
+          '3) 短期风险点和应对建议',
+    images: [],
+    agentMode: false,
+    intentLabel: '预测深挖',
+    contextRefs: [{ type: 'prediction_snapshot', id: predictionId }],
+  })
+}
+
 function backToQuant() {
   activeWorkspace.value = 'quant'
 }
@@ -277,9 +322,9 @@ function onDragStart(e: MouseEvent) {
         @select="chat.selectConversation($event)"
         @delete="chat.removeConversation($event)"
         @batch-delete="chat.batchRemoveConversations($event)"
-        @switchWorkspace="activeWorkspace = $event"
+        @switchWorkspace="onSwitchWorkspace"
         @show-login="showLogin = true"
-        @open-admin="showAdminVerify = true"
+        @open-admin="onOpenAdmin"
       />
 
       <!-- 管理员密钥验证 -->
@@ -363,9 +408,16 @@ function onDragStart(e: MouseEvent) {
         <!-- 量化工作台 -->
         <QuantView
           v-show="activeWorkspace === 'quant'"
-          @switch-workspace="activeWorkspace = $event"
+          @switch-workspace="onSwitchWorkspace"
           @continue-with-snapshot="continueWithSnapshot"
           @open-stock-detail="openStockDetail"
+        />
+
+        <!-- 股票预测工作台 -->
+        <PredictionView
+          v-show="activeWorkspace === 'prediction'"
+          @switch-workspace="onSwitchWorkspace"
+          @continue-with-prediction="continueWithPrediction"
         />
 
         <!-- 个股详情页 -->
@@ -378,7 +430,7 @@ function onDragStart(e: MouseEvent) {
         <!-- 管理者面板 -->
         <SysDashboard
           v-if="activeWorkspace === 'admin'"
-          :admin-key="verifiedAdminKey"
+          :admin-key="admin.verifiedAdminKey.value"
           @back="activeWorkspace = 'chat'"
         />
       </div>

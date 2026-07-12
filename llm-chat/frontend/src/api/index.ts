@@ -1,7 +1,12 @@
 import type {
   ClarificationData, FileArtifact, PlanStep, ThinkingEvent, ToolHistoryEvent, UploadedFile,
   QuantProviderInfo, QuantScreenCriteria, QuantScreenResult,
+  PredictionRecord, PredictionSnapshot, NewsItem, NewsDimension, Forecast,
+  PredictionProgress, MarketDataErrorKind, PredictionMarket,
+  Dimension, DimensionGroup, DimensionCatalog, DimensionKind,
+  FilingDimensionResult, FormulaStep, ForecastCandle, ToolTrace, EventMarker,
 } from '../types'
+import { DIMENSION_KIND_LABELS } from '../types'
 
 /** 归一化 SSE thinking 字段：协议要求 dict，COMPAT 降级到裸字符串。 */
 function normalizeThinking(raw: unknown): ThinkingEvent | null {
@@ -590,44 +595,77 @@ export interface QuantCacheStatus {
   meta: Record<string, any>
 }
 
-export async function fetchQuantCacheStatus(): Promise<QuantCacheStatus> {
-  const res = await fetchWithAuth(`${API_BASE}/api/quant/cache/status`)
+export async function fetchQuantCacheStatus(adminKey?: string): Promise<QuantCacheStatus> {
+  const headers: Record<string, string> = {}
+  if (adminKey) headers['X-Admin-Key'] = adminKey
+  const res = await fetchWithAuth(`${API_BASE}/api/quant/cache/status`, { headers })
   if (!res.ok) throw new Error(`获取缓存状态失败: ${res.status}`)
   return res.json()
 }
 
-export async function refreshQuantCache(kinds?: string[]): Promise<{ scheduled: string[]; worker: string }> {
-  return post('/api/quant/cache/refresh', kinds || null)
+export async function refreshQuantCache(kinds?: string[], adminKey?: string): Promise<{ scheduled: string[]; worker: string }> {
+  const headers: Record<string, string> = {}
+  if (adminKey) headers['X-Admin-Key'] = adminKey
+  // post() 不支持自定义 header，这里用 fetchWithAuth 直接发
+  const res = await fetchWithAuth(`${API_BASE}/api/quant/cache/refresh`, {
+    method: 'POST',
+    body: JSON.stringify(kinds ?? null),
+    headers,
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}))
+    throw new Error(error.detail || `Request failed with status ${res.status}`)
+  }
+  return res.json()
 }
 
-export async function fetchActiveQuantSession(market?: string): Promise<{ active: boolean; snapshot_id?: string; status?: string; criteria?: QuantScreenCriteria }> {
+export async function fetchActiveQuantSession(market?: string, adminKey?: string): Promise<{ active: boolean; snapshot_id?: string; status?: string; criteria?: QuantScreenCriteria }> {
+  const headers: Record<string, string> = {}
+  if (adminKey) headers['X-Admin-Key'] = adminKey
   let url = `${API_BASE}/api/quant/session/active`
   if (market) url += `?market=${encodeURIComponent(market)}`
-  const res = await fetchWithAuth(url)
+  const res = await fetchWithAuth(url, { headers })
   if (!res.ok) return { active: false }
   return res.json()
 }
 
-export async function fetchQuantSnapshot(snapshotId: string): Promise<QuantScreenResult> {
-  const res = await fetchWithAuth(`${API_BASE}/api/quant/snapshot/${snapshotId}`)
+export async function fetchQuantSnapshot(snapshotId: string, adminKey?: string): Promise<QuantScreenResult> {
+  const headers: Record<string, string> = {}
+  if (adminKey) headers['X-Admin-Key'] = adminKey
+  const res = await fetchWithAuth(`${API_BASE}/api/quant/snapshot/${snapshotId}`, { headers })
   if (!res.ok) throw new Error(`获取快照失败: ${res.status}`)
   return res.json()
 }
 
-export async function fetchStockChart(symbol: string, days: number = 240): Promise<any> {
-  const res = await fetchWithAuth(`${API_BASE}/api/quant/stock/${symbol}/chart?days=${days}`)
+export async function fetchStockChart(symbol: string, days: number = 240, adminKey?: string): Promise<any> {
+  const headers: Record<string, string> = {}
+  if (adminKey) headers['X-Admin-Key'] = adminKey
+  const res = await fetchWithAuth(`${API_BASE}/api/quant/stock/${symbol}/chart?days=${days}`, { headers })
   if (!res.ok) throw new Error(`获取图表失败: ${res.status}`)
   return res.json()
 }
 
-export async function fetchQuantProviders(): Promise<QuantProviderInfo[]> {
-  const res = await fetchWithAuth(`${API_BASE}/api/quant/providers`)
+export async function fetchQuantProviders(adminKey?: string): Promise<QuantProviderInfo[]> {
+  const headers: Record<string, string> = {}
+  if (adminKey) headers['X-Admin-Key'] = adminKey
+  const res = await fetchWithAuth(`${API_BASE}/api/quant/providers`, { headers })
   if (!res.ok) throw new Error(`获取 Provider 失败: ${res.status}`)
   return res.json()
 }
 
-export async function runQuantScreen(criteria: QuantScreenCriteria): Promise<QuantScreenResult> {
-  return post('/api/quant/screen', criteria)
+export async function runQuantScreen(criteria: QuantScreenCriteria, adminKey?: string): Promise<QuantScreenResult> {
+  const headers: Record<string, string> = {}
+  if (adminKey) headers['X-Admin-Key'] = adminKey
+  const res = await fetchWithAuth(`${API_BASE}/api/quant/screen`, {
+    method: 'POST',
+    body: JSON.stringify(criteria),
+    headers,
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}))
+    throw new Error(error.detail || `Request failed with status ${res.status}`)
+  }
+  return res.json()
 }
 
 export interface StreamQuantAnalyzeHandlers {
@@ -723,5 +761,719 @@ export async function streamQuantAnalyze(
     if (buffer.trim()) processLine(buffer.trim())
   } catch (e: any) {
     if (!signal?.aborted) handlers.onError(e?.message || '连接中断')
+  }
+}
+
+// ── 股票预测模块 API ─────────────────────────────────────────────────────────
+
+export interface PredictionCriteria {
+  symbol: string
+  market: 'cn_a' | 'us_stock'
+  horizon?: number
+  methods?: string[]
+  dimensions?: string[]
+}
+
+/** POST /api/prediction/predict — 发起预测，立即返回 prediction_id（status=queued） */
+export async function startPrediction(
+  criteria: PredictionCriteria,
+  adminKey: string,
+): Promise<{ prediction_id: string; status: string }> {
+  const res = await fetchWithAuth(`${API_BASE}/api/prediction/predict`, {
+    method: 'POST',
+    body: JSON.stringify(criteria),
+    headers: { 'X-Admin-Key': adminKey },
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}))
+    throw new Error(error.detail || `Request failed with status ${res.status}`)
+  }
+  return res.json()
+}
+
+/** POST /api/prediction/{id}/stop — 停止预测（取消后台图 + astream + LLM HTTP 流，不再发 token） */
+export async function stopPrediction(predictionId: string, adminKey: string): Promise<{ ok: boolean; status: string }> {
+  const res = await fetchWithAuth(`${API_BASE}/api/prediction/${predictionId}/stop`, {
+    method: 'POST',
+    headers: { 'X-Admin-Key': adminKey },
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}))
+    throw new Error(error.detail || `Request failed with status ${res.status}`)
+  }
+  return res.json()
+}
+
+// ── v2：维度注册表 / 暂停 / 恢复 / 删除 ────────────────────────────────────────
+
+/** 后端 groups 的两种可能序列化形态：[["组名", ["k1","k2"]]] 或 [{name, keys}] */
+type RawGroup = [string, string[]] | { name?: string; keys?: string[] } | unknown
+
+/** 单个维度：宽松解析（缺字段给安全默认值，未知 kind 归为 search —— 只影响分组，不影响能否勾选） */
+function normalizeDimension(raw: any): Dimension | null {
+  if (!raw || typeof raw.key !== 'string' || !raw.key) return null
+  const kind: DimensionKind = raw.kind === 'data' ? 'data' : 'search'
+  const markets = Array.isArray(raw.markets)
+    ? (raw.markets.filter((m: unknown) => m === 'cn_a' || m === 'us_stock') as PredictionMarket[])
+    : (['cn_a', 'us_stock'] as PredictionMarket[])
+  return {
+    key: raw.key,
+    label: typeof raw.label === 'string' && raw.label ? raw.label : (raw.name || raw.key),
+    desc: typeof raw.desc === 'string' ? raw.desc : '',
+    kind,
+    markets,
+    fetcher: typeof raw.fetcher === 'string' ? raw.fetcher : null,
+    default_on: raw.default_on !== false,
+  }
+}
+
+/**
+ * 归一化 GET /api/prediction/dimensions 的响应。
+ *
+ * 容忍三种形态（后端 router 尚未定稿，前端不该因为一层包装就白屏）：
+ *   1. { dimensions: [...], groups: [...], defaults: [...] }
+ *   2. { dimensions: [...] }                  → groups 按 kind 兜底分组、defaults 按 default_on 兜底
+ *   3. [...]（裸数组）                         → 同上
+ *
+ * groups 缺失时按 kind 分组（data → 结构化数据 / search → 资讯搜索），
+ * 组名与 key 顺序都以后端为准 —— 前端只在后端没给时才兜底。
+ */
+export function normalizeDimensionCatalog(raw: any): DimensionCatalog {
+  const rawDims: any[] = Array.isArray(raw)
+    ? raw
+    : Array.isArray(raw?.dimensions)
+      ? raw.dimensions
+      : []
+  const dimensions = rawDims
+    .map(normalizeDimension)
+    .filter((d): d is Dimension => d !== null)
+
+  const known = new Set(dimensions.map((d) => d.key))
+
+  // groups：后端给了就用后端的（单一真相源），否则按 kind 兜底
+  let groups: DimensionGroup[] = []
+  const rawGroups: RawGroup[] = Array.isArray(raw?.groups) ? raw.groups : []
+  for (const g of rawGroups) {
+    let name = ''
+    let keys: string[] = []
+    if (Array.isArray(g) && typeof g[0] === 'string') {
+      name = g[0]
+      keys = Array.isArray(g[1]) ? (g[1] as string[]) : []
+    } else if (g && typeof g === 'object') {
+      const o = g as { name?: string; keys?: string[] }
+      name = typeof o.name === 'string' ? o.name : ''
+      keys = Array.isArray(o.keys) ? o.keys : []
+    }
+    // 只保留本次返回里真实存在的 key（后端按 market 过滤后，组里可能有不适用的残留 key）
+    const kept = keys.filter((k) => known.has(k))
+    if (name && kept.length) groups.push({ name, keys: kept })
+  }
+  if (!groups.length && dimensions.length) {
+    const byKind: Record<DimensionKind, string[]> = { data: [], search: [] }
+    for (const d of dimensions) byKind[d.kind].push(d.key)
+    groups = (['data', 'search'] as DimensionKind[])
+      .filter((k) => byKind[k].length)
+      .map((k) => ({ name: DIMENSION_KIND_LABELS[k], keys: byKind[k] }))
+  }
+
+  const defaults: string[] = Array.isArray(raw?.defaults)
+    ? (raw.defaults as string[]).filter((k) => known.has(k))
+    : dimensions.filter((d) => d.default_on).map((d) => d.key)
+
+  return { dimensions, groups, defaults }
+}
+
+/**
+ * GET /api/prediction/dimensions — 维度注册表（26 维）。
+ *
+ * ★ 维度解释文案（Dimension.desc）是**后端单一真相源**，前端不再写一份。
+ * market 传入时后端只返回该市场适用的维度（A 股不会返回 sec_filings）。
+ */
+export async function getPredictionDimensions(
+  market?: PredictionMarket,
+  adminKey?: string,
+): Promise<DimensionCatalog> {
+  const params = market ? `?market=${encodeURIComponent(market)}` : ''
+  const headers: Record<string, string> = {}
+  if (adminKey) headers['X-Admin-Key'] = adminKey
+  const res = await fetchWithAuth(`${API_BASE}/api/prediction/dimensions${params}`, { headers })
+  if (!res.ok) throw new Error(`获取预测维度失败: ${res.status}`)
+  return normalizeDimensionCatalog(await res.json())
+}
+
+/**
+ * POST /api/prediction/{id}/pause — 暂停预测。
+ *
+ * 语义（用户拍板，UI 必须如实说明）：**取消在途任务 + 保留已完成维度 + 可续跑剩余**。
+ * 不是"冻结"——后端无 checkpointer，做不到真冻结；已跑到一半的那个维度会丢，
+ * resume 时重跑。返回 status=paused（**非终态**）。
+ */
+export async function pausePrediction(
+  predictionId: string,
+  adminKey: string,
+): Promise<{ ok: boolean; status: string }> {
+  const res = await fetchWithAuth(`${API_BASE}/api/prediction/${predictionId}/pause`, {
+    method: 'POST',
+    headers: { 'X-Admin-Key': adminKey },
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}))
+    throw new Error(error.detail || `暂停失败 (HTTP ${res.status})`)
+  }
+  return res.json()
+}
+
+/**
+ * POST /api/prediction/{id}/resume — 续跑（只跑未完成的维度）。
+ *
+ * 返回后状态回到 queued/news_searching/inferring 之一 —— 调用方拿到后
+ * **必须重新 streamPrediction**（暂停时旧流已终结）。游标传已收到的 lastEventId，
+ * 避免全量重放。
+ */
+export async function resumePrediction(
+  predictionId: string,
+  adminKey: string,
+): Promise<{ ok: boolean; status: string }> {
+  const res = await fetchWithAuth(`${API_BASE}/api/prediction/${predictionId}/resume`, {
+    method: 'POST',
+    headers: { 'X-Admin-Key': adminKey },
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}))
+    throw new Error(error.detail || `继续预测失败 (HTTP ${res.status})`)
+  }
+  return res.json()
+}
+
+/** DELETE /api/prediction/{id} — 删除预测记录（连带 event_log） */
+export async function deletePrediction(
+  predictionId: string,
+  adminKey: string,
+): Promise<{ ok: boolean }> {
+  const res = await fetchWithAuth(`${API_BASE}/api/prediction/${predictionId}`, {
+    method: 'DELETE',
+    headers: { 'X-Admin-Key': adminKey },
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}))
+    throw new Error(error.detail || `删除失败 (HTTP ${res.status})`)
+  }
+  return res.json().catch(() => ({ ok: true }))
+}
+
+/** GET /api/prediction/records — 当前用户的预测记录列表 */
+export async function fetchPredictionRecords(
+  market?: 'cn_a' | 'us_stock',
+  adminKey?: string,
+): Promise<PredictionRecord[]> {
+  const params: Record<string, string> = {}
+  if (market) params.market = market
+  const headers: Record<string, string> = {}
+  if (adminKey) headers['X-Admin-Key'] = adminKey
+  const res = await fetchWithAuth(
+    `${API_BASE}/api/prediction/records${Object.keys(params).length ? '?' + new URLSearchParams(params).toString() : ''}`,
+    { headers },
+  )
+  if (!res.ok) throw new Error(`获取预测记录失败: ${res.status}`)
+  const data = await res.json()
+  return data.records || data || []
+}
+
+/** GET /api/prediction/active — 检查是否有进行中的预测会话（刷新恢复用） */
+export async function fetchActivePrediction(
+  market?: 'cn_a' | 'us_stock',
+  adminKey?: string,
+): Promise<{ active: boolean; prediction_id?: string; status?: string }> {
+  const params: Record<string, string> = {}
+  if (market) params.market = market
+  const headers: Record<string, string> = {}
+  if (adminKey) headers['X-Admin-Key'] = adminKey
+  const res = await fetchWithAuth(
+    `${API_BASE}/api/prediction/active${Object.keys(params).length ? '?' + new URLSearchParams(params).toString() : ''}`,
+    { headers },
+  )
+  if (!res.ok) return { active: false }
+  return res.json()
+}
+
+/** GET /api/prediction/{id} — 预测快照完整状态（full-state replay） */
+export async function fetchPredictionSnapshot(
+  id: string,
+  adminKey?: string,
+): Promise<PredictionSnapshot> {
+  const headers: Record<string, string> = {}
+  if (adminKey) headers['X-Admin-Key'] = adminKey
+  const res = await fetchWithAuth(`${API_BASE}/api/prediction/${id}`, { headers })
+  if (!res.ok) throw new Error(`获取预测快照失败: ${res.status}`)
+  return res.json()
+}
+
+/** 流中断的原因（都不是"预测失败"，绝不能报成预测失败） */
+export type PredictionInterruptReason =
+  | 'network'        // fetch 抛错 / 连接被重置（断网、后端重启）
+  | 'server_closed'  // 服务端主动关闭流，但没发 done/error（进程被杀 / 反代超时）
+  | 'stalled'        // 连续 N 秒零字节（含 ping 都没有）—— 心跳都停了，链路已死
+
+/** 中断详情，交给 UI 显示"连接已断开 / 正在重连"，而不是"预测失败" */
+export interface PredictionInterruption {
+  reason: PredictionInterruptReason
+  /** 中文可读文案，可直接上屏 */
+  message: string
+  /** 已尝试的重连次数 */
+  attempts: number
+  /** 已收到的最大 event id —— 调用方可拿它手动重连，不丢进度 */
+  lastEventId: number
+  /** 是否还能自动/手动恢复（后台图仍在跑，重连即可续上；false = 已放弃） */
+  recoverable: boolean
+}
+
+export interface StreamPredictionHandlers {
+  /** 状态机转换（queued/news_searching/inferring/done/failed/stopped） */
+  onProgress?: (status: string) => void
+  /** 细粒度阶段进度（契约 A/F：preflight/资讯维度 i/n），填补长时间静默 */
+  onPhaseProgress?: (progress: PredictionProgress) => void
+  /** 推理过程 token（reasoning phase） */
+  onThinking?: (text: string) => void
+  /** 内容增量 token（content phase，同样展示在思考区） */
+  onContent?: (text: string) => void
+  /** 资讯维度结果流入 */
+  onNews?: (item: NewsItem | NewsDimension) => void
+  /** 预测数值结果（方向/幅度/置信区间/拐点） */
+  onForecast?: (forecast: Forecast) => void
+  /** 拐点标注 */
+  onInflection?: (points: Array<{ date: string; price: number; type: string }>) => void
+
+  // ── v2 新增事件（后端 fsm/sse_events.py 枚举）──────────────────────────────
+  /**
+   * 取数工具调用轨迹。每个数据型维度 2 条（phase=start / end），
+   * 渲染成终端风格滚动日志：「stock_announcements(symbol=…) … 388 条 / 1.9s」。
+   */
+  onToolTrace?: (trace: ToolTrace) => void
+  /**
+   * 数据型维度结果（公告/定增/减持/SEC filing）—— 与 onNews 平级。
+   * ★ 卡片必须显示 item.source + item.confidence + 维度的 source_note（用户拍板：诚实标注口径）。
+   */
+  onDataItem?: (result: FilingDimensionResult) => void
+  /** 单条公式推导（边算边推：ARIMA / GARCH / 事件分 / GBM …） */
+  onFormulaStep?: (step: FormulaStep) => void
+  /** 逐日预测蜡烛（horizon=7 → 7 条，K 线一根根长出来）。同 key(day) 重放需幂等 */
+  onForecastDay?: (candle: ForecastCandle) => void
+  /** K 线上的公告事件打点（爆雷/定增/减持） */
+  onEventMarker?: (marker: EventMarker) => void
+  /**
+   * 已暂停。**非终态**（可 resume），但对这条流是终点：
+   * 后台图已被 cancel，不会再有事件 —— 所以流内部不再重连（重连只会挂死流）。
+   * UI 应显示"已暂停 / 继续"，而不是"连接断开"。
+   */
+  onPaused?: (status?: string) => void
+  /** 流结束，后端已落库 */
+  onDone: (snapshot: PredictionSnapshot | null) => void
+  /**
+   * 预测本身失败（后端 error 事件）。kind 来自 MarketDataError.kind，
+   * 用于区分"数据源限流/网络不通"和"算错了"。
+   * 注意：网络断线不会走这里 —— 走 onInterrupted。
+   */
+  onError: (msg: string, kind?: MarketDataErrorKind) => void
+  /** 用户主动停止（AbortSignal）或后端 stopped 事件 */
+  onStopped?: () => void
+  /** 每条事件的 event_log row id（后端在每条 yield 事件里带 id 字段） */
+  onEventId?: (id: number) => void
+  /**
+   * 流意外终止（没收到 done/error/stopped）。后台图仍在跑，
+   * UI 应显示"连接已断开，正在重连"而非"预测失败"。
+   * 未提供时降级为 onError(网络措辞的 message)。
+   */
+  onInterrupted?: (info: PredictionInterruption) => void
+  /** 即将发起第 attempt 次重连（用于显示"正在重连 2/5…"） */
+  onReconnect?: (attempt: number, maxAttempts: number, delayMs: number) => void
+  /** 停滞：连续 silentMs 毫秒没收到任何字节（含 ping）。之后会自动重连 */
+  onStalled?: (silentMs: number) => void
+}
+
+export interface StreamPredictionOptions {
+  /** 停滞判定阈值（毫秒）。后端心跳 3s 一次，30s 零字节即视为链路已死 */
+  stallTimeoutMs?: number
+  /** 最多自动重连次数（超出后走 onInterrupted，recoverable=true 允许用户手动重连） */
+  maxReconnectAttempts?: number
+  /** 指数退避基数（毫秒）：1s / 2s / 4s / 8s / 16s，上限 30s */
+  reconnectBaseDelayMs?: number
+}
+
+const PREDICTION_STALL_TIMEOUT_MS = 30_000
+const PREDICTION_MAX_RECONNECT = 5
+const PREDICTION_RECONNECT_BASE_MS = 1_000
+const PREDICTION_RECONNECT_MAX_MS = 30_000
+
+/** 可恢复的中断 → 中文文案。明确说"网络/连接"，绝不说"预测失败"。 */
+const INTERRUPT_MESSAGES: Record<PredictionInterruptReason, string> = {
+  network: '与服务器的连接已断开（网络异常）。预测仍在后台运行，重连后会继续。',
+  server_closed: '服务器提前关闭了连接（可能正在重启）。预测仍在后台运行，重连后会继续。',
+  stalled: '连接已停止响应（超过 30 秒无任何数据，含心跳）。预测可能仍在后台运行，正在尝试重连。',
+}
+
+/** 可被 AbortSignal 打断的 sleep */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve()
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    function onAbort() {
+      clearTimeout(timer)
+      resolve()
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+/**
+ * 流式订阅预测。单条 SSE 流贯穿 preflight→news_searching→inferring→done 全阶段。
+ *
+ * afterEventId：resume 游标。后端 GET /stream?after_event_id=X 会先回放
+ * event_log 中 id>X 的已落库事件，再继续 drain 实时流。刷新/重进页面时
+ * 传 0 → 全量回放 + 续流。断线自动重连时，用「已收到的最大 ev.id」作为游标续传，
+ * 不再全量重放 4000+ 条 thinking。
+ *
+ * 事件分发（事件值匹配后端 SSEEventType 枚举值）：
+ *   'prediction_progress' → onProgress(ev.status) 和/或 onPhaseProgress({phase,label,index,total,detail})
+ *   'thinking'            → onThinking(ev.text)   (reasoning phase)
+ *   'content'             → onContent(ev.text)     (content phase，同样展示在思考区)
+ *   'news_item'           → onNews(ev)
+ *   'forecast'            → onForecast(ev.forecast)
+ *   'inflection'          → onInflection(ev.points)
+ *   'tool_trace'          → onToolTrace(ev)      (v2：取数工具调用轨迹 start/end)
+ *   'data_item'           → onDataItem(ev)       (v2：数据型维度结果，与 news_item 平级)
+ *   'formula_step'        → onFormulaStep(ev)    (v2：公式推导，边算边推)
+ *   'forecast_day'        → onForecastDay(ev)    (v2：逐日预测蜡烛 ×horizon)
+ *   'event_marker'        → onEventMarker(ev)    (v2：K 线公告打点)
+ *   'paused'              → onPaused()           (v2：非终态，但这条流到此为止，不重连)
+ *   'ping'                → 只刷新停滞计时器，不渲染（心跳不进 event_log，无 id）
+ *   'done' / 'stopped'    → onDone / onStopped（终态，不再重连）
+ *   'error'               → onError(ev.message, ev.error_kind)（终态，不再重连）
+ *
+ * v2 事件全部走**已有的** eid 游标 + 停滞检测 + 重连骨架 —— 只在 switch 里加分支，
+ * 不重写 parser。重放（afterEventId=0）时它们会按 event_log 顺序原样重发，
+ * 所以回调实现必须幂等（如 forecast_day 按 day 覆盖而不是 push 重复）。
+ *
+ * 三种"没收到终态就结束"的情况全部走 onInterrupted（网络问题），并自动按
+ * 指数退避重连；只有耗尽重试次数才把 recoverable 交回给 UI。
+ * 用户主动 abort 走 onStopped。
+ *
+ * 注意：预测模块用 'thinking' 和 'content'（不是 'delta'），不沿用 quant 的违规。
+ */
+export async function streamPrediction(
+  predictionId: string,
+  adminKey: string,
+  handlers: StreamPredictionHandlers,
+  signal?: AbortSignal,
+  afterEventId: number = 0,
+  options: StreamPredictionOptions = {},
+): Promise<void> {
+  const stallTimeoutMs = options.stallTimeoutMs ?? PREDICTION_STALL_TIMEOUT_MS
+  const maxAttempts = options.maxReconnectAttempts ?? PREDICTION_MAX_RECONNECT
+  const baseDelayMs = options.reconnectBaseDelayMs ?? PREDICTION_RECONNECT_BASE_MS
+
+  /** resume 游标：已收到的最大 event_log id。重连时从这里续，避免全量重放 */
+  let cursor = afterEventId
+  /** 终态标记：收到 done/error/stopped 之一就不再重连 */
+  let terminal = false
+  let attempts = 0
+
+  /** 跑一次连接。返回中断原因；返回 null 表示已到达终态。 */
+  async function runOnce(): Promise<PredictionInterruptReason | null> {
+    const url =
+      `${API_BASE}/api/prediction/${predictionId}/stream` +
+      `?after_event_id=${cursor}`
+
+    let res: Response
+    try {
+      res = await fetchWithAuth(url, {
+        signal,
+        headers: { 'X-Admin-Key': adminKey },
+      })
+    } catch (e: any) {
+      if (signal?.aborted) return null
+      // fetch 抛错 = 连不上（断网 / 后端没起来），可重试
+      console.warn('[prediction SSE] 连接失败，将重试', e?.message)
+      return 'network'
+    }
+
+    if (!res.ok) {
+      // 5xx / 502 / 504 = 服务端暂时不可用（重启中、网关超时）→ 当作网络问题重连
+      if (res.status >= 500) return 'network'
+      // 4xx = 鉴权/不存在，重连没有意义 → 终态错误
+      terminal = true
+      handlers.onError(`预测流请求失败 (HTTP ${res.status})`)
+      return null
+    }
+
+    const reader = res.body?.getReader()
+    if (!reader) {
+      terminal = true
+      handlers.onError('浏览器不支持流式读取')
+      return null
+    }
+
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let lastDataTime = Date.now()
+    let stalled = false
+
+    // 独立计时器检测停滞，不干扰 reader.read() 的 await。
+    // 后端每 3s 一个 ping；连 ping 都收不到 = socket 已死（这正是 198s 空洞的症状）。
+    // 轮询间隔取 min(5s, 阈值/2)，保证小阈值也能被及时发现（默认 30s 阈值 → 5s，与聊天一致）。
+    const pollMs = Math.max(50, Math.min(5_000, Math.floor(stallTimeoutMs / 2)))
+    const stallTimer = setInterval(() => {
+      const silent = Date.now() - lastDataTime
+      if (silent > stallTimeoutMs) {
+        stalled = true
+        try { handlers.onStalled?.(silent) } catch (e) { console.error('[prediction SSE] onStalled error', e) }
+        console.warn(`[prediction SSE] ${Math.round(silent / 1000)}s 无数据（含心跳），主动断开重连`)
+        reader.cancel().catch(() => {})
+      }
+    }, pollMs)
+
+    function processLine(line: string) {
+      if (!line.startsWith('data: ')) return
+      let ev: any
+      try {
+        ev = JSON.parse(line.slice(6))
+      } catch {
+        return  // 半行 / 非 JSON，忽略
+      }
+
+      // 心跳：只刷新停滞计时器，不渲染、不推游标（ping 不入 event_log，故无 id）
+      if (ev.event === 'ping' || ev.ping) {
+        lastDataTime = Date.now()
+        return
+      }
+
+      // resume 游标：后端在每条落库事件里带 event_log 的自增 id
+      if (typeof ev.id === 'number') {
+        if (ev.id > cursor) cursor = ev.id
+        handlers.onEventId?.(ev.id)
+      }
+
+      switch (ev.event) {
+        case 'prediction_progress':
+          // 两种 payload 可能同时出现：状态机转换（status）和细粒度阶段（phase）
+          if (typeof ev.status === 'string') handlers.onProgress?.(ev.status)
+          if (typeof ev.phase === 'string') {
+            handlers.onPhaseProgress?.({
+              phase: ev.phase as PredictionProgress['phase'],
+              label: typeof ev.label === 'string' ? ev.label : undefined,
+              index: typeof ev.index === 'number' ? ev.index : undefined,
+              total: typeof ev.total === 'number' ? ev.total : undefined,
+              detail: typeof ev.detail === 'string' ? ev.detail : undefined,
+              updated_at: typeof ev.updated_at === 'number' ? ev.updated_at : undefined,
+            })
+          }
+          break
+        case 'thinking':
+          if (typeof ev.text === 'string') handlers.onThinking?.(ev.text)
+          break
+        case 'content':
+          if (typeof ev.text === 'string') handlers.onContent?.(ev.text)
+          break
+        case 'news_item':
+          handlers.onNews?.(ev)
+          break
+        case 'forecast':
+          if (ev.forecast) handlers.onForecast?.(ev.forecast as Forecast)
+          break
+        case 'inflection':
+          if (ev.points) handlers.onInflection?.(ev.points)
+          break
+
+        // ── v2 事件（payload 与 news_item 同构：结构体字段被摊平进事件体）──────
+        // 容忍两种形态：字段摊平 或 包一层（ev.trace / ev.result / ev.step / ev.candle / ev.marker）。
+        case 'tool_trace': {
+          const t = (ev.trace ?? ev) as any
+          if (typeof t.tool !== 'string' || !t.tool) break
+          handlers.onToolTrace?.({
+            phase: t.phase === 'end' ? 'end' : 'start',
+            dimension: String(t.dimension ?? ''),
+            tool: t.tool,
+            args: (t.args && typeof t.args === 'object') ? t.args : undefined,
+            rows: typeof t.rows === 'number' ? t.rows : undefined,
+            elapsed_ms: typeof t.elapsed_ms === 'number' ? t.elapsed_ms : undefined,
+            summary: typeof t.summary === 'string' ? t.summary : undefined,
+            error: typeof t.error === 'string' && t.error ? t.error : undefined,
+            ts: typeof t.ts === 'number' ? t.ts : undefined,
+          })
+          break
+        }
+        case 'data_item': {
+          const d = (ev.result ?? ev.item ?? ev) as any
+          if (typeof d.dimension !== 'string' || !d.dimension) break
+          handlers.onDataItem?.({
+            ...d,
+            items: Array.isArray(d.items) ? d.items : [],
+            score: typeof d.score === 'number' ? d.score : 0,
+          } as FilingDimensionResult)
+          break
+        }
+        case 'formula_step': {
+          const s = (ev.step ?? ev) as any
+          if (typeof s.key !== 'string' || !s.key) break
+          handlers.onFormulaStep?.(s as FormulaStep)
+          break
+        }
+        case 'forecast_day': {
+          const c = (ev.candle ?? ev) as any
+          // day + OHLC 是刚需；缺一根就不画（宁可少画，不画错）
+          if (typeof c.day !== 'number' || typeof c.c !== 'number') break
+          handlers.onForecastDay?.({
+            day: c.day,
+            date: String(c.date ?? ''),
+            o: Number(c.o ?? c.c),
+            h: Number(c.h ?? c.c),
+            l: Number(c.l ?? c.c),
+            c: Number(c.c),
+            p10: typeof c.p10 === 'number' ? c.p10 : undefined,
+            p50: typeof c.p50 === 'number' ? c.p50 : undefined,
+            p90: typeof c.p90 === 'number' ? c.p90 : undefined,
+          })
+          break
+        }
+        case 'event_marker': {
+          const m = (ev.marker ?? ev) as any
+          if (typeof m.date !== 'string' || !m.date) break
+          handlers.onEventMarker?.({
+            date: m.date,
+            event_type: String(m.event_type ?? ''),
+            title: typeof m.title === 'string' ? m.title : undefined,
+            score: typeof m.score === 'number' ? m.score : undefined,
+            dimension: typeof m.dimension === 'string' ? m.dimension : undefined,
+          })
+          break
+        }
+        case 'paused':
+          // ★ 对流而言是终点（后台图已 cancel，不会再有事件）→ terminal=true 阻止重连，
+          //   否则会走 server_closed → 退避重连 5 次 → 谎报"连接已断开"。
+          //   但对状态机**不是终态**：status=paused，用户点"继续"可 resume 续跑。
+          terminal = true
+          try { handlers.onPaused?.(typeof ev.status === 'string' ? ev.status : 'paused') }
+          catch (e) { console.error('[prediction SSE] onPaused error', e) }
+          break
+
+        case 'done':
+          terminal = true
+          try { handlers.onDone((ev.snapshot as PredictionSnapshot | null) ?? null) }
+          catch (e) { console.error('[prediction SSE] onDone error', e) }
+          break
+        case 'stopped':
+          terminal = true
+          try { handlers.onStopped?.() } catch (e) { console.error('[prediction SSE] onStopped error', e) }
+          break
+        case 'error':
+          terminal = true
+          try {
+            handlers.onError(
+              String(ev.message || '预测失败'),
+              typeof ev.error_kind === 'string' ? (ev.error_kind as MarketDataErrorKind) : undefined,
+            )
+          } catch (e) { console.error('[prediction SSE] onError error', e) }
+          break
+        default:
+          // 未知事件类型静默忽略（前向兼容）
+          break
+      }
+    }
+
+    try {
+      while (true) {
+        let done: boolean
+        let value: Uint8Array | undefined
+        try {
+          const result = await reader.read()
+          done = result.done
+          value = result.value
+        } catch (e: any) {
+          // 读取中途抛错 = 连接被重置
+          if (signal?.aborted) return null
+          console.warn('[prediction SSE] 读取中断', e?.message)
+          return stalled ? 'stalled' : 'network'
+        }
+        if (done) break
+
+        lastDataTime = Date.now()
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+        for (const line of lines) processLine(line)
+        if (terminal) return null   // 终态：立刻收工，不再读残余
+      }
+      // 处理残留 buffer（最后一个事件可能没以 \n 结尾）
+      if (buffer.trim()) processLine(buffer.trim())
+    } finally {
+      clearInterval(stallTimer)
+    }
+
+    if (terminal) return null
+    if (signal?.aborted) return null
+
+    // 流正常结束（done=true）但没收到 done/error/stopped —— 服务端提前关流
+    return stalled ? 'stalled' : 'server_closed'
+  }
+
+  while (true) {
+    const reason = await runOnce()
+
+    if (reason === null) {
+      // 到达终态，或用户 abort
+      if (!terminal && signal?.aborted) handlers.onStopped?.()
+      return
+    }
+
+    // 用户在这期间点了停止
+    if (signal?.aborted) {
+      handlers.onStopped?.()
+      return
+    }
+
+    if (attempts >= maxAttempts) {
+      // 重试耗尽：交回给 UI。recoverable=true —— 后台图还在跑，
+      // 用户可以拿 lastEventId 手动重连，绝不能显示成"预测失败"。
+      const info: PredictionInterruption = {
+        reason,
+        message: `${INTERRUPT_MESSAGES[reason]}（已重试 ${attempts} 次仍未恢复，可手动重连）`,
+        attempts,
+        lastEventId: cursor,
+        recoverable: true,
+      }
+      if (handlers.onInterrupted) {
+        handlers.onInterrupted(info)
+      } else {
+        // 降级：没实现 onInterrupted 也必须让用户看到"这是网络问题"
+        handlers.onError(info.message)
+      }
+      return
+    }
+
+    attempts += 1
+    const delayMs = Math.min(
+      baseDelayMs * 2 ** (attempts - 1),
+      PREDICTION_RECONNECT_MAX_MS,
+    )
+
+    // 先告诉 UI"连接断了，正在重连"（不是失败），再退避
+    handlers.onInterrupted?.({
+      reason,
+      message: INTERRUPT_MESSAGES[reason],
+      attempts,
+      lastEventId: cursor,
+      recoverable: true,
+    })
+    try { handlers.onReconnect?.(attempts, maxAttempts, delayMs) }
+    catch (e) { console.error('[prediction SSE] onReconnect error', e) }
+
+    await abortableSleep(delayMs, signal)
+    if (signal?.aborted) {
+      handlers.onStopped?.()
+      return
+    }
+    // 下一轮 runOnce 会用推进后的 cursor 续传，不全量重放
   }
 }

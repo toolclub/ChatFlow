@@ -1,4 +1,9 @@
-"""启动期初始化 — 按 QUANT_PROVIDER_ORDER 注册 provider 并探活"""
+"""启动期初始化 — 按 QUANT_PROVIDER_ORDER 注册 provider 并探活
+
+只受 QUANT_ENABLED 约束，**不** 受 QUANT_SCREENING_ENABLED 约束：
+股票预测通过 quant.data_adapter → provider_registry 拉 K 线，选股关掉后 provider
+仍必须可用。选股开关只关「选股业务 + 缓存预热器」（见 quant/cache_warmer.py）。
+"""
 from __future__ import annotations
 
 import logging

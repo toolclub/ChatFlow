@@ -17,7 +17,7 @@ from pydantic import BaseModel
 
 from db.database import AsyncSessionLocal
 from db.models import UserModel, ConversationModel, MessageModel, UserUsageLogModel
-from services.auth.dependencies import CurrentUser
+from services.auth.dependencies import CurrentUser, verify_admin_access
 import config
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -27,12 +27,7 @@ ADMIN_SECRET_KEY = config.ADMIN_SECRET_KEY
 class VerifyKeyRequest(BaseModel):
     key: str
 
-# ── 鉴权中间件 ──────────────────────────────────────────────────────────────
-
-async def verify_admin_access(x_admin_key: str = Header(None)):
-    if x_admin_key != ADMIN_SECRET_KEY:
-        raise HTTPException(status_code=403, detail="管理员权限验证失败")
-    return True
+# ── 鉴权中间件（verify_admin_access 已上提到 services/auth/dependencies.py，供 quant + prediction 共用） ──
 
 # ── 接口实现 ──────────────────────────────────────────────────────────────────
 

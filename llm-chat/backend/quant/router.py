@@ -2,6 +2,7 @@
 
 接口划分：
   GET  /api/quant/status                    探活
+  GET  /api/quant/enabled                   开关状态（前端 Sidebar 用，不受开关影响）
   GET  /api/quant/providers                 列出 provider
   POST /api/quant/providers/refresh         重新探活
   POST /api/quant/screen                    同步选股（不含 LLM，秒级返回）
@@ -12,6 +13,12 @@
   - /screen 仅跑因子管线，返回 snapshot_id + rows + trace（首次冷启 ~10s，缓存命中 <3s）
   - /analyze 异步消费已落库的 snapshot，流式生成 analysis / risk_notes 并回写 DB
   - 拆开后前端先看到表格，AI 洞察异步流入，避免 30-60s 的 spinner
+
+两级开关：
+  QUANT_ENABLED            整个量化模块（含行情数据访问）
+  QUANT_SCREENING_ENABLED  仅「选股业务 + 缓存预热」。false 时选股端点 503，但
+                           /stock/{symbol}/chart、/cache/status、/providers 仍可用 ——
+                           股票预测复用它们拉行情，不能一起关掉。
 """
 from __future__ import annotations
 
@@ -27,11 +34,11 @@ from db.quant_store import get_quant_snapshot, save_quant_snapshot, get_active_q
 from graph.quant_agent import background_screen, stream_analyze
 from quant import cache_disk
 from quant.cache_warmer import get_warmer
-from quant.config import QUANT_ENABLED
+from quant.config import QUANT_ENABLED, QUANT_SCREENING_ENABLED
 from quant.domain import ProviderInfo, ScreenCriteria
 from quant.provider_registry import NoProviderAvailable, get_registry
 from quant.service import get_service
-from services.auth.dependencies import CurrentUser
+from services.auth.dependencies import AdminRequired, CurrentUser
 
 logger = logging.getLogger("quant.router")
 
@@ -43,9 +50,25 @@ def _ensure_enabled() -> None:
         raise HTTPException(status_code=503, detail="量化模块未启用（QUANT_ENABLED=false）")
 
 
+def _ensure_screening_enabled() -> None:
+    """选股专属端点的闸门。行情/图表/缓存状态类端点不要调它 —— 股票预测在用。"""
+    _ensure_enabled()
+    if not QUANT_SCREENING_ENABLED:
+        raise HTTPException(
+            status_code=503,
+            detail="智能选股已禁用（QUANT_SCREENING_ENABLED=false）",
+        )
+
+
 @router.get("/status")
 async def status() -> dict:
-    return {"enabled": QUANT_ENABLED}
+    return {"enabled": QUANT_ENABLED, "screening_enabled": QUANT_ENABLED and QUANT_SCREENING_ENABLED}
+
+
+@router.get("/enabled")
+async def screening_enabled() -> dict:
+    """智能选股开关状态。前端 Sidebar 据此隐藏入口 —— 本端点不受开关影响，始终可访问。"""
+    return {"enabled": QUANT_ENABLED and QUANT_SCREENING_ENABLED}
 
 
 @router.get("/providers", response_model=list[ProviderInfo])
@@ -67,6 +90,8 @@ async def cache_status() -> dict:
 
     前端 QuantView 头部用此数据展示"数据更新于 X 分钟前"。
     warming 字段为 true 时前端应显示"数据同步中"。
+
+    只读诊断，不发外部请求；磁盘缓存与股票预测共用，故不受选股开关约束。
     """
     _ensure_enabled()
     info = await cache_disk.cache_status()
@@ -88,18 +113,19 @@ async def cache_refresh(kinds: list[str] | None = None) -> dict:
 
     kinds: ["spot","bars","index","prune"]，默认全部
     """
-    _ensure_enabled()
+    _ensure_screening_enabled()
     return await get_warmer().trigger_now(kinds)
 
 
 @router.get("/session/active")
 async def get_active_session(
+    admin: AdminRequired,
     user: CurrentUser,
     market: str | None = None,
 ) -> dict:
     """查询当前客户端是否有正在进行的筛选任务。供前端刷新页面后恢复状态用。"""
-    _ensure_enabled()
-    
+    _ensure_screening_enabled()
+
     snap = await get_active_quant_session(
         client_id=user.get("client_id", ""),
         market=market,
@@ -120,11 +146,12 @@ async def get_active_session(
 @router.post("/screen")
 async def screen(
     criteria: ScreenCriteria,
+    admin: AdminRequired,
     user: CurrentUser,
 ) -> dict:
     """发起选股：立即返回 snapshot_id，后台异步计算。"""
-    _ensure_enabled()
-    
+    _ensure_screening_enabled()
+
     client_id = user.get("client_id", "")
     user_id = user.get("id", "")
     snapshot_id = f"qs_{uuid.uuid4().hex[:12]}"
@@ -175,8 +202,8 @@ async def _check_snapshot_access(snapshot_id: str, user: dict):
 
 
 @router.get("/snapshot/{snapshot_id}")
-async def read_snapshot(snapshot_id: str, user: CurrentUser) -> dict:
-    _ensure_enabled()
+async def read_snapshot(snapshot_id: str, admin: AdminRequired, user: CurrentUser) -> dict:
+    _ensure_screening_enabled()
     snap = await _check_snapshot_access(snapshot_id, user)
     return {
         "snapshot_id":    snap.id,
@@ -194,8 +221,12 @@ async def read_snapshot(snapshot_id: str, user: CurrentUser) -> dict:
 
 
 @router.get("/stock/{symbol}/chart")
-async def get_stock_chart(symbol: str, days: int = 240) -> dict:
-    """获取个股 K 线图数据。"""
+async def get_stock_chart(symbol: str, admin: AdminRequired, days: int = 240) -> dict:
+    """获取个股 K 线图数据。
+
+    注意：股票预测（usePrediction / StockDetailView）也在用这个端点，
+    不能被 QUANT_SCREENING_ENABLED 关掉 —— 只受 QUANT_ENABLED 约束。
+    """
     _ensure_enabled()
     try:
         service = get_service()
@@ -208,6 +239,7 @@ async def get_stock_chart(symbol: str, days: int = 240) -> dict:
 @router.get("/snapshot/{snapshot_id}/analyze")
 async def analyze_snapshot(
     snapshot_id: str,
+    admin: AdminRequired,
     user: CurrentUser,
     request: Request,
 ) -> StreamingResponse:
@@ -219,7 +251,7 @@ async def analyze_snapshot(
       data: {"event":"done","analysis":"...","risk_notes":[...],"thinking_segments":[...]}
       data: {"event":"error","message":"..."}
     """
-    _ensure_enabled()
+    _ensure_screening_enabled()
     snap = await _check_snapshot_access(snapshot_id, user)
 
     rows = snap.rows or []

@@ -595,6 +595,264 @@ pytest tests/ -m smoke         # 冒烟拨测（端到端）
 
 ---
 
+## 十-B、股票预测 - 资讯搜索 (graph/prediction/news_search.py)
+
+> 测试文件：`tests/test_prediction_news.py`。运行：`pytest tests/test_prediction_news.py -v -m unit`
+> 设计来自 `graph/prediction/news_search.py`（全量不截取 + per-prediction 预算 + 12 维编排）。
+> 隔离策略：httpx.AsyncClient / _incr_prediction_count / get_chat_llm / asyncio.sleep 全部 monkeypatch；
+> news_search import chain 不依赖 statsmodels/arch，无需 sys.modules 占位。
+
+### T-PRED-NEWS: 资讯搜索 helper
+
+| 用例 | 操作 | 期望 | 标记 |
+|------|------|------|------|
+| T-PRED-NEWS-01 | `_normalize_result(raw_content=20000字符)` | `full_content` 长度 == 20000（不切 4500），无 `chunks` 字段 | unit |
+| T-PRED-NEWS-02 | httpx post 持续抛 ConnectError | post 调用次数 == `TAVILY_RETRY_TIMES`，结果 note 含"连接失败"，results=[] | unit |
+| T-PRED-NEWS-02b | 正常 post 返回固定 payload | answer 正确，full_content 保留完整 20000 | unit |
+| T-PRED-NEWS-03 | fake LLM astream 吐 JSON 数组 `["q1","q2"]`；`generate_queries` 消费 | 解析出 1-2 条 query，content token 经 on_delta 转发 | unit |
+| T-PRED-NEWS-03b | LLM 吐带 _THINK_PREFIX 推理段 + content | thinking 剥离前缀后转发，content 正常解析为 `["q1"]` | unit |
+| T-PRED-NEWS-03c | LLM 输出非 JSON | 兜底拼 `{symbol} {label}`，返回 1 条不空 | unit |
+| T-PRED-NEWS-04 | fake LLM astream 吐 `{sentiment:0.6,reason:"看多"}`；`score_sentiment` 消费 | 返回 (0.6, "看多") | unit |
+| T-PRED-NEWS-04b | sentiment=5.0 / 输出垃圾文本 | 5.0 钳制到 1.0；垃圾文本兜底 (0.0, "") | unit |
+| T-PRED-NEWS-05 | mock tavily_search + get_chat_llm；`search_all_dimensions(symbol, market, pred)` 默认 12 维 | digest 长度 == len(NEWS_DIMENSIONS)；每维 on_dimension 回调触发；news_sentiment ∈ [-1,1]；每条含 dimension/query/answer/results/sentiment/sentiment_reason | unit |
+| T-PRED-NEWS-05b | 传 dimensions 子集 2 维 | digest 长度 == 2，dimension 顺序保留 | unit |
+| T-PRED-NEWS-06 | `_incr_prediction_count` 返回 `BUDGET+1` | tavily_search 返回 note "预算耗尽"、results=[]，httpx post 调用 0 次（预算短路在 httpx 之前） | unit |
+
+---
+
+## 十-C、股票预测状态机 (fsm/prediction.py)
+
+> 测试文件：`tests/test_prediction_fsm.py`。运行：`pytest tests/test_prediction_fsm.py -v -m unit`
+> 覆盖 PredictionSM 生命周期、非法转换兜底、DB 恢复、枚举值、卡住任务清理。
+> 铁律对照：#1 状态从 DB 字段读、#6 状态机校验先于写库、#9 异常不吞。
+> 隔离策略：fsm/prediction 仅依赖 python-statemachine（运行时 import，collection 不触发）；
+> cleanup 测试 monkeypatch `AsyncSessionLocal`（假异步会话）+ `update`（假语句工厂），不碰真实 DB。
+
+### T-PRED-FSM: PredictionSM 状态机
+
+| 用例 | 输入 / 操作 | 期望 | 标记 |
+|------|------|------|------|
+| T-PRED-FSM-01 | queued→news_searching→inferring→done 依次 send_event | 每步 current_value 正确，done 终态 | unit |
+| T-PRED-FSM-02 | queued/news_searching/inferring 各自 send_event("failed") | current_value = "failed" | unit |
+| T-PRED-FSM-03a | queued→done（跳步）send_event | 返回 "queued"（不变），记 warning，不抛 | unit |
+| T-PRED-FSM-03b | queued→inferring（漏 news_searching） | 返回 "queued"（不变） | unit |
+| T-PRED-FSM-03c | done/failed 终态后试任意目标 | 返回当前值不变 | unit |
+| T-PRED-FSM-03d | send_event("garbage") | 返回 "queued"（不变） | unit |
+| T-PRED-FSM-04a | `from_db_status("inferring")` | current_value = "inferring"，可续 → done | unit |
+| T-PRED-FSM-04b | `from_db_status("garbage")` / `from_db_status("")` | 降级到 "queued" | unit |
+| T-PRED-FSM-05 | PredictionStatus 枚举 | 恰好 5 个值 {queued,news_searching,inferring,done,failed}；(str,Enum) 与字符串相等；`PredictionStatus("queued")` 构造；json.dumps 输出字符串 | unit |
+
+### T-PRED-CLEAN: cleanup_stale_prediction_sessions（mock AsyncSessionLocal）
+
+| 用例 | 操作 | 期望 | 标记 |
+|------|------|------|------|
+| T-PRED-CLEAN-01 | `cleanup_stale_prediction_sessions()`（mock 会话 rowcount=7） | 返回 7；executed 1 条；committed=True；values.status="failed"；error_message 含「中断」 | unit |
+| T-PRED-CLEAN-02 | `cleanup_stale_prediction_sessions(timeout_minutes=5)` | error_message 含「5」；where 条件数 ≥2（含 created_at cutoff） | unit |
+| T-PRED-CLEAN-03 | mock rowcount=0 | 返回 0；仍 commit；语句 status="failed" | unit |
+
+---
+
+## 十-D、股票预测 - 鉴权 (prediction auth)
+
+> 设计来自 `services/auth/dependencies.py::verify_admin_access` + `routers/admin_router.py` + `routers/prediction_router.py`。
+> 铁律 #1：admin key 拦截来自后端 403，非前端 v-show。prediction 路由全量 admin 鉴权（D5）。
+> 测试文件：`tests/test_prediction_auth.py`，运行：`pytest tests/test_prediction_auth.py -v -m unit`。
+> 隔离（mirror test_quant_analyze/screen）：monkeypatch `config.ADMIN_SECRET_KEY` + `admin_router.ADMIN_SECRET_KEY` 到测试值；prediction store 函数（save_prediction_snapshot / list_prediction_records / get_active_prediction / get_prediction_snapshot）全 mock；statsmodels/arch 注入 sys.modules 桩（engine.py 延迟 import 的防回归保险，正常 collection 不触发）。
+
+### T-PREDICT-AUTH-01: verify_admin_access 依赖
+
+> 已实现：`test_verify_admin_access_*`
+
+| 用例 | 输入 | 期望 | 标记 |
+|------|------|------|------|
+| 无 X-Admin-Key header | `verify_admin_access(x_admin_key=None)` | HTTPException 403 | unit |
+| 错误 key | `verify_admin_access(x_admin_key="wrong")` | HTTPException 403 | unit |
+| 正确 key | `verify_admin_access(x_admin_key=TEST_KEY)` (== config.ADMIN_SECRET_KEY) | 返回 True | unit |
+
+### T-PREDICT-AUTH-02: POST /api/admin/verify
+
+> 已实现：`test_admin_verify_*`
+
+| 用例 | 请求 | 期望 | 标记 |
+|------|------|------|------|
+| 正确 key | `POST /api/admin/verify` body `{"key": TEST_KEY}` | 200，`{"ok": True}` | unit |
+| 错误 key | body `{"key": "nope"}` | 401 | unit |
+
+### T-PREDICT-AUTH-03: prediction 路由无 X-Admin-Key → 403
+
+> 已实现：`test_prediction_*_no_key_403`。鉴权依赖先于业务逻辑执行。
+
+| 用例 | 请求（无 X-Admin-Key） | 期望 | 标记 |
+|------|------|------|------|
+| GET /api/prediction/records | 无 header | 403 | unit |
+| GET /api/prediction/active | 无 header | 403 | unit |
+| GET /api/prediction/{id} | 无 header | 403 | unit |
+| POST /api/prediction/predict | 合法 body、无 header | 403（鉴权先于 body 业务） | unit |
+
+### T-PREDICT-AUTH-04: 正确 key + store mock → 200
+
+> 已实现：`test_prediction_*_correct_key_200`。prediction_store 全 mock，不触 DB。
+
+| 用例 | 请求 | 期望 | 标记 |
+|------|------|------|------|
+| records 列表 | GET /records + key | 200，`[]` | unit |
+| active 查询 | GET /active + key（mock 返回 None） | 200，`{"active": False}` | unit |
+| 创建预测 | POST /predict + key + 合法 body | 200，`status="queued"`、`prediction_id` 以 `pred_` 开头、`save_prediction_snapshot` 以 `status="queued"` 调用 | unit |
+
+### T-PREDICT-AUTH-05: X-Client-ID → client_id（admin key-only 路径 D1）
+
+> 已实现：`test_client_id_*`。验证 `_client_id_from_header`：取 X-Client-ID，无/空白降级 "admin"。
+
+| 用例 | X-Client-ID header | store 收到 client_id | 标记 |
+|------|------|------|------|
+| 有 client id | `user42` | `user42` | unit |
+| 无 header | （缺失） | `admin`（默认） | unit |
+| 空白 | `"   "` | `admin`（strip 后空 → 降级） | unit |
+
+---
+
+## 十-E、股票预测 - 计算引擎 (graph/prediction/engine.py + factors/prediction_indicators.py)
+
+> 测试文件：`tests/test_prediction_engine.py`。运行：`pytest tests/test_prediction_engine.py -v -m unit`
+> 覆盖 `forecast()`（ARIMA+GARCH+蒙特卡洛+资讯修正）+ `compute_all()` 技术指标快照。
+> 隔离（mirror test_quant_analyze/screen）：系统 python 无 statsmodels/arch，故在 `sys.modules` 层
+> 注入 fake 模块——fake `ARIMA.fit().forecast(steps)` 返回固定步进漂移（last_close×1.002^(t+1)），
+> fake `arch_model().fit().forecast()` 返回固定方差（→ sigma_annual=0.30），fake `fit().params`
+> 返回 GARCH(1,1) 的 ω/α/β（α+β=0.98<1），让 forecast 走真实 ARIMA/GARCH 代码路径而非降级路径。
+> 合成 bars_df（~60/90 行、上升 close）驱动；MC 用 `np.random.seed` 固定以消除随机噪声。
+>
+> ⚠ **踩过的坑（改测试前必读）**：fake 的安装必须**无条件覆盖** `sys.modules`，且用 autouse
+> fixture 在每个用例前重装。`tests/test_prediction_auth.py`（按字母序更早 collect）在模块级也塞了
+> 一份**哑桩**（`ARIMA = object`、`arch_model = lambda: None`）。原来这里写的是
+> `if "statsmodels" not in sys.modules:` —— 哑桩先占坑，本文件的 fake 就被静默跳过：
+> **单跑 test_prediction_engine.py 走真 ARIMA/GARCH，全套件跑却走 naive-drift + 历史 std 降级**，
+> 同一批断言实际在测两套代码路径。老断言只校验区间（`0<=confidence<=1`）所以一直是绿的，
+> 直到 T-PRED-V2-01 断言 `arima_aic != 0` 才暴露。
+> 铁律对照：#2 结构化数据走独立 JSONB key（point_forecast/p10/p50/p90/inflection_points）、
+> #4 async 纪律（forecast 是 async def，测试用 asyncio.run）、#9 不吞异常（引擎 except 均 warning+降级）。
+
+### T-PRED-ENGINE: 计算引擎 forecast + 技术指标
+
+| 用例 | 输入 / 操作 | 期望 | 标记 |
+|------|------|------|------|
+| T-PRED-01 | `forecast(bars_60, sentiment=0, horizon=5)` | 返回 dict 含 {dates,point_forecast,p10,p50,p90,inflection_points,confidence,model_name,technical_indicators}；dates/point_forecast/p10/p50/p90 长度均 == horizon；confidence ∈ [0,1]；model_name == `engine.MODEL_NAME`（v2 = "ARIMA+GARCH+Event+MC"；断言直接引用常量，改名不用再逐条改测试） | unit |
+| T-PRED-02 | 同上 | 每个时点 p10 ≤ p50 ≤ p90，且全部有限值 | unit |
+| T-PRED-03 | 同上 | point_forecast == p50（中位点预测） | unit |
+| T-PRED-04 | 同上 | dates == last_date 之后 horizon 个工作日（bdate_range，跳周末） | unit |
+| T-PRED-05 | 同上 | technical_indicators：rsi14 ∈ [0,100] 且 ≥50（上升）；macd 含 dif/dea/hist；boll upper≥mid≥lower；kdj 含 k/d/j 且 j 有限 | unit |
+| T-PRED-06 | `_make_bars_reversal_up`（下行→急速反弹）+ `_make_bars_reversal_down`（上行→急速回落）直接喂 `kdj()` | 反弹序列 J>100、回落序列 J<0（验证 J 不被 clip 到 [0,100]） | unit |
+| T-PRED-07 | `np.random.seed(2024)` 固定后 `forecast(bars, sentiment=+1)` vs `forecast(bars, sentiment=-1)` | sentiment=+1 的 point_forecast 均值 > sentiment=-1（资讯 ±15% 年化漂移修正方向；±1 同触发波动率扩大，sigma 相同，唯一差异是漂移） | unit |
+| T-PRED-08 | `forecast(bars, sentiment=999.0)` 与 `sentiment=-999.0` | 被钳制到 [-1,1]，不抛异常，返回 5 长度 point_forecast | unit |
+| T-PRED-09 | `forecast(pd.DataFrame(), 0, 5)`（空 df） | 返回默认 ForecastResult（model_name 占位、point_forecast=[]、confidence=0） | unit |
+| T-PRED-10 | close 全 NaN 的 bars | 同降级默认 ForecastResult | unit |
+| T-PRED-11 | `compute_all(bars_60)` | 含 {ma5,ma10,ma20,ema12,ema26,macd,rsi14,boll,kdj,last_close}；last_close == bars 末值；ma5/ma20 有限 | unit |
+| T-PRED-12 | `compute_all(pd.DataFrame())`（空） | 全 NaN 指标快照，不抛异常 | unit |
+| T-PRED-13 | `_inflection_points(dates,[10,11,12,11,10])` | 检出 peak，price≈12，date="d3" | unit |
+| T-PRED-14 | `_naive_drift(s_20rows, horizon=5)`（<30 行降级路径，不依赖 statsmodels） | path 长度 5 且正漂移序列单调上升；ann 有限 | unit |
+| T-PRED-15 | `_hist_std_vol(rets, 5)`（GARCH 降级路径） | sigma>0、var_path 长度 5 且全正 | unit |
+| T-PRED-16 | `_monte_carlo(100, mu=0.10, sigma=0.30, 5, 500, (10,50,90))` | p10/p50/p90 长度=5 且 p10≤p50≤p90 | unit |
+
+### T-PRED-V2: 引擎 v2（ModelParams / 事件分双通道 / 7 根 OHLC 蜡烛 / on_step 流式推导）
+
+> v1 把 ARIMA order/AIC、GARCH ω/α/β 全丢在局部变量里（最多 log 一行），前端无从解释预测结果。
+> v2 全链路贯穿：engine → `ForecastResult.model_params` → `prediction_snapshots.model_params` → 公式卡片。
+
+| 用例 | 输入 / 操作 | 期望 | 标记 |
+|------|------|------|------|
+| T-PRED-V2-01 | `forecast(bars_90, sentiment=0, horizon=7)` | `model_params` 真带回 ARIMA `arima_order`(p,d,q) + `arima_aic`(有限且≠0) + `arima_grid_tried`(每项含 order/aic)；GARCH `garch_omega`>0（且 == fake ω÷100²，百分数方差→小数方差）、`garch_alpha/beta` == fake 值、`garch_sigma_annual`≈0.30；MC 设定 `mc_n_paths`>0 / `mc_percentiles` / `mc_dt`>0；影线 `0 ≤ shadow_k_dn < 1`（≥1 会让预测蜡烛下影线跌破 0） | unit |
+| T-PRED-V2-02 | 同上 | GARCH 平稳性：`garch_persistence == α+β` 且 **< 1**（≥1 = 波动无限累积，UI 需提示） | unit |
+| **T-PRED-V2-03** | `filing_digest`（3 条爆雷 -0.9 + 2 条减持 ratio=0.02）vs `filing_digest=None` 基线 | ★ **事件分双通道**：F ∈ [-1,0) 且 `event_scores.negative/reduction` < 0；通道①漂移被压低 `drift_mu_annual_final` < 基线、`sentiment_total` < 基线；通道②波动被抬高 `vol_multiplier_event` > 1 且 `sigma_annual_final` > 基线（基线 M_event == 1.0）；GARCH/ARIMA 底座不变（差异只来自事件分）。**只压 μ 不抬 σ 会得出「稳稳地跌」的荒谬结论** | unit |
+| T-PRED-V2-04 | `filing_digest=[]` | F == 0、`vol_multiplier_event` == 1.0、`event_scores` 三通道全 0（没有公告 ≠ 扣分） | unit |
+| T-PRED-V2-05 | 维度 `failed=True` 但残留 `score=-0.9` | `filing_score` == 0.0 —— 取数失败整维跳过，**绝不把「没拿到数据」算成「没有坏消息」** | unit |
+| T-PRED-V2-06 | `forecast(..., horizon=7)`（用户拍板 7 个交易日） | 恰好 7 根蜡烛；`day` == 1..7 连续；`date` 与 `forecast.dates[i]` 对齐；OHLC 不变式 `h ≥ max(o,c)`、`l ≤ min(o,c)`、`l > 0`；`p10 ≤ p50 ≤ p90`；`candle.p50 == forecast.p50[i]`；`point_forecast == p50` | unit |
+| T-PRED-V2-07 | `forecast(..., on_step=cb)` | 事件类型只出 `SSEEventType.FORMULA_STEP/FORECAST_DAY`（铁律 #3 枚举）；**所有公式步骤都在第一根蜡烛之前**推完（否则前端卡片乱序弹出）；推导链恰为 `[technical, arima, garch, event_score, sentiment_total, gbm, shadow]`；蜡烛 day 严格 1..7；流式推出去的条数 == 最终 `formula_steps`/`forecast_candles` 落库条数 | unit |
+| T-PRED-V2-08 | 同上，检查 payload | FORMULA_STEP 必须带 `stage`（== `key`）——`append_prediction_formula_step` 的去重键；SQL 里 `e->>'stage' IS DISTINCT FROM NULL`，**payload 缺这个字段会把之前所有公式步骤全删掉**。FORECAST_DAY 必须带 `date`（其去重键） | unit |
+| T-PRED-V2-09 | `on_step` 回调抛 RuntimeError | 回调确被调用；forecast 仍返回完整 7 根蜡烛 + model_params（铁律 #9：回调是调用方代码，炸了只降级 warning，不能带崩整个预测） | unit |
+
+---
+
+## 十-F、股票预测 - 数据层护栏 (quant/data/announcement.py)
+
+> 测试文件：`tests/test_prediction_data_layer.py`。运行：`pytest tests/test_prediction_data_layer.py -q`
+> **一行真网络都不打**：`sys.modules` 注入假 akshare（只认 6 个真实接口名），`_em_report`(httpx) 桩掉，
+> `AK_BACKOFF_BASE` 调 0 避免退避 sleep，每例清 `_TABLE_CACHE`（全市场表 30min TTL 缓存会串味）。
+> 真实取数已在容器实测（000001.SZ notices=1733 / 300750.SZ negative=10 / **601288.SH 全 0 不崩**），
+> 这里只做回归护栏。
+>
+> **头号坑**：akshare 查到 0 条时**不返回空表，而是抛 KeyError**
+> （`stock_individual_notice_report` → `KeyError('代码')`，源码 stock_notice.py:118 未判空直接 assign 列名）。
+
+| 用例 | 输入 / 操作 | 期望 | 标记 |
+|------|------|------|------|
+| T-PRED-DATA-01 | `ak.stock_individual_notice_report` 抛 `KeyError('代码')` | `_ak_frame` 返回**空 DataFrame**（0 条不是故障） | unit |
+| T-PRED-DATA-02 | 同上 | KeyError **不触发重试**（调用次数 == 1；重试 2 次 = 白等 3 秒还是 0 条） | unit |
+| T-PRED-DATA-03 | `fetch_stock_notices("601288.SH")` + KeyError | 返回 `[]` 且不抛 | unit |
+| T-PRED-DATA-04 | `fetch_negative_events` + 公告/业绩预告双 KeyError | 返回 `[]`（干净票 601288 的真实场景，不崩整个维度） | unit |
+| T-PRED-DATA-05 | `fetch_placements` + `stock_qbzf_em` KeyError | 返回 `[]` | unit |
+| T-PRED-DATA-06 | `fetch_reductions` + KeyError | 返回 `[]`（设计文档原写的 `symbol='减持'` 会直接 KeyError，正确值是 `'股东减持'`） | unit |
+| **T-PRED-DATA-07** | ak 持续抛 `RuntimeError("HTTP 429")` | ★ **反面**：重试 `AK_RETRY_TIMES` 次后抛 `AnnouncementDataError`，**绝不降级成 []**。KeyError→[] 与 网络错→[] 只差一个 except 分支，语义却是「这只票没有减持」vs「我们不知道有没有」——降级会让 UI 对着限流显示「零风险」 | unit |
+| T-PRED-DATA-07b | `fetch_stock_notices` 遇网络故障 | `AnnouncementDataError` 冒泡到 fetcher 之外（上游据此标维度 failed） | unit |
+| T-PRED-DATA-07c | 一次抖动后重试成功 | 正常返回数据，调用 2 次（重试不是摆设） | unit |
+| T-PRED-DATA-08 | 调 akshare 里不存在的接口名（版本漂移） | 抛 `AnnouncementDataError`，不静默返回空表 | unit |
+| T-PRED-DATA-09 | 接口返回 `None` | 按空表处理（下游 `df.empty` 不会 AttributeError） | unit |
+| T-PRED-DATA-10 | `classify_notice` / `title_hash` / `strip_highlight` | 治理类 → `is_noise=True`（规则层丢弃，0 次 LLM）；退市风险 → `needs_llm=False` + `severity<0`（结构化硬字段）；模糊标题 → `needs_llm=True`（进候选池）；★ 每条只贴**一个** `event_type`（三个风险维度候选池天然互斥，不重复判）；`title_hash` 稳定（缓存键）；`strip_highlight` 剥掉 `<em>` | unit |
+
+---
+
+## 十-G、股票预测 - 维度注册表 (graph/prediction/dimensions.py + domain.PredictionCriteria)
+
+> 测试文件：`tests/test_prediction_dimensions.py`。运行：`pytest tests/test_prediction_dimensions.py -q`
+> 注册表是前后端**唯一真相源**：前端 Picker 全靠 `GET /api/prediction/dimensions` 下发的
+> label/desc/kind/markets 渲染（零文案硬编码），后端靠它决定跑哪些 fetcher。它一歪，两头一起歪。
+
+| 用例 | 输入 / 操作 | 期望 | 标记 |
+|------|------|------|------|
+| T-PRED-DIM-01 | `all_keys()` / `DIMENSION_GROUPS` | 恰好 **26** 维、key 唯一；分组**不重不漏**（覆盖全部 key 各一次——漏了的维度在前端面板里根本不出现，用户永远勾不到） | unit |
+| T-PRED-DIM-01b | 遍历注册表 | 每维 label/desc 非空（前端直接显示这句话）、kind ∈ {search,data}、markets ⊆ {cn_a,us_stock}、`name` 是 `label` 的别名 | unit |
+| T-PRED-DIM-02 | `data_keys()` / `search_keys()` | **6 data + 20 search**；data 维**必须**有 `fetcher`（否则维度必然 failed）；search 维**必须没有** fetcher（否则被 `_run_dimension` 误判成数据型）；`split_by_kind` 不吞 key、两类不相交 | unit |
+| T-PRED-DIM-03 | `sec_filings` 的市场归属 | 只在 us_stock：`supports("cn_a")==False`、不在 `dimensions_for_market("cn_a")`、不在 `default_dimensions("cn_a")`；按市场过滤只做减法（默认集 ⊆ 该市场支持集） | unit |
+| T-PRED-DIM-04 | `validate_dimensions(["macro_policy","sec_filings","not_a_real_dimension","macro_policy"], "cn_a")` | valid == `["macro_policy"]`（去重且保序）；invalid == {sec_filings, not_a_real_dimension}。**v1 完全不校验：垃圾 key 会照跑 Tavily 烧钱** | unit |
+| T-PRED-DIM-05 | `PredictionCriteria(dimensions=["negative_event","sec_filings","bogus"], market="cn_a")` | 静默丢弃非法 key（单个坏 key 不该让整单预测 400），保留 `["negative_event"]`；**全非法** → 回退该市场默认集（而不是跑一张空图让用户对着空白页等 90 秒） | unit |
+| T-PRED-DIM-05b | `PredictionCriteria(symbol, market)` 不传 dimensions | `horizon == 7`（用户拍板）；`resolved_dimensions()` == 该市场默认集 | unit |
+| T-PRED-DIM-06 | `to_payload("us_stock")` | 字段恰为 `{key,label,desc,kind,markets,fetcher,default_on}`（与前端 `Dimension` 接口逐一对齐）；`markets` 是 **JSON 数组**（不是 tuple）；`default_on` 是 bool | unit |
+| **T-PRED-DIM-07** | `gather_all_dimensions` 混跑 3 搜索维 + 2 数据维（桩掉 `ns.httpx.AsyncClient`，真 `tavily_search` 照跑） | ★ Tavily 调用次数 == 搜索维度数、预算计数 `_incr_prediction_count` 次数 == 搜索维度数 —— **数据型维度一次 Tavily 都不调、不占按次计费的检索额度**；两类结果各归各的桶（news_digest / filing_digest，后者 `kind=="data"`）。<br>⚠ 写这条时别桩掉 `tavily_search` 本体——预算计数器就长在它里面（先递增再发 HTTP），桩掉它断言永远是 0（假绿）。要桩就桩它下面的 httpx | unit |
+
+---
+
+## 十-H、股票预测 - v2 持久化 / 增量落库 / 删除 / 刷新重建 (db/prediction_store.py)
+
+> 测试文件：`tests/test_prediction_store_v2.py`。运行：`pytest tests/test_prediction_store_v2.py -q`
+> `AsyncSessionLocal` 换成假 session（记录每条 SQL 与参数），**无 Postgres**。断言的是**契约**
+> （写哪一列、去重键是什么、删不删 event_log），不是 SQL 字符串长相。
+
+| 用例 | 输入 / 操作 | 期望 | 标记 |
+|------|------|------|------|
+| T-PRED-STORE-01 | `append_prediction_dimension(kind="search"/"data")` | search → `news_digest` 列、data → `filing_digest` 列（走错列前端永远读不到那批卡片）；去重键恒为 `dimension`；SQL 含 `jsonb_array_elements` + `IS DISTINCT FROM` 剔旧子查询（续跑重写同一维不会长出重复卡片） | unit |
+| T-PRED-STORE-02 | `append_prediction_formula_step` / `_forecast_candle` / `_tool_trace` | 去重键分别为 `stage` / `date` / **无**。蜡烛按 date 去重否则刷新重放会画出 14 根；工具轨迹不去重（同一工具会被多个维度各调一次，每次都是独立轨迹） | unit |
+| T-PRED-STORE-03 | `_append_jsonb_item(column="news_digest; DROP TABLE users--")` | 返回 False 且**一条 SQL 都不发**（列名会拼进 SQL → 只能走白名单，这是注入面） | unit |
+| T-PRED-STORE-04 | 快照不存在（rowcount=0） | 返回 False，不抛 | unit |
+| T-PRED-STORE-05 | session.execute 抛 RuntimeError | 返回 False + **不抛**（铁律 #9：增量落库失败不能阻塞图执行） | unit |
+| **T-PRED-STORE-06** | `delete_prediction("pred_del")` | ★ 发**两条** DELETE：先 `DELETE FROM event_log WHERE conv_id=:pid`，再 `DELETE FROM prediction_snapshots`。**event_log 上零 FK 约束**（migrate.py 的 `CREATE TABLE IF NOT EXISTS` 因 create_all 先执行而永久 no-op，声明的 ON DELETE CASCADE 从未落地）→ 指望级联 = 每删一条预测泄漏几百行孤儿事件 | unit |
+| T-PRED-STORE-07 | 快照不存在 | `delete_prediction` 返回 False（router 据此返回 404） | unit |
+| **T-PRED-STORE-08** | `prediction_v2_fields(snap)` 读回 7 个 v2 列 | ★ `filing_digest / model_params / formula_steps / forecast_candles / event_markers / tool_traces / event_score` 一个不少、值与写入一致 —— **前端 `loadSnapshot()` 靠这些 DB 列重建整个 v2 界面（不靠 SSE 重放）**，少一列 → 硬刷新后对应区块直接空白 | unit |
+| T-PRED-STORE-08b | 全新快照（列还是 NULL） | 数组列 → `[]`、model_params → `{}`（前端 v-for 不会炸）；`event_score` → **None**（没算出来时不能谎报 0 = 无风险） | unit |
+| **T-PRED-STORE-09** | 驱动 `NewsSearchNode.execute`，fake gather 在**返回前**逐维回调 `on_dimension` | ★ **增量落库**：每维一跑完就 `append_prediction_dimension` 一次，并按 kind 分流（`[("macro_policy","search"), ("negative_event","data")]`）。**v1 是全跑完一次性写 → 一 cancel 库里一条都没有**，「暂停 = 取消 + 保留已完成维度 + 续跑剩余」无从谈起 | unit |
+
+---
+
+## 十-I、股票预测 - v2 SSE 回归（ping 不落库 · 新事件带 eid）
+
+> 测试文件：`tests/test_prediction_heartbeat.py`（T-PRED-HB-08 起为 v2 新增）。
+> v1 已验证的能力，v2 绝不能破坏。
+
+| 用例 | 输入 / 操作 | 期望 | 标记 |
+|------|------|------|------|
+| T-PRED-HB-08 | 6 个 v2 新事件（TOOL_TRACE / DATA_ITEM / FORMULA_STEP / FORECAST_DAY / EVENT_MARKER / PAUSED）逐个过 `_emit` | 每条都拿到 `eid > 0` 且 `payload["id"] == eid`（前端读的是 `payload.id`）；eid 严格自增（`after_event_id` 游标靠单调性推进）；6 条**全部进 event_log**（可重放）。新事件不带 eid → 用户刷新后卡片/蜡烛要么丢要么重复渲染 | unit |
+| T-PRED-HB-08b | 6 个新事件类型 | 均为 `SSEEventType` 枚举成员（铁律 #3，不是字面量） | unit |
+| **T-PRED-HB-08c** | FORECAST_DAY → ping → FORECAST_DAY 混合入队 | ★ **v1 的坑不能被 v2 破坏**：新事件走 `_emit` 落库并带 eid；**ping 依旧 `queue.put((0,...))` 直塞、eid=0、不带 id、绝不进 event_log**。ping 若走 `_emit`，一次十几分钟的预测会往 event_log 攒下几百条垃圾行，并在**每次重连 replay 时被全量重放** | unit |
+
+---
+
 ## 十一、spec 对照检查（改代码后必跑）
 
 | 改了什么 | 跑哪些测试 |
@@ -612,9 +870,21 @@ pytest tests/ -m smoke         # 冒烟拨测（端到端）
 | quant/data/ 财经数据层 | T-FINANCE-DATA-* |
 | tools/builtin/finance/ 工具 | T-FINANCE-TOOL-* |
 | route_node + finance prompt | T-FINANCE-ROUTE-* |
+| prediction/news_search 资讯搜索 | T-PRED-NEWS-* |
+| prediction 状态机 (fsm/prediction.py) | T-PRED-FSM-* + T-PRED-CLEAN-* |
+| prediction 鉴权 | T-PREDICT-AUTH-* |
+| prediction 计算引擎 (engine + indicators) | T-PRED-ENGINE-* (T-PRED-01..16) + **T-PRED-V2-*** |
+| prediction 公告三层判定 (graph/prediction/announcements.py) | T-PRED-ANN-* (`tests/test_prediction_announcements.py`) |
+| **quant/data/ 公告与 SEC 取数层** | **T-PRED-DATA-*** (`tests/test_prediction_data_layer.py`) |
+| **prediction 维度注册表 (dimensions.py / PredictionCriteria)** | **T-PRED-DIM-*** (`tests/test_prediction_dimensions.py`) |
+| **prediction v2 持久化 (db/prediction_store.py)** | **T-PRED-STORE-*** (`tests/test_prediction_store_v2.py`) |
+| **prediction 暂停 / 续跑 / 删除** | **T-PRED-PAUSE-*** (`tests/test_prediction_pause_resume.py`) + T-PRED-STORE-06/09 |
+| **prediction SSE（新事件 / 心跳）** | **T-PRED-HB-*** (`tests/test_prediction_heartbeat.py`) —— 加新 SSE 事件必跑 T-PRED-HB-08* |
+| prediction 图拓扑 / 断线重连 / 停止 | T-PRED-GRAPH-* / T-PRED-RESUME-* / T-PRED-STOP-* |
 | 任何改动 | T-SMOKE-* (冒烟) |
 | 新增工具 | T-SANDBOX-03 + T-SMOKE-03 |
-| 新增 SSE 事件 | T-FSM-05 + T-STREAM-03 |
+| 新增 SSE 事件 | T-FSM-05 + T-STREAM-03（预测链路的还要跑 T-PRED-HB-08*：新事件必须带 eid，ping 必须仍不落库） |
+| 新增预测维度 | T-PRED-DIM-01/02（分组不重不漏 + data 维必须有 fetcher）+ T-PRED-DIM-07（data 维不烧 Tavily 预算） |
 | 新增 DB 字段 | T-DB-04 (迁移幂等) |
 | 新增 quant provider | T-QUANT-05 + T-QUANT-06 |
 | 文件上传相关 | T-DB-02 + T-SANDBOX-04 + T-UPLOAD-* |

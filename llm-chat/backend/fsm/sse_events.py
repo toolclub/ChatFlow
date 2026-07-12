@@ -20,6 +20,7 @@ class SSEEventType(str, Enum):
     # ── 会话控制（最高优先级） ──
     DONE = "done"
     STOPPED = "stopped"
+    PAUSED = "paused"                        # 暂停确认（与 STOPPED 平级；但 paused 非终态，可 resume）
     ERROR = "error"
 
     # ── 澄清 ──
@@ -35,6 +36,17 @@ class SSEEventType(str, Enum):
 
     # ── 文件产物 ──
     FILE_ARTIFACT = "file_artifact"
+
+    # ── 股票预测专用（铁律 #3：注册而非硬编码，修正 quant 把 "delta" 硬编码的违规） ──
+    TOOL_TRACE = "tool_trace"                # 工具调用轨迹（"正在调用 stock_announcements(…)" / "返回 388 条，1.9s"）
+    NEWS_ITEM = "news_item"                  # 资讯搜索结果流入（每维一条，含完整原文）
+    DATA_ITEM = "data_item"                  # 结构化数据卡片（公告/定增/减持/SEC filing），与 NEWS_ITEM 平级
+    FORMULA_STEP = "formula_step"            # 单个公式：formula + params + substituted + result + explain
+    FORECAST_DAY = "forecast_day"            # 逐日预测蜡烛增量 {day, date, o, h, l, c, p10, p50, p90}
+    FORECAST = "forecast"                     # 预测数值结果（方向/幅度/置信区间）
+    INFLECTION = "inflection"                  # 拐点标注
+    EVENT_MARKER = "event_marker"            # K 线上的公告事件打点 {date, event_type, title, score}
+    PREDICTION_PROGRESS = "prediction_progress"  # 阶段进度（对应状态机转换）
 
     # ── 认知/计划 ──
     PLAN_GENERATED = "plan_generated"
@@ -62,6 +74,7 @@ class SSEEventType(str, Enum):
 _PRIORITY_ORDER: list[SSEEventType] = [
     SSEEventType.DONE,
     SSEEventType.STOPPED,
+    SSEEventType.PAUSED,
     SSEEventType.ERROR,
     SSEEventType.CLARIFICATION,
     SSEEventType.TOOL_RESULT,
@@ -69,6 +82,15 @@ _PRIORITY_ORDER: list[SSEEventType] = [
     SSEEventType.TOOL_CALL_START,
     SSEEventType.TOOL_CALL_ARGS,
     SSEEventType.SEARCH_ITEM,
+    SSEEventType.TOOL_TRACE,
+    SSEEventType.NEWS_ITEM,
+    SSEEventType.DATA_ITEM,
+    SSEEventType.FORMULA_STEP,
+    SSEEventType.FORECAST_DAY,
+    SSEEventType.FORECAST,
+    SSEEventType.INFLECTION,
+    SSEEventType.EVENT_MARKER,
+    SSEEventType.PREDICTION_PROGRESS,
     SSEEventType.SANDBOX_OUTPUT,
     SSEEventType.FILE_ARTIFACT,
     SSEEventType.PLAN_GENERATED,

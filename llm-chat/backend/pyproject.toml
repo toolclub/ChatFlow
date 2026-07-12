@@ -66,6 +66,10 @@ dependencies = [
     "pandas>=2.1.0",
     "baostock>=0.8.8",     # 免费 A 股数据，主源
     "tushare>=1.2.89",     # 需 token + 积分，骨架已就位
+
+    # ── 股票预测模块 ──
+    "statsmodels>=0.14.0",  # ARIMA 时间序列预测
+    "arch>=6.0.0",         # GARCH 波动率建模
 ]
 
 [project.scripts]

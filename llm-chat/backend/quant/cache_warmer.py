@@ -24,6 +24,7 @@ from datetime import date, datetime, timedelta
 from quant import cache_disk
 from quant.config import (
     QUANT_BARS_LOOKBACK_DAYS,
+    QUANT_SCREENING_ENABLED,
     QUANT_TUSHARE_BULK_WORKERS,
     QUANT_WARMER_BARS_HOUR,
     QUANT_WARMER_ENABLED,
@@ -63,8 +64,11 @@ class WarmerState:
         return self._task is not None and not self._task.done()
 
     async def start(self, *, initial_delay: float = 5.0) -> None:
-        import sys
-        print(f"[WARMER] start() called, enabled={QUANT_WARMER_ENABLED}, running={self.is_running()}", file=sys.stderr, flush=True)
+        # 智能选股关闭时预热器完全不启动：它是雅虎财经 429 限流的元凶，
+        # 必须真的静默（一个外部请求都不发），把额度让给股票预测。
+        if not QUANT_SCREENING_ENABLED:
+            logger.info("智能选股已禁用（QUANT_SCREENING_ENABLED=false），预热器不启动")
+            return
         if not QUANT_WARMER_ENABLED:
             logger.info("warmer 未启用（QUANT_WARMER_ENABLED=false）")
             return
@@ -73,12 +77,11 @@ class WarmerState:
             logger.info("warmer 角色=%s，非 primary 不启动预热", QUANT_WARMER_ROLE)
             return
         if self.is_running():
-            print(f"[WARMER] already running, returning", file=sys.stderr, flush=True)
+            logger.debug("warmer 已在运行，跳过重复启动")
             return
         self._stop.clear()
         self._task = asyncio.create_task(self._loop(initial_delay))
         logger.info("warmer 启动 worker_id=%s", _WORKER_ID)
-        print(f"[WARMER] task created, entering _loop", file=sys.stderr, flush=True)
 
     async def stop(self, timeout: float = 5.0) -> None:
         if not self.is_running():
@@ -98,6 +101,10 @@ class WarmerState:
 
     async def trigger_now(self, kinds: list[str] | None = None) -> dict:
         """REST 手动触发：在独立进程跑一次完整刷新，立即返回 'scheduled'。"""
+        if not QUANT_SCREENING_ENABLED:
+            logger.info("智能选股已禁用，忽略手动预热请求")
+            return {"status": "skipped", "reason": "screening_disabled", "worker": _WORKER_ID}
+
         # 冷却期保护：基于 Redis 的全局冷却
         try:
             from db.redis_state import _get_redis
@@ -245,7 +252,13 @@ class WarmerState:
     async def _refresh_once(self, kinds: list[str], manual: bool = False) -> None:
         """核心重构：实现全流程大铁锁，彻底杜绝接力抢任务。"""
         mode = "手动" if manual else "自动"
-        
+
+        # 兜底闸门：无论从哪条路径进来（主循环 / trigger_now / 遗留调用），
+        # 智能选股关闭时都不允许发出任何 provider 请求。
+        if not QUANT_SCREENING_ENABLED:
+            logger.info("⏱️ [%s] 预热跳过：智能选股已禁用", mode)
+            return
+
         # 1. 尝试获取全局会话大锁（整个预热过程只能有 1 个 Worker 活跃）
         # 如果是定时触发，发现有锁直接跳过；如果是手动触发，发现有锁也告知冲突
         session_lock_token = await _acquire_lock("global_session")
@@ -781,6 +794,10 @@ def _is_us_trading_hours(now: datetime) -> bool:
 async def request_warm(symbols: list[str]) -> bool:
     """API 发现缓存缺失时触发后台补仓（SADD 到 Redis，warmer 下次 tick 处理）。"""
     if not symbols:
+        return False
+    # 智能选股关闭时预热器根本没在跑，入队只会积压脏数据；直接丢弃这条懒加载触发。
+    if not QUANT_SCREENING_ENABLED:
+        logger.debug("智能选股已禁用，跳过按需补仓入队 symbols=%s", symbols[:5])
         return False
     try:
         from db.redis_state import _get_redis  # type: ignore

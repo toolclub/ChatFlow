@@ -71,6 +71,15 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.error("清理过期量化任务失败: %s", exc)
 
+    # 1.6 清理过期的预测任务状态
+    try:
+        from db.prediction_store import cleanup_stale_prediction_sessions
+        cleaned_count = await cleanup_stale_prediction_sessions()
+        if cleaned_count > 0:
+            logger.info("已清理 %d 条由于意外中断卡住的预测任务", cleaned_count)
+    except Exception as exc:
+        logger.error("清理过期预测任务失败: %s", exc)
+
     # 2. 从数据库加载对话到内存缓存
     from memory import store as memory_store
     await memory_store.init()
@@ -134,33 +143,39 @@ async def lifespan(app: FastAPI):
     graph_agent.init(tools=all_tools, model=CHAT_MODEL)
 
     # 8. 延迟初始化量化模块
+    #    provider 注册始终执行（股票预测依赖 quant.data_adapter 拉 K 线），
+    #    但缓存预热器只在智能选股开启时启动 —— 它会用 300 个 ticker 猛刷雅虎财经
+    #    打爆 HTTP 429 限流额度，导致预测拉不到行情。
     async def delayed_quant_init():
-        import sys
+        from quant.config import QUANT_SCREENING_ENABLED
         try:
-            print("[WARMER] delayed_quant_init started, sleeping 15s...", file=sys.stderr, flush=True)
             await asyncio.sleep(15.0)
-            print("[WARMER] sleep done, calling init_quant...", file=sys.stderr, flush=True)
             from quant.bootstrap import init_quant
             await init_quant()
-            print("[WARMER] init_quant done, calling warmer.start...", file=sys.stderr, flush=True)
+            if not QUANT_SCREENING_ENABLED:
+                logger.info(
+                    "智能选股已禁用（QUANT_SCREENING_ENABLED=false）："
+                    "缓存预热器不启动，行情数据访问（股票预测）不受影响"
+                )
+                return
             from quant.cache_warmer import get_warmer
             await get_warmer().start(initial_delay=2.0)
             logger.info("量化缓存预热器启动完成")
-            print("[WARMER] warmer.start() completed successfully", file=sys.stderr, flush=True)
         except Exception as exc:
             logger.error("量化模块延迟初始化失败: %s", exc)
-            print(f"[WARMER] delayed_quant_init FAILED: {exc}", file=sys.stderr, flush=True)
 
     # 抛出后台任务，不阻塞 lifespan yield
     asyncio.create_task(delayed_quant_init())
 
+    from quant.config import QUANT_SCREENING_ENABLED as _screening_on
     logger.info(
-        "ChatFlow 启动完成 | 模型: %s | 工具数: %d | 长期记忆: %s | 语义缓存: %s | 沙箱: %s",
+        "ChatFlow 启动完成 | 模型: %s | 工具数: %d | 长期记忆: %s | 语义缓存: %s | 沙箱: %s | 智能选股: %s",
         CHAT_MODEL,
         len(all_tools),
         "开启" if LONGTERM_MEMORY_ENABLED else "关闭",
         "开启" if SEMANTIC_CACHE_ENABLED else "关闭",
         "开启" if sandbox_ok else "关闭",
+        "开启" if _screening_on else "关闭",
     )
 
     yield
@@ -190,6 +205,7 @@ from routers.files_router import router as files_router
 from routers.auth_router import router as auth_router
 from routers.admin_router import router as admin_router
 from quant.router import router as quant_router
+from routers.prediction_router import router as prediction_router
 
 app.include_router(conversation_router)
 app.include_router(chat_router)
@@ -199,6 +215,7 @@ app.include_router(files_router)
 app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(quant_router)
+app.include_router(prediction_router)
 
 # ── 入口 ──────────────────────────────────────────────────────────────────────
 

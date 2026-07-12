@@ -257,6 +257,100 @@ class QuantSnapshotModel(Base):
     created_at = Column(Float, nullable=False)
 
 
+class PredictionSnapshotModel(Base):
+    """股票预测快照表（仿 QuantSnapshotModel + 预测专用字段）
+
+    铁律 #1：status 从 DB 字段读，不推断文本；
+    铁律 #6：status 存 fsm/prediction.py PredictionStatus 枚举值（真 (str, Enum)，非字面量）。
+    """
+    __tablename__ = "prediction_snapshots"
+
+    id = Column(String(50), primary_key=True)
+    client_id = Column(String(36), nullable=False, index=True)
+    user_id = Column(String(36), nullable=False, default="", index=True)
+    conversation_id = Column(String(36), nullable=True)
+    criteria = Column(JSONB, nullable=False)                   # {symbol, market, methods, horizon, dimensions}
+    market = Column(String(16), nullable=False, default="")    # cn_a | us_stock
+    symbol = Column(String(32), nullable=False, default="")
+    status = Column(String(24), nullable=False, default="queued")
+    horizon = Column(Integer, nullable=False, default=7)        # 预测交易日数（v2 默认 7 个交易日）
+    target_date = Column(String(16), nullable=True)             # 预测目标日 YYYY-MM-DD
+    predicted_price = Column(Float, nullable=True)              # 终点价格点预测
+    predicted_range = Column(JSONB, nullable=True)             # [low, high] 80% 置信
+    confidence = Column(Float, nullable=True)                   # 0..1
+    model_name = Column(String(64), nullable=False, default="")
+    news_digest = Column(JSONB, nullable=False, default=list)   # 12 维资讯（含完整原文，不截取）
+    news_sentiment = Column(Float, nullable=True)              # -1..1 综合（蒙特卡洛漂移修正因子）
+    forecast = Column(JSONB, nullable=False, default=list)     # 点预测序列
+    inflection_points = Column(JSONB, nullable=False, default=list)
+    confidence_band = Column(JSONB, nullable=False, default=list)  # {dates, p10, p50, p90}
+    technical_indicators = Column(JSONB, nullable=False, default=dict)
+    analysis = Column(Text, nullable=False, default="")
+    risk_notes = Column(JSONB, nullable=False, default=list)
+    thinking_segments = Column(JSONB, nullable=False, default=list)
+    error_message = Column(Text, nullable=False, default="")
+    # 阶段进度快照（前后端共用结构）：
+    # {"phase": "preflight"|"news_searching"|"inferring", "label": "地缘政治",
+    #  "index": 3, "total": 12, "detail": "正在搜索…", "updated_at": 1752}
+    progress = Column(JSONB, nullable=False, default=dict)
+    created_at = Column(Float, nullable=False)
+    updated_at = Column(Float, nullable=False, default=0.0)   # 最后一次进度/状态写入时间戳
+
+    # ── v2 新增（铁律 #2：结构化产物一律独立列，不塞 content/analysis 文本） ──
+    # 数据型维度结果（公告 / 定增 / 减持 / SEC filing），与 news_digest（搜索型）平级：
+    # [{dimension, label, kind:"data", source, confidence, items:[...], score, failed, error}]
+    filing_digest = Column(JSONB, nullable=False, default=list)
+    # 计算引擎全参数（ARIMA/GARCH/事件分/GBM/蒙特卡洛/影线标定），供前端公式卡片复现推导
+    model_params = Column(JSONB, nullable=False, default=dict)
+    # FORMULA_STEP 事件序列（刷新后重建公式面板）：
+    # [{stage, title, formula_text, formula_latex, params, substituted, result, explain}]
+    formula_steps = Column(JSONB, nullable=False, default=list)
+    # 预测 OHLC 蜡烛：[{day, date, o, h, l, c, p10, p50, p90}]
+    forecast_candles = Column(JSONB, nullable=False, default=list)
+    # K 线上的公告事件打点：[{date, event_type, title, score}]
+    event_markers = Column(JSONB, nullable=False, default=list)
+    # 工具调用轨迹（TOOL_TRACE）：[{tool, args, status, count, duration, error, ts}]
+    tool_traces = Column(JSONB, nullable=False, default=list)
+    # 事件综合分 F ∈ [-1, 0]（爆雷/定增/减持 加权饱和分），为空表示未跑数据型维度
+    event_score = Column(Float, nullable=True)
+
+
+class AnnouncementCacheModel(Base):
+    """公告 LLM 判定缓存 —— 同一条公告（market+symbol+ann_date+title_hash）只打分一次。
+
+    规则命中（judged_by="rule"）的结果永不过期（公告是不可变历史事实）；
+    LLM 判定（judged_by="llm"）的可按 PREDICTION_ANN_CACHE_DAYS 过期后重判（模型升级重打分）。
+    """
+    __tablename__ = "announcement_cache"
+
+    # server_default：本表由 create_all 建（它先于 migrate 执行），要让新库建出的表
+    # 和 migrate.py 里的 DDL 完全一致（含 DEFAULT ''），否则两种部署路径会长出不同的表结构。
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    market = Column(String(16), nullable=False)
+    symbol = Column(String(32), nullable=False)
+    ann_date = Column(String(16), nullable=False)
+    title_hash = Column(String(64), nullable=False, comment="md5(标题)，<em> 高亮标签先剥离")
+    title = Column(Text, nullable=False, default="", server_default="")
+    ann_type = Column(String(64), nullable=False, default="", server_default="",
+                      comment="东财「公告类型」原值")
+    url = Column(Text, nullable=False, default="", server_default="")
+    source = Column(String(24), nullable=False, default="", server_default="",
+                    comment="eastmoney | cninfo | sec")
+    event_type = Column(
+        String(32), nullable=False, default="", server_default="",
+        comment="negative | private_placement | stake_reduction | st_delisting_risk | violation | neutral",
+    )
+    negative_score = Column(Float, nullable=True, comment="-1..0；规则命中的直接写死")
+    reason = Column(Text, nullable=False, default="", server_default="")
+    judged_by = Column(String(16), nullable=False, default="", server_default="",
+                       comment="rule | llm")
+    fetched_at = Column(Float, nullable=False)
+
+    __table_args__ = (
+        Index("ux_anncache_key", "market", "symbol", "ann_date", "title_hash", unique=True),
+        Index("ix_anncache_symbol", "symbol", "ann_date"),
+    )
+
 
 # ── 以下为保留表（向后兼容） ──────────────────────────────────────────────────
 

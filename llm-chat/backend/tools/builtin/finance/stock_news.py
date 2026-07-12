@@ -2,10 +2,11 @@
 GUIDANCE = (
     "查一只 A 股最近的新闻 / 公告 / 研报标题列表（按时间倒序）。"
     "用户问「XX 最近为啥涨/跌」「XX 有什么消息面」「XX 利好/利空」「最近研报怎么看 XX」时召唤。"
-    "返回结构化列表（标题+时间+来源+URL），请基于此判断情绪倾向，不要凭记忆。"
+    "kind='notice' 拿的是**法定披露公告**（含类型标签，如「违法违规」「股东减持」「增发预案」），"
+    "判断利空利好时它比新闻可信。返回结构化列表（标题+时间+来源+URL），请基于此判断情绪倾向，不要凭记忆。"
     "若需要原文细节再用 fetch_webpage 拉某条 URL；不要把全部 URL 都拉。"
 )
-ERROR_HINT = "若返回为空，说明 akshare 该接口当前不可用或个股无近期新闻；可换问 stock_quote 看价格变化。"
+ERROR_HINT = "若返回为空，说明该股在窗口内确无此类记录（不是接口故障）；可换 kind 或改用 stock_quote 看价格变化。"
 TAGS = ["finance", "research"]
 DISPLAY_MODE = "default"
 
@@ -14,9 +15,13 @@ import logging
 
 from langchain_core.tools import tool
 
-from quant.data import news as news_mod
+from quant.data import announcement as ann_mod
 
 logger = logging.getLogger("tools.finance.stock_news")
+
+# 公告默认只回溯 12 个月：聊天场景要的是"最近有什么事"，全历史（000001 实测 1733 条 / 6.5s）
+# 既慢又会把 LLM 的上下文撑爆。预测图要全量时直接调 quant.data.announcement，不走这个工具。
+_NOTICE_MONTHS = 12
 
 
 @tool
@@ -30,17 +35,43 @@ async def stock_news(symbol: str, kind: str = "news", limit: int = 8) -> str:
         limit:  返回条数，默认 8，最多 20。
 
     Returns:
-        JSON 字符串：[{"date","title","source","url",...}]；无数据时返回 "[]"。
+        JSON 字符串：{"symbol","kind","items":[{"date","title",...}]}；无数据时 items 为 []。
+        kind="notice" 的每条额外带 "ann_type"（东财公告类型）与 "event_type"
+        （negative / private_placement / stake_reduction / neutral，规则判定，仅供参考）。
     """
     limit = max(1, min(int(limit), 20))
     kind_norm = (kind or "news").strip().lower()
     try:
         if kind_norm == "notice":
-            items = await news_mod.fetch_stock_notices(symbol, limit=limit)
+            raw = await ann_mod.fetch_stock_notices(
+                symbol, months=_NOTICE_MONTHS, limit=limit, classify=True,
+            )
+            # 只透出 LLM 用得上的字段，别把 title_hash / needs_llm 这类内部字段喂给它
+            items = [
+                {
+                    "date": it["ann_date"],
+                    "title": it["title"],
+                    "ann_type": it["ann_type"],
+                    "event_type": it.get("event_type", "neutral"),
+                    "url": it["url"],
+                }
+                for it in raw
+            ]
         elif kind_norm == "research":
-            items = await news_mod.fetch_research_reports(symbol, limit=limit)
+            items = await ann_mod.fetch_research_reports(symbol, limit=limit)
         else:
-            items = await news_mod.fetch_stock_news(symbol, limit=limit)
+            items = await ann_mod.fetch_stock_news(symbol, limit=limit)
+    except ann_mod.AnnouncementDataError as exc:
+        # 数据源挂了 —— 明确告诉 LLM 是"接口故障"，不是"这只票没消息"（后者会误导它下结论）
+        logger.warning(
+            "stock_news 数据源失败 symbol=%s kind=%s source=%s: %s",
+            symbol, kind_norm, exc.source, exc.message,
+        )
+        return json.dumps(
+            {"error": f"数据源暂时不可用：{exc.message}", "symbol": symbol,
+             "kind": kind_norm, "items": []},
+            ensure_ascii=False,
+        )
     except Exception as exc:
         logger.warning("stock_news 调用失败 symbol=%s kind=%s err=%s", symbol, kind_norm, exc)
         return json.dumps({"error": f"获取失败：{exc}", "items": []}, ensure_ascii=False)
