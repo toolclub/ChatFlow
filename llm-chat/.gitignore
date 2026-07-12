@@ -1,3 +1,8 @@
 # ===== Python =====
-data
+# ★ 必须是 /data/（锚定到 llm-chat/ 根），不能写成裸的 `data`。
+#   裸 `data` 会匹配**任意层级**下叫 data 的目录 —— 它把源码包 backend/quant/data/
+#   （公告/SEC 数据层）整个吞掉了：git add -A 静默跳过，提交里没有它，
+#   本地 docker build 用磁盘文件照样能跑，**生产从 git 检出构建直接起不来**
+#   （ModuleNotFoundError: No module named 'quant.data'，worker failed to boot）。
+/data/
 logs/*
