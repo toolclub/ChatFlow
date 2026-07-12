@@ -184,11 +184,82 @@ class YFinanceUSProvider:
                 self._download_bars, yf, tickers, start, end,
             )
 
+        # ★ yf.download 走的下载路径需要 cookie+crumb 握手、且被雅虎针对性限流：
+        #   实测生产/本地同一 IP 上它稳定 429（YFRateLimitError），但底层的
+        #   v8/finance/chart JSON 接口用同一个 IP 直连**稳定 200**（连续 3 次 384 根 OHLC）。
+        #   所以 download 拿空时，逐个 ticker 直连 chart 接口兜底 —— 不是绕反爬，就是换用
+        #   雅虎正常对外提供、不需要 crumb 的那个公开接口。
         if df is None or df.empty:
-            return pd.DataFrame()
+            async with self._sem:
+                df = await asyncio.to_thread(
+                    self._chart_bars, tickers, start, end,
+                )
+            if df is None or df.empty:
+                return pd.DataFrame()
 
         df["symbol"] = df["symbol"].map(lambda t: ticker_to_sym.get(t, f"{t}.US"))
         return df
+
+    @staticmethod
+    def _chart_bars(tickers: list[str], start: str, end: str) -> pd.DataFrame:
+        """直连 Yahoo v8/finance/chart（不需 crumb、不被 download 路径的限流波及）。
+
+        返回列与 _download_bars 完全一致：symbol(ticker)/date/open/high/low/close/volume。
+        单只票一个请求；调用方（market_data）本来就是一次一只，不存在批量压力。
+        """
+        import httpx
+
+        def _epoch(d: str, fallback: int) -> int:
+            try:
+                return int(datetime.strptime(d, "%Y-%m-%d").timestamp())
+            except (TypeError, ValueError):
+                return fallback
+
+        p1 = _epoch(start, 0)
+        # end 当日要含进来：chart 的 period2 是 exclusive 边界，+1 天
+        try:
+            p2 = int((datetime.strptime(end, "%Y-%m-%d") + timedelta(days=1)).timestamp())
+        except (TypeError, ValueError):
+            p2 = int(time.time()) + 86400
+
+        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
+        frames: list[pd.DataFrame] = []
+        for ticker in tickers:
+            for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
+                url = (
+                    f"https://{host}/v8/finance/chart/{ticker}"
+                    f"?period1={p1}&period2={p2}&interval=1d"
+                )
+                try:
+                    resp = httpx.get(url, headers=headers, timeout=15.0)
+                    if resp.status_code != 200:
+                        logger.warning("chart 接口 %s %s → HTTP %s", ticker, host, resp.status_code)
+                        continue
+                    result = (resp.json().get("chart") or {}).get("result") or []
+                    if not result:
+                        continue
+                    r = result[0]
+                    ts = r.get("timestamp") or []
+                    q = ((r.get("indicators") or {}).get("quote") or [{}])[0]
+                    if not ts or not q.get("close"):
+                        continue
+                    sym_df = pd.DataFrame({
+                        "date": pd.to_datetime(ts, unit="s").strftime("%Y-%m-%d"),
+                        "open": q.get("open"),
+                        "high": q.get("high"),
+                        "low": q.get("low"),
+                        "close": q.get("close"),
+                        "volume": q.get("volume"),
+                    }).dropna(subset=["close"])
+                    sym_df["symbol"] = ticker
+                    frames.append(sym_df)
+                    logger.info("yfinance_us chart 兜底成功 %s → %d 根", ticker, len(sym_df))
+                    break
+                except Exception as exc:
+                    logger.warning("chart 接口 %s %s 异常: %s", ticker, host, exc)
+                    continue
+
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
     @staticmethod
     def _download_bars(yf, tickers: list[str], start: str, end: str) -> pd.DataFrame:

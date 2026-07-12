@@ -117,8 +117,7 @@ def _message(
     if kind == KIND_RATE_LIMITED:
         source = "雅虎财经" if market == "us_stock" else "行情数据源"
         base = (
-            f"数据源限流（{source} HTTP 429），请稍后重试；"
-            "或在 .env 设置 QUANT_SCREENING_ENABLED=false 关闭智能选股预热以释放额度"
+            f"数据源限流（{source} HTTP 429），已自动尝试直连兜底仍未成功，请稍后重试"
         )
     elif kind == KIND_NETWORK:
         base = "行情数据源网络不通（DNS 解析失败/连接超时），请检查网络"
