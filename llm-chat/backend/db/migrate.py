@@ -255,6 +255,9 @@ _MIGRATIONS = [
     "ALTER TABLE prediction_snapshots ADD COLUMN IF NOT EXISTS event_markers JSONB NOT NULL DEFAULT '[]'",
     "ALTER TABLE prediction_snapshots ADD COLUMN IF NOT EXISTS tool_traces JSONB NOT NULL DEFAULT '[]'",
     "ALTER TABLE prediction_snapshots ADD COLUMN IF NOT EXISTS event_score DOUBLE PRECISION DEFAULT NULL",
+    # 已完成记录的历史 K 线（compute 阶段落库，前端图表契约结构）→ 点开详情直接渲染，不再现拉。
+    # 空对象表示存量旧记录未落库，前端回退现拉。幂等：ADD COLUMN IF NOT EXISTS 可在有数据的表上重复执行。
+    "ALTER TABLE prediction_snapshots ADD COLUMN IF NOT EXISTS historical_bars JSONB NOT NULL DEFAULT '{}'",
     # v2：默认 horizon 从 5 改为 7 个交易日（存量行不动，只改列默认值）
     "ALTER TABLE prediction_snapshots ALTER COLUMN horizon SET DEFAULT 7",
 

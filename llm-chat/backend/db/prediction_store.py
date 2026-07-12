@@ -358,6 +358,30 @@ async def update_prediction_filings(
         await session.commit()
 
 
+async def update_prediction_historical_bars(snapshot_id: str, chart: dict) -> None:
+    """compute 阶段拿到 bars_df 后，把历史 K 线图表结构落库（覆盖写 + 刷 updated_at）。
+
+    已完成记录点开详情时前端直接用这份数据渲染，不再现拉 K 线（美股拉雅虎易被限流卡住）。
+    落库失败绝不能阻塞图执行（大不了前端回退现拉）—— 异常只 logger.warning（铁律 #9）。
+    """
+    now = time.time()
+    payload = dict(chart or {})
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(PredictionSnapshotModel).where(PredictionSnapshotModel.id == snapshot_id)
+            )
+            snap = result.scalars().first()
+            if snap is None:
+                logger.warning("update_prediction_historical_bars: 快照不存在 %s", snapshot_id)
+                return
+            snap.historical_bars = payload
+            snap.updated_at = now
+            await session.commit()
+    except Exception as exc:
+        logger.warning("update_prediction_historical_bars 写入失败 %s: %s", snapshot_id, exc)
+
+
 # ── v2：公告 LLM 判定缓存 ─────────────────────────────────────────────────────
 
 def _ann_cache_row_to_dict(row: AnnouncementCacheModel) -> dict:
@@ -518,6 +542,8 @@ def prediction_v2_fields(snap: PredictionSnapshotModel) -> dict:
         "event_markers": snap.event_markers or [],
         "tool_traces": snap.tool_traces or [],
         "event_score": snap.event_score,
+        # 已完成记录的历史 K 线（图表契约结构）：非空 → 前端直接渲染跳过现拉；空 {} → 旧记录回退现拉
+        "historical_bars": snap.historical_bars or {},
     }
 
 

@@ -11,7 +11,7 @@ AsyncSessionLocal 被换成假 session：记录每条 SQL 与参数。断言的�
   T-PRED-STORE-05  写库炸了 → False + 不抛（铁律 #9：增量落库失败不能阻塞图执行）
   T-PRED-STORE-06  ★ delete_prediction 显式 DELETE event_log（零 FK，级联是 no-op）
   T-PRED-STORE-07  delete_prediction：快照不存在 → False
-  T-PRED-STORE-08  ★ 刷新重建：7 个 v2 列全部能从快照读回（前端不靠事件重放恢复）
+  T-PRED-STORE-08  ★ 刷新重建：8 个 v2 列全部能从快照读回（前端不靠事件重放恢复）
   T-PRED-STORE-09  ★ 增量落库真的发生在「每维跑完时」，不是等全部维度跑完才一次性写
                    （v1 就是一次性写 → 一 cancel 库里一条都没有，「暂停续跑」无从谈起）
 
@@ -197,7 +197,7 @@ def test_delete_missing_snapshot_returns_false(db):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# T-PRED-STORE-08：★ 刷新重建 —— 7 个 v2 列全部读得回来
+# T-PRED-STORE-08：★ 刷新重建 —— 8 个 v2 列全部读得回来
 # ══════════════════════════════════════════════════════════════════════════════
 
 def test_v2_fields_roundtrip_for_refresh_rebuild():
@@ -215,6 +215,8 @@ def test_v2_fields_roundtrip_for_refresh_rebuild():
         "event_markers": [{"date": "2026-07-01", "event_type": "negative", "score": -0.9}],
         "tool_traces": [{"phase": "end", "tool": "fetch_reductions", "rows": 12, "ok": True}],
         "event_score": -0.31,
+        "historical_bars": {"dates": ["2026-07-01"], "values": [[10, 10.5, 9, 11]],
+                             "ma5": [None], "ma10": [None], "ma20": [None], "volumes": [[0, 100, 1]]},
     }
     snap = types.SimpleNamespace(**written)
 
@@ -230,6 +232,7 @@ def test_v2_fields_empty_snapshot_gives_empty_containers():
     snap = types.SimpleNamespace(
         filing_digest=None, model_params=None, formula_steps=None,
         forecast_candles=None, event_markers=None, tool_traces=None, event_score=None,
+        historical_bars=None,
     )
 
     out = store.prediction_v2_fields(snap)
@@ -238,6 +241,7 @@ def test_v2_fields_empty_snapshot_gives_empty_containers():
     assert out["forecast_candles"] == [] and out["event_markers"] == [] and out["tool_traces"] == []
     assert out["model_params"] == {}
     assert out["event_score"] is None, "event_score 没算出来时是 None，不能谎报 0（= 无风险）"
+    assert out["historical_bars"] == {}, "旧记录/运行中未落库 → 空对象，前端据此回退现拉"
 
 
 # ══════════════════════════════════════════════════════════════════════════════

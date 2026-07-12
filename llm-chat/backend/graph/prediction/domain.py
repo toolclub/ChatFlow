@@ -312,3 +312,75 @@ class PredictionResult(BaseModel):
     filing_digest: list[FilingDimensionResult] = Field(default_factory=list)  # 数据型维度结果
     event_score: float = 0.0                                 # §5.3 的 F
     event_markers: list[EventMarker] = Field(default_factory=list)
+
+
+# ── 历史 K 线 → 前端图表契约 ────────────────────────────────────────────────────
+
+# 空图表结构：旧记录 / bars_df 缺列时返回，前端据此回退现拉（fetchStockChart）。
+_EMPTY_CHART: dict = {"dates": [], "values": [], "volumes": [], "ma5": [], "ma10": [], "ma20": []}
+
+
+def bars_to_chart(bars_df) -> dict:
+    """预测时内存里的 bars_df → 前端 PredictionChart 需要的图表结构。
+
+    落库用（prediction_snapshots.historical_bars）：预测跑到 compute 成功后调一次，
+    把历史 K 线固化进 DB，已完成记录再点开时前端直接渲染、不再现拉行情（美股链路会被限流卡死）。
+
+    转换逻辑照抄自 quant/service.py:get_stock_chart_data（约 192-228 行，选股侧）——
+    刻意复制而非 import，避免预测侧依赖选股服务；两侧输出结构须保持一致。
+
+    契约（★ 与选股侧一致，前端 candlestick / volume 直接吃）：
+      - dates:   ["YYYY-MM-DD", ...]（升序）
+      - values:  [[open, close, low, high], ...]  ★ ECharts candlestick 序，不是 OHLC
+      - volumes: [[i, volume, flag], ...]，flag = close>=open ? 1 : -1
+      - ma5/ma10/ma20: close.rolling(N).mean()，NaN → None（★ 不是 0）
+
+    防御：bars_df 为 None / 空 / 缺 date/open/high/low/close/volume 任一列 →
+    返回空结构（前端回退现拉），而不是抛异常（铁律 #9：不吞异常，但这里是可预期的降级）。
+    """
+    import pandas as pd
+
+    if bars_df is None or not isinstance(bars_df, pd.DataFrame) or bars_df.empty:
+        return dict(_EMPTY_CHART)
+
+    required = {"date", "open", "high", "low", "close", "volume"}
+    missing = required - set(bars_df.columns)
+    if missing:
+        logger.warning("bars_to_chart: bars_df 缺列 %s，返回空图表（前端将回退现拉）", sorted(missing))
+        return dict(_EMPTY_CHART)
+
+    df = bars_df.sort_values("date").reset_index(drop=True)
+
+    df["ma5"] = df["close"].rolling(5).mean()
+    df["ma10"] = df["close"].rolling(10).mean()
+    df["ma20"] = df["close"].rolling(20).mean()
+
+    def _safe_float(val):
+        # 防御：列名重复时 row["open"] 可能返回 Series（不是标量），取首个值
+        if isinstance(val, pd.Series):
+            if val.empty:
+                return None
+            val = val.iloc[0]
+        try:
+            return None if pd.isna(val) else float(val)
+        except (TypeError, ValueError):
+            return None
+
+    values = [
+        [_safe_float(row["open"]), _safe_float(row["close"]), _safe_float(row["low"]), _safe_float(row["high"])]
+        for _, row in df.iterrows()
+    ]
+    dates = df["date"].astype(str).tolist()
+    volumes = []
+    for i, row in df.iterrows():
+        color_flag = 1 if row["close"] >= row["open"] else -1
+        volumes.append([i, _safe_float(row["volume"]), color_flag])
+
+    return {
+        "dates": dates,
+        "values": values,
+        "volumes": volumes,
+        "ma5": [_safe_float(x) for x in df["ma5"]],
+        "ma10": [_safe_float(x) for x in df["ma10"]],
+        "ma20": [_safe_float(x) for x in df["ma20"]],
+    }

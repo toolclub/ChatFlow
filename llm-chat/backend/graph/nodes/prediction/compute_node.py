@@ -36,6 +36,7 @@ from db.prediction_store import (
     update_prediction_event_markers,
     update_prediction_forecast,
     update_prediction_formula_steps,
+    update_prediction_historical_bars,
     update_prediction_model_params,
     update_prediction_status,
 )
@@ -45,6 +46,7 @@ from graph.nodes.base import BaseNode
 from graph.nodes.prediction.preflight_node import PHASE_INFERRING, emit_progress
 from graph.prediction.announcements import aggregate_event_score, to_event_markers
 from graph.prediction.config import PREDICTION_BARS_LOOKBACK_DAYS, PREDICTION_HORIZON_DAYS
+from graph.prediction.domain import bars_to_chart
 from graph.prediction.engine import forecast
 from graph.prediction.market_data import KIND_NO_DATA, MarketDataError, fetch_bars
 
@@ -244,6 +246,16 @@ class ComputeNode(BaseNode):
             await update_prediction_candles(snapshot_id, forecast_candles)
         except Exception as exc:
             logger.warning("update_prediction_candles 失败 snap=%s: %s", snapshot_id, exc)
+
+        # 历史 K 线落库：已完成记录点开详情时直接从库读渲染，跳过现拉（雅虎限流会卡）。
+        # 走到这里 = fetch_bars 保证 bars_df 非空 + forecast 已成功（失败早就 return 了），
+        # 所以只在预测成功时落，失败记录不落 K 线。零额外网络请求：bars_df 已在内存。
+        # 铁律 #9：转换/落库是锦上添花，异常只 warning，绝不挂掉整个预测。
+        try:
+            chart = bars_to_chart(bars_df)
+            await update_prediction_historical_bars(snapshot_id, chart)
+        except Exception as exc:
+            logger.warning("update_prediction_historical_bars 失败 snap=%s: %s", snapshot_id, exc)
 
         # ── 4. 事件打点（K 线上的公告标记）+ 事件综合分 F ──────────────────────
         event_markers, event_score = await self._emit_event_markers(

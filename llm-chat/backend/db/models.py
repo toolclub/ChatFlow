@@ -313,6 +313,10 @@ class PredictionSnapshotModel(Base):
     tool_traces = Column(JSONB, nullable=False, default=list)
     # 事件综合分 F ∈ [-1, 0]（爆雷/定增/减持 加权饱和分），为空表示未跑数据型维度
     event_score = Column(Float, nullable=True)
+    # 历史 K 线（compute 阶段落库，前端图表契约结构）：
+    # {dates:[...], values:[[open,close,low,high],...], ma5/ma10/ma20:[...], volumes:[[i,vol,flag],...]}
+    # 空 dict 表示旧记录未落库 → 前端回退现拉 fetchStockChart（保持兼容）
+    historical_bars = Column(JSONB, nullable=False, default=dict)
 
 
 class AnnouncementCacheModel(Base):

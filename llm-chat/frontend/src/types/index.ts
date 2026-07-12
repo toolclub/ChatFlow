@@ -847,6 +847,12 @@ export interface PredictionSnapshot {
   confidence_band?: { dates: string[]; p10: number[]; p50: number[]; p90: number[] }
   technical_indicators?: Record<string, number | string>
   historical_data?: { dates: string[]; values: [number, number, number, number][]; ma5?: number[]; ma10?: number[]; ma20?: number[]; volumes?: [string, number, number][] }
+  /**
+   * 已完成记录落库的历史 K 线（后端 compute 成功后写 prediction_snapshots.historical_bars，
+   * 形状同 historical_data）。非空 → 前端直接渲染、跳过 fetchStockChart 现拉（雅虎限流会卡）；
+   * 空对象/缺失 → 旧记录或运行中，回退现拉。
+   */
+  historical_bars?: { dates: string[]; values: [number, number, number, number][]; ma5?: (number | null)[]; ma10?: (number | null)[]; ma20?: (number | null)[]; volumes?: [number, number, number][] }
   analysis?: string
   risk_notes?: string[]
   thinking_segments?: Array<{ node: string; step_index: number | null; phase: string; content: string }>

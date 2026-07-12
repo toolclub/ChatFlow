@@ -330,10 +330,29 @@ export function usePrediction() {
       const key = admin.verifiedAdminKey.value
       const snap = await api.fetchPredictionSnapshot(id, key)
 
-      // K 线历史（复用 quant 个股图表接口）。可选：失败不阻塞，图表仍能画预测段
-      if (snap.symbol && snap.market) {
+      // K 线历史。已完成记录后端已把当时的 bars 落库到 historical_bars（图表契约结构），
+      // 有内容就直接用、**跳过现拉**（这就是用户要的：美股链路会被雅虎限流卡死甚至超时）。
+      // 旧记录 / 运行中未落库 → historical_bars 为空对象 → 回退现拉 fetchStockChart（保持兼容）。
+      if (snap.historical_bars && (snap.historical_bars.dates?.length ?? 0) > 0) {
+        snap.historical_data = {
+          dates: snap.historical_bars.dates || [],
+          values: snap.historical_bars.values || [],
+          ma5: snap.historical_bars.ma5 as number[] | undefined,
+          ma10: snap.historical_bars.ma10 as number[] | undefined,
+          ma20: snap.historical_bars.ma20 as number[] | undefined,
+          volumes: snap.historical_bars.volumes as unknown as [string, number, number][] | undefined,
+        }
+      } else if (snap.symbol && snap.market) {
+        // 回退现拉。可选：失败不阻塞，图表仍能画预测段。
+        // 给现拉包一个 15s 超时上限：即便 provider 被限流也不让详情页无限转圈，
+        // 超时/失败一律 console.warn + 图表走空态（不设置 historical_data）。
         try {
-          const chart = await api.fetchStockChart(snap.symbol, 240, key)
+          const chart = await Promise.race([
+            api.fetchStockChart(snap.symbol, 240, key),
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error('fetch historical K-line timeout (15s)')), 15000),
+            ),
+          ]) as Awaited<ReturnType<typeof api.fetchStockChart>>
           snap.historical_data = {
             dates: chart.dates || [],
             values: chart.values || [],
