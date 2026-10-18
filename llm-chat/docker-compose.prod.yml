@@ -2,8 +2,9 @@
 ## ChatFlow — 生产环境 Docker Compose（单机高并发版）
 ## 目标平台：Apple Mac Mini M4（ARM64），也可运行于 x86_64
 ##
-## 使用方式：
-##   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+## 使用方式（注意：--env-file 会替换而非合并默认 .env，必须两个都带上，
+## 否则 BACKEND_PORT/POSTGRES_USER 等只在 .env 里的变量插值为空，报 invalid port range）：
+##   docker compose -f docker-compose.prod.yml --env-file .env --env-file .env.prod up -d --build
 ##
 ## 与 docker-compose.yml（开发版）的主要差异：
 ##   1. backend 使用 Gunicorn + UvicornWorker 多进程（可配置 GUNICORN_WORKERS）

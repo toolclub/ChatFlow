@@ -47,13 +47,31 @@ async def lifespan(app: FastAPI):
     setup_logging(LOG_DIR)
 
     # 1. 初始化数据库连接并自动建表 + 增量迁移
+    #    pg_advisory_lock 串行化：gunicorn 多 worker 并发启动时 create_all 建新表
+    #    会互相撞（llm_providers 首建时曾撞出 UniqueViolation 杀掉一个 worker），
+    #    会话级咨询锁保证同一时刻只有一个 worker 执行 DDL；worker 崩溃时连接
+    #    断开锁自动释放，不会卡死后续启动。
     init_engine(DATABASE_URL)
     engine = get_engine()
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        from db.migrate import run_migrations
-        await run_migrations(conn)
+    from sqlalchemy import text as _sa_text
+    async with engine.connect() as conn:
+        await conn.execute(_sa_text("SELECT pg_advisory_lock(742001)"))
+        await conn.commit()  # 结束 execute 自动开启的事务；会话级咨询锁不受事务结束影响
+        try:
+            async with conn.begin():
+                await conn.run_sync(Base.metadata.create_all)
+                from db.migrate import run_migrations
+                await run_migrations(conn)
+        finally:
+            await conn.execute(_sa_text("SELECT pg_advisory_unlock(742001)"))
     logger.info("数据库初始化完成")
+
+    # 1.1 加载 LLM 供应商激活配置（管理页切换全局生效；失败不阻断启动，回退 .env）
+    try:
+        from services import llm_provider_service
+        await llm_provider_service.start()
+    except Exception as exc:
+        logger.warning("LLM 供应商服务启动失败（回退 .env 默认配置）: %s", exc)
 
     # 1.2 迁移历史 Token 数据到审计表
     try:
@@ -180,6 +198,11 @@ async def lifespan(app: FastAPI):
 
     yield
     # ── 关闭 ──
+    try:
+        from services import llm_provider_service
+        await llm_provider_service.stop()
+    except Exception as exc:
+        logger.warning("LLM 供应商服务停止异常（忽略）: %s", exc)
     try:
         from quant.cache_warmer import get_warmer
         await get_warmer().stop(timeout=5.0)

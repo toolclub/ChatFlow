@@ -10,7 +10,6 @@ RouteNode：路由决策节点
 import logging
 
 from config import (
-    ROUTER_MODEL,
     ROUTE_MODEL_MAP,
     SEARCH_MODEL,
     VISION_MODEL,
@@ -18,7 +17,8 @@ from config import (
 from graph.event_types import RouteNodeOutput
 from graph.nodes.base import BaseNode, track_usage
 from graph.state import GraphState
-from llm.chat import get_chat_llm
+from llm.chat import get_router_llm
+from services import llm_provider_service
 
 logger = logging.getLogger("graph.nodes.route")
 
@@ -53,7 +53,9 @@ class RouteNode(BaseNode):
         has_images    = bool(state.get("images"))
         vision_desc   = state.get("vision_description", "")
 
-        llm = get_chat_llm(model=ROUTER_MODEL, temperature=0.0)
+        # 路由/意图分类专用：角色感知（resolve_router），快照存在时直接用
+        # 快照.router_model —— 不受 env 角色名与 CHAT_MODEL 同名的影响
+        llm = get_router_llm()
 
         # ── 构建路由输入 ────────────────────────────────────────────────────
         # 优先使用 vision_description（由 VisionNode 生成的图片内容文字描述）；
@@ -73,7 +75,7 @@ class RouteNode(BaseNode):
         # ── 流式调用路由 LLM（边推送 thinking 事件，边收集结果） ──────────────
         messages = [{"role": "user", "content": f"{_ROUTE_PROMPT}\n\n{routing_input}"}]
         from logging_config import log_prompt
-        log_prompt(state.get("conv_id", ""), "route_model", ROUTER_MODEL, messages)
+        log_prompt(state.get("conv_id", ""), "route_model", llm.model, messages)
 
         _THINK_PREFIX = "\x00THINK\x00"
         content_parts: list[str] = []
@@ -93,13 +95,13 @@ class RouteNode(BaseNode):
         except Exception as exc:
             logger.warning(
                 "route_model 流式调用异常 | conv=%s | model=%s | error=%s，降级到 search_code",
-                state.get("conv_id", ""), ROUTER_MODEL, exc,
+                state.get("conv_id", ""), llm.model, exc,
             )
             raw = "search_code"
         if not raw:
             logger.warning(
                 "route_model 返回空内容 | conv=%s | model=%s，降级到 search_code",
-                state.get("conv_id", ""), ROUTER_MODEL,
+                state.get("conv_id", ""), llm.model,
             )
             raw = "search_code"
 
@@ -116,12 +118,21 @@ class RouteNode(BaseNode):
         # 直接用路由决策的主模型（MiniMax 等推理模型）即可。
         # 仅当 VisionNode 降级失败（vision_desc 为空）且有原始图片时，
         # 才回退到视觉模型，保证降级安全。
-        answer_model = ROUTE_MODEL_MAP.get(route, state["model"])
+        # 模型名经 map_model_name 映射：管理页激活供应商后，写进 state/ctx/SSE
+        # 的名字与工厂实际调用的模型保持一致（展示 == 实际）；无快照时原样返回。
+        answer_model = llm_provider_service.map_model_name(
+            ROUTE_MODEL_MAP.get(route, state["model"])
+        )
         needs_tools  = route in ("search", "search_code", "finance")
-        tool_model   = SEARCH_MODEL if needs_tools else answer_model
+        tool_model   = (
+            llm_provider_service.map_model_name(SEARCH_MODEL)
+            if needs_tools
+            else answer_model
+        )
 
         if has_images and not vision_desc:
-            # VisionNode 降级：描述为空，回退视觉模型直接处理原始图片
+            # VisionNode 降级：描述为空，回退视觉模型直接处理原始图片。
+            # 视觉的名字解析在工厂 resolve_vision 完成，这里保持 env 名不动。
             fallback = VISION_MODEL or ROUTE_MODEL_MAP.get("chat", state["model"])
             tool_model   = fallback
             answer_model = fallback

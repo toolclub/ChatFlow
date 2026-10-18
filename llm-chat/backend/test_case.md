@@ -853,6 +853,33 @@ pytest tests/ -m smoke         # 冒烟拨测（端到端）
 
 ---
 
+## 十-J、LLM 供应商管理（cc-switch：admin 切换全局生效供应商）
+
+> 测试文件：`tests/test_llm_provider_admin.py`。
+> 覆盖：`db/llm_provider_store.py`、`services/llm_provider_service.py`、`llm/chat.py` 工厂、
+> `routers/admin_router.py` 新端点、`routers/model_router.py`、`db/migrate.py` 幂等。
+> 核心不变量：无激活配置时所有 resolve_* 回退 .env（行为与上线前完全一致）；
+> 管理端点全部 `X-Admin-Key` 保护（铁律 #1：普通用户 403，非前端隐藏）。
+
+| 用例 | 输入 / 操作 | 期望 | 标记 |
+|------|------|------|------|
+| T-LLM-P01 | 8 个新 admin 端点（list/create/update/delete/activate/deactivate/test/fetch-models）无 key 或错 key 访问 | 全部 403（verify_admin_access 拦截） | unit |
+| T-LLM-P02 | POST 创建（最小字段）/ name 重复 / PUT·DELETE 不存在 id | 创建 200 且 `is_active=false`（新配置默认不激活）；重复 name → 409；不存在 → 404；PUT 只传部分字段时其余字段不被清空 | unit |
+| T-LLM-P02b | GET /api/admin/llm-providers | `providers` 含 api_key 明文（仅 admin 可达）；`effective.source` env/db 两态正确，**effective 永不返回 api_key** | unit |
+| T-LLM-P03 | activate / deactivate / delete / update 写操作 | activate→`store.activate_provider`+失效广播；deactivate→`deactivate_all`+广播；删激活项/改激活中配置→广播；改非激活配置、新建→不广播（不影响生效值） | unit |
+| T-LLM-P04 | `resolve_chat`：None / CHAT_MODEL / SUMMARY_MODEL / ROUTER·SEARCH·MAP 角色名 / 未知名 / 无快照 | 无快照→(LLM_BASE_URL, API_KEY, model or CHAT_MODEL)；快照→快照 base/key + 角色映射（角色模型留空回退 chat_model）；用户显式模型名原样透传 | unit |
+| T-LLM-P04b | `resolve_default_request_model` / `visible_models` | 快照 ? 快照.chat_model : CHAT_MODEL；可见模型 = chat_model+extra_models 去重保序 | unit |
+| T-LLM-P05 | `resolve_vision`：快照含/不含 vision_model、无快照 | 含→快照三元组（视觉随供应商切换）；不含/无快照→.env VISION_*（回退链 VISION_MODEL > CHAT_MODEL） | unit |
+| T-LLM-P06 | `get_chat_llm` / `get_summary_llm` / `get_vision_llm` / `get_vision_async_client` 有/无快照 | 返回实例的底层 base_url 与 model 正确（_http_cache/_client_cache 按 base_url+model 建新条目，旧条目保留不清空）；快照 vision 覆盖时显式 model 让位，env 模式保留旧回退链 | unit |
+| T-LLM-P07 | GET /api/models 有/无快照 | 有快照→`[chat_model]+extra_models` 去重，绝不返回 base_url/api_key；无快照→原 Ollama 拉取失败回退 `[CHAT_MODEL]` | unit |
+| T-LLM-P08 | `_MIGRATIONS` 全部 DDL 静态检查 + llm_providers DDL 在列 | 所有 CREATE TABLE/INDEX、ADD COLUMN 均 IF NOT EXISTS（二次执行不报错的结构性保证，T-DB-04 无 DB 版）；`llm_providers` 建表 + `ux_llmprov_name` 唯一索引在迁移列表且与 ORM 表名一致 | unit |
+| T-LLM-P08b | `_notify_llm_config_changed` 时 DB 刷新与 Redis 广播双双抛异常 | 不向上传播（写操作仍成功，铁律 #9 降级 + 15s 定时兜底） | unit |
+| T-LLM-P09 | POST /test 连通性：成功 / 失败（额度不足）/ 传 {id} 测已存配置 / 字段全空 | 成功→ok:true+latency_ms+content 截断；失败→ok:false 且 error 原样透传给前端；{id} 时取库内 base/key/model（显式字段优先）；全空→422 | unit |
+| T-LLM-P09b | POST /fetch-models 成功 / 上游超时 | 成功→`{models:[id...]}`；失败→502 detail 带错误信息 | unit |
+| **T-LLM-P10** | env 角色名与 CHAT_MODEL **同名**（当前生产 .env 即如此）+ 快照配置了 summary_model / router_model | ★ 名字映射（resolve_chat）同名时退化为 chat_model（已知局限，护栏用例锁定）；**角色感知**的 `get_summary_llm`（resolve_summary）/ `get_router_llm`（resolve_router）仍返回快照角色专属模型；角色留空回退 chat_model；无快照回退 env 角色名 | unit |
+
+---
+
 ## 十一、spec 对照检查（改代码后必跑）
 
 | 改了什么 | 跑哪些测试 |
@@ -880,6 +907,7 @@ pytest tests/ -m smoke         # 冒烟拨测（端到端）
 | **prediction v2 持久化 (db/prediction_store.py)** | **T-PRED-STORE-*** (`tests/test_prediction_store_v2.py`) |
 | **prediction 暂停 / 续跑 / 删除** | **T-PRED-PAUSE-*** (`tests/test_prediction_pause_resume.py`) + T-PRED-STORE-06/09 |
 | **prediction SSE（新事件 / 心跳）** | **T-PRED-HB-*** (`tests/test_prediction_heartbeat.py`) —— 加新 SSE 事件必跑 T-PRED-HB-08* |
+| **LLM 供应商管理（admin 切换全局供应商）** | **T-LLM-P-*** (`tests/test_llm_provider_admin.py`) + T-DB-04（迁移幂等）+ T-SMOKE-* |
 | prediction 图拓扑 / 断线重连 / 停止 | T-PRED-GRAPH-* / T-PRED-RESUME-* / T-PRED-STOP-* |
 | 任何改动 | T-SMOKE-* (冒烟) |
 | 新增工具 | T-SANDBOX-03 + T-SMOKE-03 |

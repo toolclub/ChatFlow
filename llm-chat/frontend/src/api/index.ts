@@ -1477,3 +1477,145 @@ export async function streamPrediction(
     // 下一轮 runOnce 会用推进后的 cursor 续传，不全量重放
   }
 }
+
+// ── LLM 供应商管理（管理面板）API ────────────────────────────────────────────
+// 全部需 X-Admin-Key 头，无 key → 403；错误体为 FastAPI 默认 {detail}。
+// post/put 帮助函数不支持自定义 header，因此照 refreshQuantCache/startPrediction
+// 的惯例直接走 fetchWithAuth。
+
+export interface LlmProvider {
+  id: number
+  name: string
+  base_url: string
+  api_key: string
+  chat_model: string
+  summary_model: string | null
+  router_model: string | null
+  vision_model: string | null
+  extra_models: string[]
+  remark: string | null
+  enabled: boolean
+  is_active: boolean
+  created_at: number
+  updated_at: number
+}
+
+/** 当前全局生效配置：source=db 表示数据库供应商覆盖，env 表示 .env 默认 */
+export interface LlmProviderEffective {
+  source: 'db' | 'env'
+  base_url: string
+  chat_model: string
+  models: string[]
+}
+
+export interface LlmProviderPayload {
+  name: string
+  base_url: string
+  api_key: string
+  chat_model: string
+  summary_model?: string | null
+  router_model?: string | null
+  vision_model?: string | null
+  extra_models?: string[]
+  remark?: string | null
+  enabled?: boolean
+}
+
+export interface LlmProviderTestResult {
+  ok: boolean
+  latency_ms: number
+  content: string
+  error: string | null
+}
+
+/** 管理端点统一错误：带出后端 detail 文本，并附 status 供 UI 区分 403（密钥失效） */
+async function llmAdminError(res: Response, fallback: string): Promise<never> {
+  const data = await res.json().catch(() => ({}))
+  const err = new Error(data.detail || `${fallback} (HTTP ${res.status})`) as Error & { status?: number }
+  err.status = res.status
+  throw err
+}
+
+/** GET /api/admin/llm-providers — 供应商列表 + 当前生效配置 */
+export async function fetchLlmProviders(adminKey: string): Promise<{ providers: LlmProvider[]; effective: LlmProviderEffective }> {
+  const res = await fetchWithAuth(`${API_BASE}/api/admin/llm-providers`, { headers: { 'X-Admin-Key': adminKey } })
+  if (!res.ok) return llmAdminError(res, '获取供应商列表失败')
+  return res.json()
+}
+
+/** POST /api/admin/llm-providers — 新增供应商（name 重复 → 409） */
+export async function createLlmProvider(payload: LlmProviderPayload, adminKey: string): Promise<{ provider: LlmProvider }> {
+  const res = await fetchWithAuth(`${API_BASE}/api/admin/llm-providers`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    headers: { 'X-Admin-Key': adminKey },
+  })
+  if (!res.ok) return llmAdminError(res, '新增供应商失败')
+  return res.json()
+}
+
+/** PUT /api/admin/llm-providers/{id} — 全量更新 */
+export async function updateLlmProvider(id: number, payload: LlmProviderPayload, adminKey: string): Promise<{ provider: LlmProvider }> {
+  const res = await fetchWithAuth(`${API_BASE}/api/admin/llm-providers/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+    headers: { 'X-Admin-Key': adminKey },
+  })
+  if (!res.ok) return llmAdminError(res, '更新供应商失败')
+  return res.json()
+}
+
+/** DELETE /api/admin/llm-providers/{id} */
+export async function deleteLlmProvider(id: number, adminKey: string): Promise<{ ok: boolean }> {
+  const res = await fetchWithAuth(`${API_BASE}/api/admin/llm-providers/${id}`, {
+    method: 'DELETE',
+    headers: { 'X-Admin-Key': adminKey },
+  })
+  if (!res.ok) return llmAdminError(res, '删除供应商失败')
+  return res.json()
+}
+
+/** POST /api/admin/llm-providers/{id}/activate — 设为全局当前，所有用户立即生效 */
+export async function activateLlmProvider(id: number, adminKey: string): Promise<{ provider: LlmProvider }> {
+  const res = await fetchWithAuth(`${API_BASE}/api/admin/llm-providers/${id}/activate`, {
+    method: 'POST',
+    headers: { 'X-Admin-Key': adminKey },
+  })
+  if (!res.ok) return llmAdminError(res, '切换供应商失败')
+  return res.json()
+}
+
+/** POST /api/admin/llm-providers/deactivate — 恢复 .env 默认配置 */
+export async function deactivateLlmProvider(adminKey: string): Promise<{ ok: boolean }> {
+  const res = await fetchWithAuth(`${API_BASE}/api/admin/llm-providers/deactivate`, {
+    method: 'POST',
+    headers: { 'X-Admin-Key': adminKey },
+  })
+  if (!res.ok) return llmAdminError(res, '恢复默认配置失败')
+  return res.json()
+}
+
+/** POST /api/admin/llm-providers/test — 连通性测试（传 {id} 用已存配置，或现场 {base_url, api_key, model}） */
+export async function testLlmProvider(
+  body: { id?: number; base_url?: string; api_key?: string; model?: string },
+  adminKey: string,
+): Promise<LlmProviderTestResult> {
+  const res = await fetchWithAuth(`${API_BASE}/api/admin/llm-providers/test`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+    headers: { 'X-Admin-Key': adminKey },
+  })
+  if (!res.ok) return llmAdminError(res, '测试连接失败')
+  return res.json()
+}
+
+/** POST /api/admin/llm-providers/fetch-models — 拉供应商模型列表（失败时后端抛 502 + detail） */
+export async function fetchLlmProviderModels(baseUrl: string, apiKey: string, adminKey: string): Promise<{ models: string[] }> {
+  const res = await fetchWithAuth(`${API_BASE}/api/admin/llm-providers/fetch-models`, {
+    method: 'POST',
+    body: JSON.stringify({ base_url: baseUrl, api_key: apiKey }),
+    headers: { 'X-Admin-Key': adminKey },
+  })
+  if (!res.ok) return llmAdminError(res, '获取模型列表失败')
+  return res.json()
+}

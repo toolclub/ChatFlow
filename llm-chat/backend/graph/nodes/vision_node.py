@@ -25,9 +25,11 @@ import logging
 
 from langchain_core.callbacks.manager import adispatch_custom_event
 
-from config import VISION_API_KEY, VISION_BASE_URL, VISION_MODEL
+from config import VISION_MODEL
 from graph.nodes.base import BaseNode, track_usage
 from graph.state import GraphState
+from llm.chat import get_vision_async_client
+from services import llm_provider_service
 
 logger = logging.getLogger("graph.nodes.vision")
 
@@ -58,8 +60,11 @@ class VisionNode(BaseNode):
         if not images:
             return {"vision_description": ""}
 
-        # 视觉模型未配置时降级（仍能继续后续流程）
-        if not VISION_MODEL:
+        # 视觉模型未配置时降级（仍能继续后续流程）：
+        # env 模式看 VISION_MODEL；管理页激活的供应商配置了 vision_model 时视为已配置。
+        # 注意不能用 llm_provider_service.resolve_vision() 判空 —— 它的回退链兜到 CHAT_MODEL，永远非空。
+        snapshot = llm_provider_service.get_snapshot()
+        if not (VISION_MODEL or (snapshot and snapshot.vision_model)):
             logger.warning(
                 "VisionNode | VISION_MODEL 未配置，跳过视觉分析 | conv=%s",
                 state.get("conv_id", ""),
@@ -91,8 +96,6 @@ class VisionNode(BaseNode):
         超时 60s，失败时静默降级（返回空字符串），由 retrieve_context 的降级路径处理。
         """
         try:
-            from openai import AsyncOpenAI
-
             vision_content: list = []
             for img in images:
                 url = img if img.startswith("data:") else f"data:image/jpeg;base64,{img}"
@@ -109,10 +112,13 @@ class VisionNode(BaseNode):
                 ),
             })
 
-            client = AsyncOpenAI(base_url=VISION_BASE_URL, api_key=VISION_API_KEY)
+            # 统一走工厂：base/key/model 均来自 llm_provider_service.resolve_vision()
+            # （管理页供应商配置了 vision_model 时随供应商切换，否则 .env VISION_*）
+            vision_model = llm_provider_service.resolve_vision()[2]
+            client = get_vision_async_client()
 
             description, usage = await asyncio.wait_for(
-                self._stream_vision(client, vision_content, conv_id),
+                self._stream_vision(client, vision_model, vision_content, conv_id),
                 timeout=_VISION_TIMEOUT,
             )
             return description, usage
@@ -120,7 +126,7 @@ class VisionNode(BaseNode):
         except asyncio.TimeoutError:
             logger.warning(
                 "VisionNode 流式超时（%.0fs），降级为空描述 | conv=%s | model=%s",
-                _VISION_TIMEOUT, conv_id, VISION_MODEL,
+                _VISION_TIMEOUT, conv_id, llm_provider_service.resolve_vision()[2],
             )
             return "", {}
         except Exception as exc:
@@ -131,7 +137,7 @@ class VisionNode(BaseNode):
             return "", {}
 
     @staticmethod
-    async def _stream_vision(client, vision_content: list, conv_id: str) -> tuple[str, dict]:
+    async def _stream_vision(client, vision_model: str, vision_content: list, conv_id: str) -> tuple[str, dict]:
         """
         流式调用视觉模型，逐 token 通过统一 emit_thinking 推给前端。
         视觉输出作为 node=vision / phase=content 的 segment，
@@ -142,10 +148,10 @@ class VisionNode(BaseNode):
 
         vision_messages = [{"role": "user", "content": vision_content}]
         from logging_config import log_prompt
-        log_prompt(conv_id, "vision_node", VISION_MODEL, vision_messages)
+        log_prompt(conv_id, "vision_node", vision_model, vision_messages)
 
         stream = await client.chat.completions.create(
-            model=VISION_MODEL,
+            model=vision_model,
             messages=[{"role": "user", "content": vision_content}],
             temperature=0.1,
             stream=True,
@@ -187,6 +193,6 @@ class VisionNode(BaseNode):
         description = "".join(parts)
         logger.info(
             "VisionNode 流式完成 | conv=%s | model=%s | desc_len=%d | preview='%.200s'",
-            conv_id, VISION_MODEL, len(description), description,
+            conv_id, vision_model, len(description), description,
         )
         return description, usage_data

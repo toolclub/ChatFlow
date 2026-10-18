@@ -17,7 +17,7 @@ from fastapi.responses import StreamingResponse
 from models import ChatRequest
 from memory import store as memory_store
 from graph import runner as graph_runner
-from config import CHAT_MODEL
+from services import llm_provider_service
 from services.auth.dependencies import CurrentUser
 
 logger = logging.getLogger("routers.chat")
@@ -44,13 +44,17 @@ async def chat(req: ChatRequest, user: CurrentUser, request: Request):
     client_id = user.get("client_id", "")
     user_id = user.get("id", "")
 
+    # 用户显式传 req.model 时原样用（界面显示与实际请求一致）；
+    # 不传时用当前生效默认（管理页激活供应商 ? 快照.chat_model : .env CHAT_MODEL）
+    effective_model = req.model or llm_provider_service.resolve_default_request_model()
+
     img_bytes = sum(len(img) for img in req.images)
     logger.info(
         "POST /api/chat | conv=%s | user=%s | client=%s | model=%s | msg_len=%d",
         req.conversation_id,
         user_id[:8] if user_id else "-",
         client_id[:8] if client_id else "-",
-        req.model or CHAT_MODEL,
+        effective_model,
         len(req.message),
     )
 
@@ -82,7 +86,7 @@ async def chat(req: ChatRequest, user: CurrentUser, request: Request):
             async for chunk in graph_runner.stream_response(
                 conv_id=req.conversation_id,
                 user_message=req.message,
-                model=req.model or CHAT_MODEL,
+                model=effective_model,
                 temperature=req.temperature,
                 client_id=client_id,
                 user_id=user_id,

@@ -18,14 +18,14 @@ from config import (
     DEFAULT_SYSTEM_PROMPT,
     SEMANTIC_CACHE_NAMESPACE_MODE,
     SEMANTIC_CACHE_SEARCH_TTL_HOURS,
-    VISION_API_KEY,
-    VISION_BASE_URL,
     VISION_MODEL,
 )
 from graph.nodes.base import BaseNode
 from graph.state import GraphState
+from llm.chat import get_vision_async_client
 from memory import store as memory_store
 from sandbox.context import current_clarification
+from services import llm_provider_service
 
 logger = logging.getLogger("graph.nodes.save_response")
 
@@ -266,9 +266,13 @@ class SaveResponseNode(BaseNode):
         失败时静默降级，返回通用占位文本。
         """
         try:
-            from openai import AsyncOpenAI
-
-            vision_model = VISION_MODEL or model
+            # 模型名：供应商快照配置了 vision_model → 用它（视觉随供应商切换）；
+            # 否则沿用旧回退链 VISION_MODEL > 会话模型。端点/密钥统一走工厂。
+            snapshot = llm_provider_service.get_snapshot()
+            if snapshot and snapshot.vision_model:
+                vision_model = snapshot.vision_model
+            else:
+                vision_model = VISION_MODEL or model
             content: list = [
                 {
                     "type": "image_url",
@@ -283,7 +287,7 @@ class SaveResponseNode(BaseNode):
                 "text": "请简短描述图片的主要内容，不超过50个字，直接描述，不要解释。",
             })
 
-            client = AsyncOpenAI(base_url=VISION_BASE_URL, api_key=VISION_API_KEY)
+            client = get_vision_async_client()
             resp   = await client.chat.completions.create(
                 model=vision_model,
                 messages=[{"role": "user", "content": content}],

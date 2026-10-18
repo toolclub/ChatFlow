@@ -31,6 +31,7 @@ from graph.runner.context import StreamContext
 from graph.runner.dispatcher import dispatcher
 from graph.runner.utils import sse
 from graph.state import GraphState
+from services import llm_provider_service
 
 logger = logging.getLogger("graph.runner.stream")
 
@@ -48,11 +49,11 @@ class StreamSession:
     """管理单个流式对话的完整生命周期（DB-first）。"""
 
     def __init__(
-            
+
         self,
         conv_id: str,
         user_message: str,
-        model: str,
+        model: str | None = None,
         temperature: float = 0.7,
         client_id: str = "",
         user_id: str = "",
@@ -65,7 +66,9 @@ class StreamSession:
     ):
         self.conv_id = conv_id
         self.user_message = user_message
-        self.model = model
+        # 未显式指定时取当前生效默认（管理页激活供应商 ? 快照.chat_model : .env）。
+        # 在此归一化一次，下游 _build_initial_state / StreamContext / tool_model 全部拿到确定值。
+        self.model = model or llm_provider_service.resolve_default_request_model()
         self.temperature = temperature
         self.client_id = client_id
         self.user_id = user_id
@@ -91,7 +94,7 @@ class StreamSession:
 
         # 内部状态
         self.queue: asyncio.Queue[tuple] = asyncio.Queue()
-        self.ctx = StreamContext(active_model=model)
+        self.ctx = StreamContext(active_model=self.model)
         self._partial = ""
         self._streaming = ""
         self._save_done = False
@@ -740,7 +743,7 @@ class StreamSession:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def stream_response(
-    conv_id: str, user_message: str, model: str,
+    conv_id: str, user_message: str, model: str | None = None,
     temperature: float = 0.7, client_id: str = "", user_id: str = "",
     images: list[str] | None = None,
     agent_mode: bool = True, force_plan: list[dict] | None = None,

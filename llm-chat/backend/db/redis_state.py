@@ -184,3 +184,52 @@ async def set_websearch_cache(scope: str, query: str, value: str) -> None:
     key = f"{_WEBSEARCH_CACHE_PREFIX}{scope}"
     await r.hset(key, query, value)
     await r.expire(key, _WEBSEARCH_TTL)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 5. LLM 供应商配置失效（管理页切换供应商后，通知所有 worker 重读激活快照）
+# ══════════════════════════════════════════════════════════════════════════════
+
+_LLM_CONFIG_CHANNEL = "chatflow:llm_config_invalidate"
+
+# 本地订阅任务（在 llm_provider_service.start() 中启动）
+_llm_sub_task: Optional[asyncio.Task] = None
+
+
+async def publish_llm_config_invalidation() -> None:
+    """通知所有 worker 重新加载 LLM 供应商激活快照。"""
+    r = _get_redis()
+    await r.publish(_LLM_CONFIG_CHANNEL, "1")
+
+
+async def start_llm_config_invalidation_listener(on_invalidate) -> None:
+    """
+    启动 LLM 配置失效监听（在 llm_provider_service.start() 中调用）。
+
+    on_invalidate: async callable() — 收到通知后的回调（重读 DB 快照）。
+    """
+    global _llm_sub_task
+
+    async def _listen():
+        r = _get_redis()
+        pubsub = r.pubsub()
+        await pubsub.subscribe(_LLM_CONFIG_CHANNEL)
+        try:
+            async for msg in pubsub.listen():
+                if msg["type"] == "message":
+                    await on_invalidate()
+        except asyncio.CancelledError:
+            await pubsub.unsubscribe(_LLM_CONFIG_CHANNEL)
+        except Exception as exc:
+            logger.warning("LLM 配置失效监听异常: %s", exc)
+
+    _llm_sub_task = asyncio.create_task(_listen())
+    logger.info("LLM 配置失效监听已启动")
+
+
+async def stop_llm_config_invalidation_listener() -> None:
+    """停止 LLM 配置失效监听。"""
+    global _llm_sub_task
+    if _llm_sub_task:
+        _llm_sub_task.cancel()
+        _llm_sub_task = None

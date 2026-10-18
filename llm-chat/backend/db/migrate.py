@@ -290,6 +290,27 @@ _MIGRATIONS = [
     "ALTER TABLE announcement_cache ALTER COLUMN event_type SET DEFAULT ''",
     "ALTER TABLE announcement_cache ALTER COLUMN reason SET DEFAULT ''",
     "ALTER TABLE announcement_cache ALTER COLUMN judged_by SET DEFAULT ''",
+
+    # ── llm_providers 表（LLM 供应商管理：管理页激活一条配置后全局生效） ──
+    # is_active 唯一性由 store 层 activate_provider 单事务保证，不加 DB 约束。
+    """CREATE TABLE IF NOT EXISTS llm_providers (
+        id            SERIAL           NOT NULL,
+        name          VARCHAR(100)     NOT NULL,
+        base_url      VARCHAR(500)     NOT NULL,
+        api_key       TEXT             NOT NULL,
+        chat_model    VARCHAR(200)     NOT NULL,
+        summary_model VARCHAR(200)     DEFAULT NULL,
+        router_model  VARCHAR(200)     DEFAULT NULL,
+        vision_model  VARCHAR(200)     DEFAULT NULL,
+        extra_models  JSONB            NOT NULL DEFAULT '[]',
+        remark        VARCHAR(500)     DEFAULT NULL,
+        enabled       BOOLEAN          NOT NULL DEFAULT TRUE,
+        is_active     BOOLEAN          NOT NULL DEFAULT FALSE,
+        created_at    DOUBLE PRECISION NOT NULL,
+        updated_at    DOUBLE PRECISION NOT NULL,
+        CONSTRAINT pk_llm_providers PRIMARY KEY (id)
+    )""",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_llmprov_name ON llm_providers(name)",
 ]
 
 

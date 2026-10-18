@@ -5,6 +5,7 @@ import {
   User, ChatDotRound, Cpu, PieChart, TrendCharts, Refresh, ArrowLeft, Close
 } from '@element-plus/icons-vue'
 import { get } from '../api'
+import LlmProviderPanel from './LlmProviderPanel.vue'
 
 const props = defineProps<{
   adminKey: string
@@ -250,7 +251,7 @@ function formatTime(ts: number) {
       <el-skeleton :rows="10" animated />
     </div>
 
-    <div v-else class="admin-content">
+    <div v-else-if="stats" class="admin-content">
       <!-- 数据概览卡片 -->
       <div class="stats-grid">
         <div class="stat-card blue">
@@ -337,6 +338,13 @@ function formatTime(ts: number) {
           </el-table-column>
         </el-table>
       </div>
+
+      <!-- 模型服务（LLM 供应商 / 令牌管理，管理员全局切换） -->
+      <LlmProviderPanel :admin-key="adminKey" />
+    </div>
+
+    <div v-else class="loading-state">
+      <el-empty description="管理数据加载失败，请检查管理员密钥后刷新重试" />
     </div>
   </div>
 </template>

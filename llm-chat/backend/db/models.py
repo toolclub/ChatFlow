@@ -356,6 +356,40 @@ class AnnouncementCacheModel(Base):
     )
 
 
+class LLMProviderModel(Base):
+    """LLM 供应商配置 —— 管理页维护，管理员激活一条后全局生效（cc-switch 模式）。
+
+    无激活行（或激活行 enabled=False）时，运行时回退 .env 默认配置。
+    is_active 至多一条 True：由 db/llm_provider_store.activate_provider 在单事务内保证，
+    不靠 DB 约束（部分激活 UNIQUE 索引在 PostgreSQL 无法直接表达）。
+    """
+    __tablename__ = "llm_providers"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False, comment="显示名（唯一）")
+    base_url = Column(String(500), nullable=False, comment="OpenAI 兼容接口地址")
+    api_key = Column(Text, nullable=False)
+    chat_model = Column(String(200), nullable=False, comment="主对话模型")
+    # 以下角色模型留空 = 沿用简单回退（见 services/llm_provider_service.resolve_chat）
+    summary_model = Column(String(200), nullable=True, comment="摘要用模型，空=同 chat_model")
+    router_model = Column(
+        String(200), nullable=True,
+        comment="路由/搜索（ROUTER/SEARCH/ROUTE_MODEL_MAP）用模型，空=同 chat_model",
+    )
+    vision_model = Column(String(200), nullable=True, comment="视觉模型，空=沿用 .env VISION_*（视觉不随供应商切换）")
+    # 用户在聊天界面可额外选择的模型名列表（GET /api/models 返回 chat_model + extra_models）
+    extra_models = Column(JSONB, nullable=False, default=list)
+    remark = Column(String(500), nullable=True)
+    enabled = Column(Boolean, nullable=False, default=True, comment="停用后不可被激活生效")
+    is_active = Column(Boolean, nullable=False, default=False, comment="全局生效中的配置（至多一条 True）")
+    created_at = Column(Float, nullable=False)
+    updated_at = Column(Float, nullable=False)
+
+    __table_args__ = (
+        Index("ux_llmprov_name", "name", unique=True),
+    )
+
+
 # ── 以下为保留表（向后兼容） ──────────────────────────────────────────────────
 
 class PlanStepModel(Base):
