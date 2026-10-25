@@ -225,6 +225,7 @@ async def create_ppt(ppt_json: str = None, ppt_path: str = None) -> str:
 
             # ── SSE 推送：包含 slides_html 供前端实时预览 ──
             await adispatch_custom_event("file_artifact", {
+                **save_ok,
                 "name": filename,
                 "path": filename,
                 "content": content_b64,

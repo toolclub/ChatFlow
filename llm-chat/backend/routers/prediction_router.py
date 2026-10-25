@@ -27,7 +27,7 @@ import json
 import logging
 import uuid
 
-from fastapi import APIRouter, HTTPException, Header, Request
+from fastapi import APIRouter, HTTPException, Header, Request, Query
 from fastapi.responses import StreamingResponse
 
 from db.prediction_store import (
@@ -38,6 +38,7 @@ from db.prediction_store import (
     prediction_v2_fields,
     save_prediction_snapshot,
 )
+from db.prediction_view import get_prediction_view, get_prediction_source
 from fsm.sse_events import SSEEventType
 from graph.prediction_agent import (
     build_initial_state,
@@ -217,13 +218,13 @@ async def list_dimensions(admin: AdminRequired, market: str | None = None) -> di
 
 
 @router.get("/{prediction_id}")
-async def read_prediction(prediction_id: str, admin: AdminRequired) -> dict:
+async def read_prediction(prediction_id: str, admin: AdminRequired, compact: bool = False) -> dict:
     """读单个预测快照（全字段，含 v2 新列）。
 
     前端 loadSnapshot() 靠这些 DB 列重建终态（公式卡片 / 预测蜡烛 / 公告打点 / 工具轨迹），
     而不是重放全部 SSE 事件 —— 超出重放窗口的硬刷新也不会白屏（设计文档 §7.4）。
     """
-    snap = await get_prediction_snapshot(prediction_id)
+    snap = await (get_prediction_view(prediction_id) if compact else get_prediction_snapshot(prediction_id))
     if snap is None:
         raise HTTPException(status_code=404, detail="预测任务不存在")
     v2 = prediction_v2_fields(snap)
@@ -232,6 +233,8 @@ async def read_prediction(prediction_id: str, admin: AdminRequired) -> dict:
         #          event_markers / tool_traces / event_score
         **v2,
         "prediction_id": prediction_id,
+        "id": prediction_id,
+        **({"event_cursor": snap.event_cursor, "stream_text": snap.stream_text} if compact else {}),
         "client_id": snap.client_id,
         "criteria": snap.criteria,
         "market": snap.market,
@@ -245,7 +248,7 @@ async def read_prediction(prediction_id: str, admin: AdminRequired) -> dict:
         "model_name": snap.model_name,
         "news_digest": snap.news_digest,
         "news_sentiment": snap.news_sentiment,
-        "forecast": {
+        "forecast": getattr(snap, "_event_forecast", None) or {
             "dates": (snap.confidence_band or {}).get("dates", []),
             "point_forecast": [r.get("price") for r in (snap.forecast or []) if isinstance(r, dict)],
             "p10": (snap.confidence_band or {}).get("p10", []),
@@ -274,12 +277,25 @@ async def read_prediction(prediction_id: str, admin: AdminRequired) -> dict:
     }
 
 
+@router.get("/{prediction_id}/source")
+async def read_prediction_source(
+    prediction_id: str, admin: AdminRequired, dimension: str,
+    source_index: int = Query(ge=0), url: str = "",
+) -> dict:
+    """A single complete original source; compact views never destroy raw text."""
+    source = await get_prediction_source(prediction_id, dimension, source_index, url)
+    if source is None:
+        raise HTTPException(status_code=404, detail="新闻来源不存在或已更新，请刷新详情")
+    return source
+
+
 @router.get("/{prediction_id}/stream")
 async def stream_prediction(
     prediction_id: str,
     admin: AdminRequired,
     request: Request,
-    after_event_id: int = 0,
+    after_event_id: int = Query(default=0, ge=0),
+    compact: bool = False,
 ) -> StreamingResponse:
     """SSE 流式：replay event_log → drain 队列 / 重跑。
 
@@ -302,7 +318,7 @@ async def stream_prediction(
     """
     async def event_stream():
         try:
-            async for ev in stream_predict(prediction_id, after_event_id):
+            async for ev in stream_predict(prediction_id, after_event_id, compact=compact):
                 if await request.is_disconnected():
                     break
                 yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"

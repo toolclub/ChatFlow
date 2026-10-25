@@ -24,6 +24,7 @@ class StreamContext:
       - 若未收到流式 token → CallModelEndHandler 从 on_chain_end 补发完整内容
     """
     active_model: str
+    assistant_message_id: str = ""
     compressed: bool = False
     last_plan_step_count: int = 0
     in_think_block: bool = False

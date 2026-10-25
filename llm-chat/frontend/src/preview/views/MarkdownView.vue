@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { Marked } from 'marked'
+import { sanitizeHtml } from '../../utils/sanitizeHtml'
 import hljs from 'highlight.js/lib/common'
 import type { ViewProps } from '../types'
 
@@ -15,10 +16,10 @@ const mode = ref<'rendered' | 'source'>('rendered')
 const marked = new Marked({ gfm: true, breaks: false })
 
 const renderedHtml = computed(() => {
-  try { return marked.parse(safeText) as string } catch { return '' }
+  try { return sanitizeHtml(marked.parse(safeText) as string) } catch { return '' }
 })
 const highlightedSource = computed(() => {
-  try { return hljs.highlight(safeText, { language: 'markdown', ignoreIllegals: true }).value }
+  try { return sanitizeHtml(hljs.highlight(safeText, { language: 'markdown', ignoreIllegals: true }).value) }
   catch { return safeText.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c] as string)) }
 })
 </script>

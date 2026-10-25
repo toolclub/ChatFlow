@@ -95,7 +95,7 @@ class StreamSession:
 
         # 内部状态
         self.queue: asyncio.Queue[tuple] = asyncio.Queue()
-        self.ctx = StreamContext(active_model=self.model)
+        self.ctx = StreamContext(active_model=self.model, assistant_message_id=self.assistant_message_id)
         self._partial = ""
         self._streaming = ""
         self._save_done = False
@@ -157,6 +157,11 @@ class StreamSession:
         """启动会话并 yield SSE 事件。"""
         from memory import store as memory_store
 
+        # HTTP ingress normally hydrates history. Keep direct runner users safe
+        # after startup switched from eager history loading to lazy hydration.
+        if memory_store.get(self.conv_id) is None:
+            await memory_store.db_get_conversation(self.conv_id)
+
         # ── 状态机驱动：active → streaming ──
         self._conv_sm.send_event("streaming")
         await memory_store.update_status(self.conv_id, self._conv_sm.current_value)
@@ -196,6 +201,8 @@ class StreamSession:
         # 写入 resume_context 事件（第一个事件，刷新时恢复用户消息）
         resume_sse = sse({SSEEventType.RESUME_CONTEXT.value: {
             "message_id": self.assistant_message_id,
+            "assistant_message_id": self.assistant_message_id,
+            "user_message_id": self.user_message_id,
             "user_message": self.user_message,
             "images": self.images,
         }})
@@ -309,8 +316,8 @@ class StreamSession:
 
                 if kind == "event":
                     async for chunk in dispatcher.dispatch(payload, self.ctx):
-                        await self._track_sse_for_db(chunk)
-                        self._emit_sse(chunk)
+                        updated_chunk = await self._track_sse_for_db(chunk)
+                        self._emit_sse(updated_chunk or chunk)
 
                 elif kind == "ping":
                     self._emit_sse(sse({SSEEventType.PING.value: True}), SSEEventType.PING.value)
@@ -433,7 +440,7 @@ class StreamSession:
         self._thinking_dirty = True
         self._stream_version += 1
 
-    async def _track_sse_for_db(self, sse_str: str) -> None:
+    async def _track_sse_for_db(self, sse_str: str) -> str | None:
         """
         从 SSE 字符串提取 thinking/content/tool 用于定期刷新到 DB。
 
@@ -512,20 +519,23 @@ class StreamSession:
                 })
 
         # ── 文件产物 → 立即保存到 artifacts 表（兜底，工具内可能已保存） ──
-        if data.get("file_artifact"):
-            fa = data["file_artifact"]
+        if data.get(SSEEventType.FILE_ARTIFACT.value):
+            fa = data[SSEEventType.FILE_ARTIFACT.value]
             try:
                 from db.artifact_store import save_artifact
                 # file_artifact 事件中只存元数据（binary 内容由工具内的 save_artifact 保存）
                 # 这里是兜底：如果工具内没保存，至少保存一次
-                if not fa.get("binary"):
-                    await save_artifact(
+                if not fa.get("id") and "content" in fa and not fa.get("binary"):
+                    saved = await save_artifact(
                         self.conv_id,
                         fa.get("name", ""),
                         fa.get("path", ""),
                         fa.get("content", ""),
                         fa.get("language"),
+                        message_id=self.assistant_message_id,
                     )
+                    if saved:
+                        fa.update(saved)
             except Exception as exc:
                 logger.warning("artifact 兜底保存失败: %s", exc)
 
@@ -558,6 +568,9 @@ class StreamSession:
                 self._tool_output_map.pop(seq, None)
                 self._tool_search_map.pop(seq, None)
                 self._tool_names.pop(seq, None)
+
+        if data.get(SSEEventType.FILE_ARTIFACT.value):
+            return sse(data)
 
     def _tool_sequence(self, payload: dict) -> int:
         run_id = payload.get("tool_run_id") or payload.get("tool_call_id")
@@ -931,6 +944,9 @@ def _with_event_id(sse_string: str, event_id: int, message_id: str = "") -> str:
     return "\n".join([f"id: {event_id}", *lines]) + "\n\n"
 
 
+_SSE_REPLAY_CHUNK_BYTES = 32 * 1024
+
+
 async def resume_stream(conv_id: str, after_event_id: int = 0, message_id: str = "") -> AsyncGenerator[str, None]:
     """Replay and tail one durable event log on every worker, without handoff gaps."""
     from db.event_store import get_events_since
@@ -938,9 +954,7 @@ async def resume_stream(conv_id: str, after_event_id: int = 0, message_id: str =
 
     # Never mix terminal events from previous turns into a current recovery.
     if not message_id:
-        conv = await memory_store.db_get_conversation(conv_id)
-        assistants = [m for m in (conv or {}).get("messages", []) if m.get("role") == "assistant"]
-        message_id = assistants[-1].get("message_id", "") if assistants else ""
+        message_id = await memory_store.get_latest_assistant_message_id(conv_id)
         if not message_id:
             yield sse({SSEEventType.DONE.value: True, "compressed": False})
             return
@@ -950,12 +964,28 @@ async def resume_stream(conv_id: str, after_event_id: int = 0, message_id: str =
     terminal = {SSEEventType.DONE.value, SSEEventType.STOPPED.value, SSEEventType.ERROR.value}
     while True:
         events = await get_events_since(conv_id, cursor, message_id=message_id)
+        frames: list[str] = []
+        frame_bytes = 0
+        reached_terminal = False
         for evt in events:
             cursor = evt["id"]
             if evt["sse_string"]:
-                yield _with_event_id(evt["sse_string"], cursor, message_id)
+                frame = _with_event_id(evt["sse_string"], cursor, message_id)
+                size = len(frame.encode("utf-8"))
+                if frames and frame_bytes + size > _SSE_REPLAY_CHUNK_BYTES:
+                    yield "".join(frames)
+                    frames, frame_bytes = [], 0
+                frames.append(frame)
+                frame_bytes += size
             if evt["event_type"] in terminal:
-                return
+                reached_terminal = True
+                break
+        if frames:
+            # One ASGI write and disconnect check per bounded group, while each
+            # complete SSE frame retains its own ID and durable reconnect cursor.
+            yield "".join(frames)
+        if reached_terminal:
+            return
         if events:
             # Drain committed pages before sleeping or checking completion.
             continue
@@ -965,7 +995,7 @@ async def resume_stream(conv_id: str, after_event_id: int = 0, message_id: str =
             message = await memory_store.get_message_stream_state(conv_id, message_id)
             if message and not message.get("stream_completed", True) and time.monotonic() - last_ping >= 3:
                 from services.conversation_service import conversation_service
-                await conversation_service.reconcile_stream_state(conv_id)
+                await conversation_service.reconcile_stream_state(conv_id, refresh_cache=False)
                 message = await memory_store.get_message_stream_state(conv_id, message_id)
             if not message or (message.get("stream_completed", True) and message.get("status") != "streaming"):
                 # Close the race: a final batch may have committed while reading

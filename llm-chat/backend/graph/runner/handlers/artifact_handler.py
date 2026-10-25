@@ -10,13 +10,14 @@ from typing import AsyncGenerator
 from graph.runner.context import StreamContext
 from graph.runner.handlers.base import EventHandler
 from graph.runner.utils import sse
+from fsm.sse_events import SSEEventType
 
 
 class FileArtifactHandler(EventHandler):
     """文件产物：sandbox_write 成功后推送文件信息给前端。"""
 
     def matches(self, event_type: str, node_name: str, event_name: str) -> bool:
-        return event_type == "on_custom_event" and event_name == "file_artifact"
+        return event_type == "on_custom_event" and event_name == SSEEventType.FILE_ARTIFACT.value
 
     async def handle(self, event: dict, ctx: StreamContext) -> AsyncGenerator[str, None]:
         data = event.get("data", {})
@@ -26,14 +27,14 @@ class FileArtifactHandler(EventHandler):
         artifact: dict = {
             "name": data.get("name", ""),
             "path": data.get("path", ""),
-            "content": data.get("content", ""),
             "language": data.get("language", "text"),
+            "message_id": data.get("message_id") or getattr(ctx, "assistant_message_id", ""),
         }
         # 可选字段：有则透传
         for key in (
-            "id", "binary", "size", "slide_count", "theme", "slides_html",
-            "message_id", "downloadable", "source", "created_at",
+            "id", "content", "binary", "size", "slide_count", "theme", "slides_html",
+            "downloadable", "source", "created_at",
         ):
             if key in data:
                 artifact[key] = data[key]
-        yield sse({"file_artifact": artifact})
+        yield sse({SSEEventType.FILE_ARTIFACT.value: artifact})

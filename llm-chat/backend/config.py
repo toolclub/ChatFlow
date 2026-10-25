@@ -83,6 +83,8 @@ class Settings(BaseSettings):
     max_summary_length: int
 
     # ── 长期记忆（Qdrant） ────────────────────────────────────────────────────
+    context_lookup_timeout: float = 5.0
+    summary_timeout: float = 15.0
     longterm_memory_enabled: bool
     qdrant_url: str
     qdrant_collection: str
@@ -260,6 +262,8 @@ SHORT_TERM_FORGET_TURNS   = settings.short_term_forget_turns
 COMPRESS_TRIGGER          = settings.compress_trigger
 MAX_SUMMARY_LENGTH        = settings.max_summary_length
 
+CONTEXT_LOOKUP_TIMEOUT     = max(0.1, settings.context_lookup_timeout)
+SUMMARY_TIMEOUT            = max(0.1, settings.summary_timeout)
 LONGTERM_MEMORY_ENABLED   = settings.longterm_memory_enabled
 QDRANT_URL                = settings.qdrant_url
 QDRANT_HOST               = settings.qdrant_host

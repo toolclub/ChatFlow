@@ -5,8 +5,8 @@
 import { fetchArtifactBlob } from '../api'
 import type { DataSource, PreparedData } from './types'
 
-export async function prepare(source: DataSource, fileId: number): Promise<PreparedData> {
-  const blob = await fetchArtifactBlob(fileId)
+export async function prepare(source: DataSource, fileId: number, signal?: AbortSignal): Promise<PreparedData> {
+  const blob = await fetchArtifactBlob(fileId, signal)
   switch (source) {
     case 'blobUrl': {
       const url = URL.createObjectURL(blob)

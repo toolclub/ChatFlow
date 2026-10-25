@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, watch, ref, computed } from 'vue'
+import { nextTick, watch, ref, computed, onUnmounted } from 'vue'
 import type { Message, SendPayload, AgentStatus, CognitiveState, FileArtifact } from '../types'
 import MessageItem from './MessageItem.vue'
 import InputBox from './InputBox.vue'
@@ -29,12 +29,37 @@ const emit = defineEmits<{
   regenerate: []
   editMessage: [payload: { index: number; content: string }]
   selectFile: [file: FileArtifact]
-  ensureConv: []
+  ensureConv: [complete: (id: string | null) => void]
 }>()
 
 const messagesContainer = ref<HTMLDivElement>()
-
+const messagesInner = ref<HTMLDivElement>()
+let scrollFrame: number | null = null
+let resizeObserver: ResizeObserver | null = null
 let userScrolledUp = false
+let disposed = false
+
+function pauseFollowing(event: Event) {
+  // Expanding history is an explicit reading action. Preserve the reader's
+  // position even if the expanded section changes the document height.
+  if ((event.target as Element)?.closest('button, summary')) userScrolledUp = true
+}
+
+function scheduleScroll() {
+  if (disposed || scrollFrame !== null) return
+  scrollFrame = requestAnimationFrame(() => {
+    scrollFrame = null
+    scrollToBottom()
+  })
+}
+
+watch(messagesInner, element => {
+  resizeObserver?.disconnect()
+  if (!element) return
+  resizeObserver = new ResizeObserver(scheduleScroll)
+  resizeObserver.observe(element)
+  scheduleScroll()
+}, { flush: 'post' })
 
 function onMessagesScroll() {
   if (!messagesContainer.value) return
@@ -53,10 +78,12 @@ function scrollToBottom(force = false) {
 // 流式进度模拟
 const progress = ref(0)
 let progressTimer: ReturnType<typeof setInterval> | null = null
+let progressResetTimer: ReturnType<typeof setTimeout> | null = null
 
 watch(() => props.loading, (val) => {
+  if (progressTimer) clearInterval(progressTimer)
+  if (progressResetTimer) clearTimeout(progressResetTimer)
   if (val) {
-    userScrolledUp = false
     progress.value = 5
     progressTimer = setInterval(() => {
       if (progress.value < 90) {
@@ -66,34 +93,29 @@ watch(() => props.loading, (val) => {
   } else {
     if (progressTimer) clearInterval(progressTimer)
     progress.value = 100
-    setTimeout(() => { progress.value = 0 }, 600)
+    progressResetTimer = setTimeout(() => { progress.value = 0 }, 600)
   }
 })
 
-watch(
-  () => props.messages.length > 0 ? props.messages[props.messages.length - 1].content : '',
-  async () => {
-    await nextTick()
-    scrollToBottom()
-  },
-)
+// Height observation includes streamed step content, file cards and image loads.
+// Queue at most one scroll per animation frame, instead of one per SSE event.
+watch(() => props.currentConvId, async () => {
+  userScrolledUp = false
+  await nextTick()
+  scheduleScroll()
+})
+watch(() => props.messages.length, (length, previous) => {
+  if (previous === 0 && length > 0) userScrolledUp = false
+  scheduleScroll()
+})
 
-watch(
-  () => props.messages.length,
-  async (newLen, oldLen) => {
-    if (newLen < oldLen) {
-      // 消息被删除（如编辑重发），强制滚到底部
-      userScrolledUp = false
-      await nextTick()
-      scrollToBottom(true)
-    } else if (oldLen === 0 && newLen > 0) {
-      // 首次加载 / 切换对话：消息从 DB 批量恢复，直接滚到底部
-      userScrolledUp = false
-      await nextTick()
-      scrollToBottom(true)
-    }
-  }
-)
+onUnmounted(() => {
+  disposed = true
+  resizeObserver?.disconnect()
+  if (scrollFrame !== null) cancelAnimationFrame(scrollFrame)
+  if (progressTimer) clearInterval(progressTimer)
+  if (progressResetTimer) clearTimeout(progressResetTimer)
+})
 
 // ── 意图胶囊：点击不自动发送，改为打开输入框上的选配面板，
 //    选中后附上"意图芯片"；发送时会追加「澄清协议」指令，促使模型先问再做 ──
@@ -230,8 +252,8 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
       </div>
     </div>
 
-    <!-- ── 新建对话加载占位（立即反馈，避免网络延迟下用户多点） ── -->
-    <div v-if="creating" class="creating-view">
+    <!-- 创建会话时覆盖内容而不卸载输入框，保留首次上传与未发送草稿。 -->
+    <div v-if="creating" class="creating-view" role="status" aria-live="polite">
       <div class="creating-icon-wrap">
         <svg width="42" height="42" viewBox="0 0 32 32" fill="none">
           <path d="M16 3C16 3 17.6 11 23.5 14C17.6 17 16 25 16 25C16 25 14.4 17 8.5 14C14.4 11 16 3 16 3Z" fill="#00AEEC"/>
@@ -244,7 +266,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
     </div>
 
     <!-- ── 空状态 — Bilibili 可爱风 ── -->
-    <div v-else-if="messages.length === 0" class="empty-view">
+    <div v-if="messages.length === 0" class="empty-view">
       <el-empty :image-size="0" description="" class="hero-empty">
         <template #image>
           <div class="hero-icon-wrap">
@@ -262,11 +284,11 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
 
       <InputBox
         ref="inputBoxRef"
-        :loading="loading"
+        :loading="loading || !!creating"
         :centered="true"
         :currentConvId="currentConvId"
         @send="emit('send', $event)"
-        @ensureConv="emit('ensureConv')"
+        @ensureConv="emit('ensureConv', $event)"
         @agent-change="onAgentChange"
       />
 
@@ -322,10 +344,10 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
     <!-- ── 对话视图 ── -->
     <div v-else class="chat-body">
       <div class="messages-scroll" ref="messagesContainer" @scroll="onMessagesScroll">
-        <div class="messages-inner">
+        <div class="messages-inner" ref="messagesInner" @click.capture="pauseFollowing">
           <MessageItem
             v-for="(msg, i) in messages"
-            :key="i"
+            :key="msg.ui_id || msg.message_id || `${msg.role}:${msg.timestamp}:${i}`"
             :message="msg"
             :is-last-loading="loading && i === messages.length - 1 && msg.role === 'assistant'"
             :agent-status="(loading && i === messages.length - 1 && msg.role === 'assistant') ? agentStatus : undefined"
@@ -367,7 +389,7 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
       </div>
 
       <div class="bottom-input">
-        <InputBox :loading="loading" :currentConvId="currentConvId" @send="emit('send', $event)" @ensureConv="emit('ensureConv')" />
+        <InputBox :loading="loading || !!creating" :currentConvId="currentConvId" @send="emit('send', $event)" @ensureConv="emit('ensureConv', $event)" />
       </div>
     </div>
 
@@ -834,7 +856,10 @@ const showProgress = computed(() => progress.value > 0 && progress.value < 100)
 
 /* ── 新对话加载占位 ── */
 .creating-view {
-  flex: 1;
+  position: absolute;
+  inset: 0;
+  z-index: 90;
+  background: var(--cf-card, #ffffff);
   display: flex;
   flex-direction: column;
   align-items: center;

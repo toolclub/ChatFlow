@@ -28,88 +28,9 @@ function normalizeThinking(raw: unknown): ThinkingEvent | null {
 }
 
 const API_BASE = ''
-let isRefreshing = false
-let refreshPromise: Promise<string> | null = null
-
-function generateUUID(): string {
-  // crypto.randomUUID() requires a secure context (HTTPS/localhost)
-  // Fallback for HTTP environments (e.g. direct LAN access)
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID()
-  }
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0
-    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16)
-  })
-}
-
-function getClientId(): string {
-  let id = localStorage.getItem('cf_client_id')
-  if (!id) {
-    id = generateUUID()
-    localStorage.setItem('cf_client_id', id)
-  }
-  return id
-}
-
-async function refreshAccessToken(): Promise<string> {
-  if (isRefreshing && refreshPromise) {
-    return refreshPromise
-  }
-
-  isRefreshing = true
-  refreshPromise = fetch(`${API_BASE}/api/auth/token/refresh`, {
-    method: 'POST',
-    credentials: 'include',
-  })
-    .then(res => {
-      if (!res.ok) throw new Error('Refresh failed')
-      return res.json()
-    })
-    .then(data => {
-      localStorage.setItem('cf_access_token', data.access_token)
-      return data.access_token
-    })
-    .finally(() => {
-      isRefreshing = false
-      refreshPromise = null
-    })
-
-  return refreshPromise
-}
-
-async function fetchWithAuth(url: string, options: RequestInit = {}): Promise<Response> {
-  const token = localStorage.getItem('cf_access_token')
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'X-Client-ID': getClientId(),
-    ...options.headers as Record<string, string>,
-  }
-
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`
-  }
-
-  const response = await fetch(url, {
-    ...options,
-    headers,
-    credentials: 'include',
-  })
-
-  if (response.status === 401) {
-    try {
-      const newToken = await refreshAccessToken()
-      headers['Authorization'] = `Bearer ${newToken}`
-      return fetch(url, { ...options, headers, credentials: 'include' })
-    } catch {
-      localStorage.removeItem('cf_access_token')
-      // Optional: trigger a logout event or reload
-      return response
-    }
-  }
-
-  return response
-}
+// Keep all requests (including multipart uploads) on the same refresh path.
+export { fetchWithAuth } from './http'
+import { fetchWithAuth, readJson } from './http'
 
 export async function get<T>(path: string, params: Record<string, any> = {}, headers: Record<string, string> = {}): Promise<T> {
   const query = new URLSearchParams(params).toString()
@@ -160,13 +81,13 @@ export async function patch<T>(path: string, body: any): Promise<T> {
 
 export async function fetchModels(): Promise<string[]> {
   const res = await fetchWithAuth(`${API_BASE}/api/models`)
-  const data = await res.json()
+  const data = await readJson<{ models?: string[] }>(res)
   return data.models || []
 }
 
 export async function fetchConversations() {
   const res = await fetchWithAuth(`${API_BASE}/api/conversations`)
-  const data = await res.json()
+  const data = await readJson<{ conversations?: any[] }>(res)
   return data.conversations || []
 }
 
@@ -176,24 +97,24 @@ export async function createConversation(title: string = '新对话') {
 
 export async function fetchConversation(id: string) {
   const res = await fetchWithAuth(`${API_BASE}/api/conversations/${id}`)
-  return res.json()
+  return readJson(res)
 }
 
 export async function deleteConversation(id: string) {
-  await fetchWithAuth(`${API_BASE}/api/conversations/${id}`, {
+  await readJson(await fetchWithAuth(`${API_BASE}/api/conversations/${id}`, {
     method: 'DELETE',
-  })
+  }))
 }
 
-export async function batchDeleteConversations(ids: string[]): Promise<{ ok: boolean; deleted: number }> {
+export async function batchDeleteConversations(ids: string[]): Promise<{ ok: boolean; deleted: number; deleted_ids?: string[]; errors?: { conv_id: string; error: string }[] }> {
   return post('/api/conversations/batch-delete', { conversation_ids: ids })
 }
 
 export async function renameConversation(id: string, title: string) {
-  await fetchWithAuth(`${API_BASE}/api/conversations/${id}`, {
+  await readJson(await fetchWithAuth(`${API_BASE}/api/conversations/${id}`, {
     method: 'PATCH',
     body: JSON.stringify({ title }),
-  })
+  }))
 }
 
 export async function stopStream(convId: string): Promise<void> {
@@ -266,42 +187,29 @@ export async function stopStreamWithToken(
 
 export async function fetchConvTools(convId: string): Promise<ToolHistoryEvent[]> {
   const res = await fetchWithAuth(`${API_BASE}/api/conversations/${convId}/tools`)
-  const data = await res.json()
+  const data = await readJson<{ events?: ToolHistoryEvent[] }>(res)
   return data.events || []
 }
 
 export async function fetchLatestPlan(convId: string): Promise<{ id: string; goal: string; steps: PlanStep[] } | null> {
   const res = await fetchWithAuth(`${API_BASE}/api/conversations/${convId}/plan`)
-  const data = await res.json()
+  const data = await readJson<{ plan?: { id: string; goal: string; steps: PlanStep[] } }>(res)
   return data.plan || null
 }
 
 export async function fetchConvArtifacts(convId: string): Promise<FileArtifact[]> {
   const res = await fetchWithAuth(`${API_BASE}/api/conversations/${convId}/artifacts`)
-  const data = await res.json()
+  const data = await readJson<{ artifacts?: FileArtifact[] }>(res)
   return data.artifacts || []
 }
 
 /** 上传单个文件到对话沙箱（multipart/form-data）。返回 artifact 元数据。 */
-export async function uploadFile(convId: string, file: File): Promise<UploadedFile> {
+export async function uploadFile(convId: string, file: File, signal?: AbortSignal): Promise<UploadedFile> {
   const form = new FormData()
   form.append('conv_id', convId)
   form.append('file', file)
-  // 注意：fetchWithAuth 会自动带上 Authorization 和 X-Client-ID
-  // 但是我们这里手动处理 FormData，不要设置 Content-Type 让浏览器自动设置 boundary
-  const token = localStorage.getItem('cf_access_token')
-  const headers: Record<string, string> = {
-    'X-Client-ID': getClientId(),
-  }
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`
-  }
-
-  const res = await fetch(`${API_BASE}/api/files/upload`, {
-    method: 'POST',
-    headers,
-    body: form,
-    credentials: 'include',
+  const res = await fetchWithAuth(`${API_BASE}/api/files/upload`, {
+    method: 'POST', body: form, signal,
   })
   if (!res.ok) {
     let detail = ''
@@ -312,15 +220,15 @@ export async function uploadFile(convId: string, file: File): Promise<UploadedFi
 }
 
 /** 按需加载单个产物的完整内容（含二进制、slides_html） */
-export async function fetchArtifactContent(artifactId: number): Promise<FileArtifact | null> {
-  const res = await fetchWithAuth(`${API_BASE}/api/artifacts/${artifactId}`)
-  const data = await res.json()
+export async function fetchArtifactContent(artifactId: number, signal?: AbortSignal): Promise<FileArtifact | null> {
+  const res = await fetchWithAuth(`${API_BASE}/api/artifacts/${artifactId}`, { signal })
+  const data = await readJson<FileArtifact & { error?: string }>(res)
   return data.error ? null : data
 }
 
 /** 用产物下载 URL 拉原始字节（供 PDF/Excel/图片 模态预览使用，避免传 base64 经状态层） */
-export async function fetchArtifactBlob(artifactId: number): Promise<Blob> {
-  const res = await fetchWithAuth(`${API_BASE}/api/artifacts/${artifactId}/download`)
+export async function fetchArtifactBlob(artifactId: number, signal?: AbortSignal): Promise<Blob> {
+  const res = await fetchWithAuth(`${API_BASE}/api/artifacts/${artifactId}/download`, { signal })
   if (!res.ok) throw new Error(`下载失败: ${res.status}`)
   return res.blob()
 }
@@ -338,7 +246,12 @@ export async function fetchFullState(convId: string) {
 /** 快速检查对话是否有活跃的流式输出 */
 export async function fetchStreamingStatus(convId: string): Promise<{ streaming: boolean; last_event_id: number }> {
   const res = await fetchWithAuth(`${API_BASE}/api/conversations/${convId}/streaming-status`)
-  return res.json()
+  return readJson(res)
+}
+
+export interface MessageIdentity {
+  assistant_message_id: string
+  user_message_id?: string
 }
 
 /** 恢复流式输出（SSE 重连） */
@@ -365,6 +278,7 @@ export async function resumeStream(
   onToolCallArgs?: (text: string) => void,
   onClarification?: (data: ClarificationData) => void,
   onInterrupted?: () => void,
+  onMessageIdentity?: (identity: MessageIdentity) => void,
 ) {
   const result = await consumeChatStream({
     initial: () => reconnect(lastIndex, messageId || ''),
@@ -386,6 +300,10 @@ export async function resumeStream(
     return fetchWithAuth(`${API_BASE}/api/conversations/${convId}/resume?${query}`, { signal })
   }
   function dispatch(data: Record<string, any>) {
+    const identity = data.resume_context
+    const assistantId = identity?.assistant_message_id || identity?.message_id || data.message_id
+    if (assistantId) onMessageIdentity?.({ assistant_message_id: assistantId, user_message_id: identity?.user_message_id })
+    if (typeof identity?.user_message === 'string') _onResumeContext?.(identity.user_message, identity.images || [])
     if (data.thinking) {
       const ev = normalizeThinking(data.thinking)
       if (ev) onThinking?.(ev)
@@ -434,6 +352,7 @@ export async function sendMessage(
   onToolCallArgs?: (text: string) => void,
   fileIds?: number[],
   contextRefs?: {type: string, id: string}[],
+  onMessageIdentity?: (identity: MessageIdentity) => void,
 ) {
   const body: Record<string, unknown> = {
     conversation_id: conversationId,
@@ -472,6 +391,9 @@ export async function sendMessage(
   else onInterrupted?.()
 
   function dispatch(data: Record<string, any>) {
+    const identity = data.resume_context
+    const assistantId = identity?.assistant_message_id || identity?.message_id || data.message_id
+    if (assistantId) onMessageIdentity?.({ assistant_message_id: assistantId, user_message_id: identity?.user_message_id })
     if (data.thinking) {
       const ev = normalizeThinking(data.thinking)
       if (ev) onThinking?.(ev)
@@ -714,7 +636,9 @@ export async function stopPrediction(predictionId: string, adminKey: string): Pr
     const error = await res.json().catch(() => ({}))
     throw new Error(error.detail || `Request failed with status ${res.status}`)
   }
-  return res.json()
+  const result = await res.json()
+  if (result.ok === false) throw new Error(result.error || `操作未完成：${result.status || '任务状态已变化'}`)
+  return result
 }
 
 // ── v2：维度注册表 / 暂停 / 恢复 / 删除 ────────────────────────────────────────
@@ -833,7 +757,9 @@ export async function pausePrediction(
     const error = await res.json().catch(() => ({}))
     throw new Error(error.detail || `暂停失败 (HTTP ${res.status})`)
   }
-  return res.json()
+  const result = await res.json()
+  if (result.ok === false) throw new Error(result.error || `操作未完成：${result.status || '任务状态已变化'}`)
+  return result
 }
 
 /**
@@ -855,7 +781,9 @@ export async function resumePrediction(
     const error = await res.json().catch(() => ({}))
     throw new Error(error.detail || `继续预测失败 (HTTP ${res.status})`)
   }
-  return res.json()
+  const result = await res.json()
+  if (result.ok === false) throw new Error(result.error || `操作未完成：${result.status || '任务状态已变化'}`)
+  return result
 }
 
 /** DELETE /api/prediction/{id} — 删除预测记录（连带 event_log） */
@@ -913,11 +841,25 @@ export async function fetchActivePrediction(
 export async function fetchPredictionSnapshot(
   id: string,
   adminKey?: string,
+  signal?: AbortSignal,
 ): Promise<PredictionSnapshot> {
   const headers: Record<string, string> = {}
   if (adminKey) headers['X-Admin-Key'] = adminKey
-  const res = await fetchWithAuth(`${API_BASE}/api/prediction/${id}`, { headers })
+  const res = await fetchWithAuth(`${API_BASE}/api/prediction/${encodeURIComponent(id)}?compact=true`, { headers, signal })
   if (!res.ok) throw new Error(`获取预测快照失败: ${res.status}`)
+  return res.json()
+}
+
+/** Full, untruncated source body is fetched only when its disclosure is opened. */
+export async function fetchPredictionSource(
+  id: string, dimension: string, sourceIndex: number, url: string,
+  adminKey?: string, signal?: AbortSignal,
+): Promise<NewsItem> {
+  const headers: Record<string, string> = {}
+  if (adminKey) headers['X-Admin-Key'] = adminKey
+  const query = new URLSearchParams({ dimension, source_index: String(sourceIndex), url })
+  const res = await fetchWithAuth(`${API_BASE}/api/prediction/${encodeURIComponent(id)}/source?${query}`, { headers, signal })
+  if (!res.ok) throw new Error(`获取新闻原文失败: ${res.status}`)
   return res.json()
 }
 
@@ -1097,7 +1039,7 @@ export async function streamPrediction(
   async function runOnce(): Promise<PredictionInterruptReason | null> {
     const url =
       `${API_BASE}/api/prediction/${predictionId}/stream` +
-      `?after_event_id=${cursor}`
+      `?after_event_id=${cursor}&compact=true`
 
     let res: Response
     try {

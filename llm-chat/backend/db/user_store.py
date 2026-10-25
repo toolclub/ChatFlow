@@ -110,12 +110,25 @@ async def get_user_settings(user_id: str) -> Optional[dict]:
             "custom_settings": settings.custom_settings,
         }
 
-async def update_user_settings(user_id: str, data: dict):
+async def update_user_profile(user_id: str, data: dict) -> Optional[dict]:
+    allowed = {"name", "avatar_url", "bio", "locale", "timezone"}
+    values = {key: value for key, value in data.items() if key in allowed and value is not None}
     async with AsyncSessionLocal() as session:
-        data["updated_at"] = time.time()
-        await session.execute(
-            update(UserSettingsModel).where(UserSettingsModel.user_id == user_id).values(**data)
-        )
+        if values:
+            await session.execute(update(UserModel).where(UserModel.id == user_id).values(**values, updated_at=time.time()))
+            await session.commit()
+    return await get_user_by_id(user_id)
+
+
+async def update_user_settings(user_id: str, data: dict):
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    allowed = {"theme", "default_model", "agent_mode_default", "language", "notifications_enabled", "sidebar_collapsed", "custom_settings"}
+    values = {key: value for key, value in data.items() if key in allowed and value is not None}
+    now = time.time()
+    async with AsyncSessionLocal() as session:
+        statement = pg_insert(UserSettingsModel).values(user_id=user_id, created_at=now, updated_at=now, **values)
+        statement = statement.on_conflict_do_update(index_elements=[UserSettingsModel.user_id], set_={**values, "updated_at": now})
+        await session.execute(statement)
         await session.commit()
 
 def _to_dict(user: UserModel) -> dict:
@@ -124,6 +137,7 @@ def _to_dict(user: UserModel) -> dict:
         "email": user.email,
         "name": user.name,
         "avatar_url": user.avatar_url,
+        "bio": user.bio,
         "locale": user.locale,
         "timezone": user.timezone,
         "is_active": user.is_active,

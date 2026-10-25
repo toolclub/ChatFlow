@@ -1,8 +1,18 @@
 import { ElMessage } from 'element-plus'
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, onScopeDispose } from 'vue'
 import type { ClarificationData, Message, StepRecord, ConversationInfo, SendPayload, AgentStatus, CognitiveState, TraceEntry, PlanStep, ThinkingEvent, ThinkingSegment, ToolCallRecord } from '../types'
 import { makeEmptyCognitiveState } from '../types'
 import * as api from '../api'
+import { attachMessageArtifact, bindMessageIdentity, upsertArtifact } from './messageArtifacts'
+
+let messageSequence = 0
+const newMessageId = () => `local:${Date.now()}:${++messageSequence}`
+
+function guardCallbacks<T extends unknown[]>(args: T, isCurrent: () => boolean): T {
+  return args.map(arg => typeof arg === 'function'
+    ? (...values: unknown[]) => { if (isCurrent()) return arg(...values) }
+    : arg) as T
+}
 
 /**
  * 应用一个 thinking SSE 事件到消息/步骤的结构化段列表（spec 协议）。
@@ -68,6 +78,7 @@ function getCurrentAgentMode(): boolean {
 }
 
 interface ConvState {
+  streamVersion: number
   messages: Message[]
   loading: boolean
   stopping: boolean
@@ -80,6 +91,7 @@ interface ConvState {
 
 function makeConvState(): ConvState {
   return {
+    streamVersion: 0,
     messages: [],
     loading: false,
     stopping: false,
@@ -92,6 +104,7 @@ function makeConvState(): ConvState {
 }
 
 export function useChat() {
+  let disposed = false
   const conversations = ref<ConversationInfo[]>([])
   const currentConvId = ref<string | null>(null)
   const convStates = reactive<Record<string, ConvState>>({})
@@ -129,6 +142,15 @@ export function useChat() {
   const activeConvIds = computed<Set<string>>(
     () => new Set(Object.keys(convStates).filter(id => convStates[id].loading || convStates[id].stopping))
   )
+
+  onScopeDispose(() => {
+    disposed = true
+    ++_selectVersion
+    for (const state of Object.values(convStates)) {
+      ++state.streamVersion
+      state.abortController?.abort()
+    }
+  })
 
   function getOrCreate(id: string): ConvState {
     if (!convStates[id]) convStates[id] = makeConvState()
@@ -201,6 +223,7 @@ export function useChat() {
     if (!id) return
     const s = convStates[id]
     if (!s) return
+    ++s.streamVersion
     if (s.abortController) { s.abortController.abort(); s.abortController = null }
     s.loading = false
     s.agentStatus = { state: 'idle', model: s.agentStatus.model }
@@ -261,6 +284,7 @@ export function useChat() {
 
         const msg: Message = {
           role: m.role,
+          ui_id: m.message_id || newMessageId(),
           content: cleanContent,
           timestamp: m.timestamp,
           message_id: m.message_id || undefined,  // DB 业务 ID，用于 plan.message_id 精确匹配
@@ -308,24 +332,14 @@ export function useChat() {
 
       // ── 恢复认知面板 ──
       s.cognitive = makeEmptyCognitiveState()
-      // 合并所有 artifacts：message 关联的 + 顶层 orphan 的，去重
-      const seen = new Set<string>()
-      const allArtifacts: any[] = []
-      // 来源1：每条 message 上关联的 artifacts（新数据，有 message_id）
-      // 注意：用户上传的文件（source='uploaded'）已分流到 msg.files，不进认知面板
-      for (const m of s.messages) {
-        if (m.artifacts?.length) {
-          for (const a of m.artifacts) {
-            const key = a.path || a.name
-            if (!seen.has(key)) { seen.add(key); allArtifacts.push(a) }
-          }
-        }
+      // Message-owned snapshots stay independent even when later turns reuse a path.
+      const allArtifacts: import('../types').FileArtifact[] = []
+      for (const message of s.messages) {
+        for (const artifact of message.artifacts || []) upsertArtifact(allArtifacts, artifact)
       }
-      // 来源2：顶层 orphan artifacts（旧数据，无 message_id）— 同样过滤 uploaded
-      for (const a of (fullState.artifacts || [])) {
-        if ((a as any).source === 'uploaded') continue
-        const key = a.path || a.name
-        if (!seen.has(key)) { seen.add(key); allArtifacts.push(a) }
+      // Legacy unowned files remain in the gallery; do not guess a message owner.
+      for (const artifact of fullState.artifacts || []) {
+        if (artifact.source !== 'uploaded') upsertArtifact(allArtifacts, artifact)
       }
       s.cognitive.artifacts = allArtifacts
       for (const historicalPlan of (fullState.plans?.length ? fullState.plans : (fullState.plan ? [fullState.plan] : []))) {
@@ -420,9 +434,10 @@ export function useChat() {
     // DB-first：messages 表已有 user + assistant(stream_completed=false) 两条记录。
     // 如果最后一条不是 assistant，补一个空的（兼容旧数据）。
     if (s.messages.length === 0 || s.messages[s.messages.length - 1].role !== 'assistant') {
-      s.messages.push({ role: 'assistant', content: '' })
+      s.messages.push({ role: 'assistant', ui_id: newMessageId(), content: '' })
     }
-    let assistantIdx = s.messages.length - 1
+    const matchedIndex = messageId ? s.messages.findIndex(message => message.message_id === messageId) : -1
+    const assistantIdx = matchedIndex >= 0 ? matchedIndex : s.messages.length - 1
     const savedMessage = { ...s.messages[assistantIdx] }
     // 清空 content / thinking（resume 会从事件重放中重建所有 segments）
     s.messages[assistantIdx].content = ''
@@ -444,8 +459,12 @@ export function useChat() {
       return steps[s.activeStepIndex] ?? steps[steps.length - 1] ?? null
     }
 
+    const streamVersion = ++s.streamVersion
+    const isCurrent = () => !disposed && s.streamVersion === streamVersion
+    ++_selectVersion // Invalidate any earlier full-state request before starting a turn.
+    initialLoading.value = false
     try {
-      await api.resumeStream(
+      await api.resumeStream(...guardCallbacks<Parameters<typeof api.resumeStream>>([
         convId, 0,  // 从头重放当前轮事件（通过 messageId 过滤）
         // onChunk
         (chunk) => {
@@ -549,9 +568,8 @@ export function useChat() {
         },
         // onFileArtifact（去重：DB 已加载的 + SSE 重放的可能重复）
         (artifact) => {
-          const key = artifact.path || artifact.name
-          if (!s.cognitive.artifacts.some(a => (a.path || a.name) === key)) {
-            s.cognitive.artifacts.push(artifact)
+          if (attachMessageArtifact(s.messages, msg(), artifact)) {
+            upsertArtifact(s.cognitive.artifacts, artifact)
           }
         },
         // onToolCallStart
@@ -578,8 +596,10 @@ export function useChat() {
           s.canContinue = true; s.loading = false; s.abortController = null
           s.agentStatus = { state: 'idle', model: s.agentStatus.model }; s.cognitive.isActive = false
         },
-      )
+        (identity) => { bindMessageIdentity(msg(), identity.assistant_message_id) },
+      ], isCurrent))
     } catch (err: any) {
+      if (!isCurrent()) return
       if (err?.name === 'AbortError') return
       s.loading = false; s.abortController = null
       s.agentStatus = { state: 'idle', model: '' }; s.cognitive.isActive = false
@@ -589,41 +609,71 @@ export function useChat() {
     }
   }
 
-  async function newConversation() {
-    if (creatingConv.value) return  // 防多点：网络有延迟时避免创建出多个空对话
+  async function newConversation(): Promise<string | null> {
+    if (creatingConv.value || disposed) return null
     creatingConv.value = true
-    // 立即清空当前对话 id，让右侧切到 loading 占位（由 creatingConv 驱动）
+    const previousId = currentConvId.value
+    const version = ++_selectVersion
     currentConvId.value = null
     window.location.hash = ''
     try {
       const data = await api.createConversation()
+      if (disposed || version !== _selectVersion) return null
       currentConvId.value = data.id
       window.location.hash = data.id
       convStates[data.id] = makeConvState()
       await loadConversations()
+      return !disposed && version === _selectVersion && currentConvId.value === data.id ? data.id : null
+    } catch (err) {
+      if (disposed || version !== _selectVersion) return null
+      currentConvId.value = previousId
+      window.location.hash = previousId || ''
+      ElMessage.error(err instanceof Error ? err.message : '创建对话失败，请重试')
+      return null
     } finally {
       creatingConv.value = false
     }
   }
 
   async function removeConversation(id: string) {
-    if (convStates[id]?.loading) await stopConversation(id)
-    await api.deleteConversation(id)
-    delete convStates[id]
-    if (currentConvId.value === id) { currentConvId.value = null; window.location.hash = '' }
-    await loadConversations()
+    try {
+      if (convStates[id]?.loading) await stopConversation(id)
+      await api.deleteConversation(id)
+      delete convStates[id]
+      if (currentConvId.value === id) { currentConvId.value = null; window.location.hash = '' }
+      await loadConversations()
+    } catch (err) {
+      ElMessage.error(err instanceof Error ? err.message : '删除对话失败，历史记录已保留')
+    }
   }
 
   async function batchRemoveConversations(ids: string[]) {
     if (!ids.length) return
-    await Promise.all(ids.map(id => convStates[id]?.loading ? stopConversation(id) : Promise.resolve()))
-    await api.batchDeleteConversations(ids)
-    ids.forEach(id => delete convStates[id])
-    if (currentConvId.value && ids.includes(currentConvId.value)) {
-      currentConvId.value = null
-      window.location.hash = ''
+    try {
+      await Promise.all(ids.map(id => convStates[id]?.loading ? stopConversation(id) : Promise.resolve()))
+      const result = await api.batchDeleteConversations(ids)
+      if (result.deleted_ids) {
+        for (const id of result.deleted_ids) delete convStates[id]
+        if (currentConvId.value && result.deleted_ids.includes(currentConvId.value)) {
+          currentConvId.value = null
+          window.location.hash = ''
+        }
+      }
+      await loadConversations()
+      // Compatibility with older servers: reconcile from their authoritative list.
+      if (!result.deleted_ids) {
+        const remaining = new Set(conversations.value.map(conversation => conversation.id))
+        for (const id of ids) if (!remaining.has(id)) delete convStates[id]
+        if (currentConvId.value && ids.includes(currentConvId.value) && !remaining.has(currentConvId.value)) {
+          currentConvId.value = null
+          window.location.hash = ''
+        }
+      }
+      if (result.errors?.length) ElMessage.warning(result.errors.map(error => error.error).join('；'))
+      else if (result.deleted < ids.length) ElMessage.warning('部分对话未能删除，已保留并刷新列表')
+    } catch (err) {
+      ElMessage.error(err instanceof Error ? err.message : '批量删除失败，历史记录已保留')
     }
-    await loadConversations()
   }
 
   async function restoreFromHash() {
@@ -642,13 +692,26 @@ export function useChat() {
   const _nextForcePlan = ref<PlanStep[] | null>(null)
 
   async function send({ text, images, agentMode, forcePlan, files, intent, intentLabel, contextRefs }: SendPayload) {
+    if (disposed) return
     // forcePlan 参数优先，其次用 _nextForcePlan（兼容两种调用方式）
     const activeForcePlan = forcePlan || _nextForcePlan.value
     _nextForcePlan.value = null
     if (!text.trim() && images.length === 0 && (!files || files.length === 0) && (!contextRefs || contextRefs.length === 0)) return
     if (!currentConvId.value) {
-      const data = await api.createConversation(text.slice(0, 30) || '图片对话')
-      currentConvId.value = data.id
+      if (creatingConv.value) return
+      creatingConv.value = true
+      const version = ++_selectVersion
+      try {
+        const data = await api.createConversation(text.slice(0, 30) || '图片对话')
+        if (disposed || version !== _selectVersion) return
+        currentConvId.value = data.id
+        window.location.hash = data.id
+      } catch (err) {
+        if (!disposed) ElMessage.error(err instanceof Error ? err.message : '创建对话失败，请重试')
+        return
+      } finally {
+        creatingConv.value = false
+      }
     }
     const convId = currentConvId.value!
     const s = getOrCreate(convId)
@@ -657,6 +720,7 @@ export function useChat() {
     // Push user message (with optional workflowPlan for special rendering)
     const userMsg: Message = {
       role: 'user',
+      ui_id: newMessageId(),
       content: text,
       images: images.length > 0 ? images : undefined,
       files: files && files.length > 0 ? files : undefined,
@@ -669,7 +733,7 @@ export function useChat() {
       _nextWorkflowGoal.value = ''
     }
     s.messages.push(userMsg)
-    s.messages.push({ role: 'assistant', content: '' })
+    s.messages.push({ role: 'assistant', ui_id: newMessageId(), content: '' })
     const assistantIdx = s.messages.length - 1
 
     s.loading = true
@@ -688,10 +752,14 @@ export function useChat() {
       return steps[s.activeStepIndex] ?? steps[steps.length - 1] ?? null
     }
 
+    const streamVersion = ++s.streamVersion
+    const isCurrent = () => !disposed && s.streamVersion === streamVersion
+    ++_selectVersion // Invalidate any earlier full-state request before starting a turn.
+    initialLoading.value = false
     try {
       // intent 前缀（如 [PPT:corp_blue]）随 API 消息走，帮助模型路由，用户气泡不存
       const apiText = intent ? `${intent}\n${text}` : text
-      await api.sendMessage(
+      await api.sendMessage(...guardCallbacks<Parameters<typeof api.sendMessage>>([
         convId, apiText, '', images, agentMode,
         activeForcePlan as any,
         // onChunk — 预检澄清通过 onClarification SSE 事件处理。
@@ -893,9 +961,8 @@ export function useChat() {
         },
         // onFileArtifact：沙箱文件产物（sandbox_write 成功后推送，去重）
         (artifact) => {
-          const key = artifact.path || artifact.name
-          if (!s.cognitive.artifacts.some(a => (a.path || a.name) === key)) {
-            s.cognitive.artifacts.push(artifact)
+          if (attachMessageArtifact(s.messages, msg(), artifact)) {
+            upsertArtifact(s.cognitive.artifacts, artifact)
             addTrace(s.cognitive, { type: 'info', content: `📄 文件已创建: ${artifact.name}` })
           }
         },
@@ -929,8 +996,13 @@ export function useChat() {
         // fileIds：用户上传的文件 artifact ID 列表（后端 bind_artifacts_to_message 用）
         files && files.length > 0 ? files.map(f => f.id) : undefined,
         contextRefs,
-      )
+        (identity) => {
+          bindMessageIdentity(msg(), identity.assistant_message_id)
+          bindMessageIdentity(s.messages[assistantIdx - 1], identity.user_message_id)
+        },
+      ], isCurrent))
     } catch (err: any) {
+      if (!isCurrent()) return
       if (err?.name === 'AbortError') return
       const partial = s.messages[assistantIdx]
       const notice = err?.message || '网络连接失败，请稍后重新打开对话恢复'
@@ -994,14 +1066,9 @@ export function useChat() {
     s.cognitive.plan = modifiedPlan.map(step => ({ ...step }))
     s.cognitive.currentStepIndex = 0
 
-    // 替换最后一条 assistant 消息（避免旧结果和新结果重复显示）
-    // 如果最后一条是 assistant，替换它；否则追加新的
-    const lastMsg = s.messages[s.messages.length - 1]
-    if (lastMsg?.role === 'assistant') {
-      s.messages[s.messages.length - 1] = { role: 'assistant', content: '' }
-    } else {
-      s.messages.push({ role: 'assistant', content: '' })
-    }
+    // A revised plan creates a new backend turn. Keep prior answers and artifacts.
+    s.messages.push({ role: 'user', ui_id: newMessageId(), content: originalGoal || '执行修改后的计划', workflowPlan: modifiedPlan.map(step => ({ ...step })) })
+    s.messages.push({ role: 'assistant', ui_id: newMessageId(), content: '' })
     const assistantIdx = s.messages.length - 1
 
     // 发请求：用原始目标作为 message，force_plan 携带编辑后的计划
@@ -1021,8 +1088,12 @@ export function useChat() {
       return steps[s.activeStepIndex] ?? steps[steps.length - 1] ?? null
     }
 
+    const streamVersion = ++s.streamVersion
+    const isCurrent = () => !disposed && s.streamVersion === streamVersion
+    ++_selectVersion // Invalidate any earlier full-state request before starting a turn.
+    initialLoading.value = false
     try {
-      await api.sendMessage(
+      await api.sendMessage(...guardCallbacks<Parameters<typeof api.sendMessage>>([
         convId, originalGoal || '执行修改后的计划', '', [], true,
         modifiedPlan as any,  // force_plan
         (chunk) => { const step = activeStep(); const target = step || msg(); target.content = (target.content || '') + chunk },
@@ -1106,9 +1177,8 @@ export function useChat() {
           }
         })(),
         (artifact) => {
-          const key = artifact.path || artifact.name
-          if (!s.cognitive.artifacts.some(a => (a.path || a.name) === key)) {
-            s.cognitive.artifacts.push(artifact)
+          if (attachMessageArtifact(s.messages, msg(), artifact)) {
+            upsertArtifact(s.cognitive.artifacts, artifact)
             addTrace(s.cognitive, { type: 'info', content: `📄 文件已创建: ${artifact.name}` })
           }
         },
@@ -1119,10 +1189,21 @@ export function useChat() {
           else { if (!msg().toolCalls) msg().toolCalls = []; const last = msg().toolCalls![msg().toolCalls!.length - 1]; if (last && last.name === name && !last.done && (last.input as any)._generating) return; msg().toolCalls!.push(placeholder) }
           s.agentStatus = { ...s.agentStatus, state: 'tool', tool: name }
         },
-      )
+        undefined, // tool argument progress
+        undefined, // uploaded files
+        undefined, // external context
+        (identity) => {
+          bindMessageIdentity(msg(), identity.assistant_message_id)
+          bindMessageIdentity(s.messages[assistantIdx - 1], identity.user_message_id)
+        },
+      ], isCurrent))
     } catch (err: any) {
+      if (!isCurrent()) return
       if (err?.name === 'AbortError') return
-      s.messages[assistantIdx].content = '⚠️ 执行计划失败，请重试。'
+      if (!s.messages[assistantIdx].content && !s.messages[assistantIdx].steps?.length) {
+        s.messages[assistantIdx].content = '⚠️ 执行计划失败，请重试。'
+      }
+      ElMessage.warning(err?.message || '执行计划失败，请重试。')
       s.loading = false; s.abortController = null; s.agentStatus = { state: 'idle', model: '' }; s.cognitive.isActive = false
     }
   }
@@ -1157,18 +1238,18 @@ export function useChat() {
     }
     if (lastUserIdx < 0) return
     const lastUserMsg = s.messages[lastUserIdx]
-    // Remove last user + assistant pair from frontend
-    s.messages.splice(lastUserIdx)
-    // Re-send with same content (respect current mode selection)
+    // The server appends a new turn; keep the original answer and its artifacts.
+    // Re-send with the same attachments and current mode.
     await send({
       text: lastUserMsg.content,
       images: lastUserMsg.images ?? [],
+      files: lastUserMsg.files,
       agentMode: getCurrentAgentMode(),
     })
   }
 
   /**
-   * 编辑用户消息：替换指定消息内容，删除该消息之后的所有消息，重新发送。
+   * 提交用户消息修订：追加新轮，保留原始历史，与服务端持久化语义一致。
    */
   async function editMessage(msgIndex: number, newContent: string) {
     if (!currentConvId.value) return
@@ -1176,12 +1257,11 @@ export function useChat() {
     if (!s || s.loading || s.stopping) return
     const msg = s.messages[msgIndex]
     if (!msg || msg.role !== 'user') return
-    // Truncate messages from this point
-    s.messages.splice(msgIndex)
-    // Re-send with new content (respect current mode selection)
+    // Submit a new revision; deleting only local history would reappear on refresh.
     await send({
       text: newContent,
       images: msg.images ?? [],
+      files: msg.files,
       agentMode: getCurrentAgentMode(),
     })
   }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, computed, ref, watch, defineAsyncComponent } from 'vue'
+import { onMounted, onBeforeUnmount, computed, ref, watch, defineAsyncComponent } from 'vue'
 import { useChat } from './composables/useChat'
 import { useAuth } from './composables/useAuth'
 import type { FileArtifact } from './types'
@@ -12,6 +12,9 @@ const StockDetailView = defineAsyncComponent(() => import('./components/StockDet
 import LoginView from './components/LoginView.vue'
 const SysDashboard = defineAsyncComponent(() => import('./components/SysDashboard.vue'))
 import { useAdmin } from './composables/useAdmin'
+import { useArtifactPreview } from './composables/useArtifactPreview'
+import { fetchArtifactContent } from './api'
+import { ElMessage } from 'element-plus'
 
 const chat = useChat()
 const auth = useAuth()
@@ -167,52 +170,39 @@ const currentConvTitle = computed(() => {
 })
 
 // ── 文件预览状态 ──────────────────────────────────────────────────────────────
-const selectedFile = ref<FileArtifact | null>(null)
-const fileLoading = ref(false)
+const preview = useArtifactPreview(
+  () => chat.currentConvId.value,
+  fetchArtifactContent,
+  message => ElMessage.warning(message),
+)
+const selectedFile = preview.selectedFile
+const fileLoading = preview.loading
 
 async function onSelectFile(file: FileArtifact) {
-  // 立即打开面板 + 显示 loading 占位（先让用户看到反馈）
-  selectedFile.value = file
   panelOpen.value = true
-  if (file.language === 'pptx') {
-    panelWidth.value = Math.max(panelWidth.value, 520)
-  }
-
-  // 二进制打包/归档文件（jar/tar/zip...）面板里只展示下载入口，
-  // 不拉取 base64 内容（可能 >50MB，会把浏览器卡死）
-  if (file.language === 'archive') return
-
-  // 如果是元数据模式（无 content），按需从后端加载完整内容
-  const needsLoad = !file.content || (file.language === 'pptx' && !file.slides_html?.length)
-  if (!needsLoad) return
-
-  fileLoading.value = true
-  try {
-    // 来源1：cognitive.artifacts（SSE 实时推送的，有完整内容）
-    const fromCog = chat.cognitive.value.artifacts.find(
-      (a: FileArtifact) => a.name === file.name && a.content
-    )
-    if (fromCog) {
-      selectedFile.value = fromCog
-    } else if (file.id) {
-      // 来源2：按 ID 从后端加载完整内容
-      const full = await import('./api').then(m => m.fetchArtifactContent(file.id!))
-      if (full) selectedFile.value = full as FileArtifact
-    }
-  } catch {}
-  fileLoading.value = false
+  if (file.language === 'pptx') panelWidth.value = Math.max(panelWidth.value, 520)
+  await preview.select(file)
 }
 
-watch(() => chat.currentConvId.value, () => {
-  selectedFile.value = null
-})
+watch(() => chat.currentConvId.value, () => preview.clear())
+onBeforeUnmount(() => preview.clear())
 
 // ── 量化 → 对话续接 ─────────────────────────────────────────────────────────
 // useChat 非单例，QuantView 不能自己 send（会写到独立 state）。
 // 这里由 App 持有的 chat 实例发起，确保 send 写入正在渲染的对话状态。
+let uploadConversationPromise: Promise<string | null> | null = null
+async function ensureUploadConversation(complete: (id: string | null) => void) {
+  if (!uploadConversationPromise) {
+    uploadConversationPromise = chat.newConversation().finally(() => { uploadConversationPromise = null })
+  }
+  const id = await uploadConversationPromise
+  complete(id && chat.currentConvId.value === id ? id : null)
+}
+
 async function continueWithSnapshot(snapshotId: string) {
   // 1) 总是开新会话，避免污染既有上下文
-  await chat.newConversation()
+  const createdId = await chat.newConversation()
+  if (!createdId || chat.currentConvId.value !== createdId) return
   // 2) 等到 currentConvId 真正写入后再 send（newConversation 内部已 await，但
   //    Vue 响应式要一拍渲染，多 await 一次 microtask 更稳）
   await Promise.resolve()
@@ -239,7 +229,8 @@ function openStockDetail(stock: any) {
 // 仿 continueWithSnapshot：开新会话，把 prediction_id 经 contextRefs 喂给对话，
 // LLM 查 prediction_snapshots 库深挖（contextRefs type='prediction_snapshot'）。
 async function continueWithPrediction(predictionId: string) {
-  await chat.newConversation()
+  const createdId = await chat.newConversation()
+  if (!createdId || chat.currentConvId.value !== createdId) return
   await Promise.resolve()
   await chat.send({
     text: '我刚才做了一次股票预测，请基于这次预测结果做深度分析：\n' +
@@ -377,7 +368,7 @@ function onDragStart(e: MouseEvent) {
           @regenerate="chat.regenerate()"
           @edit-message="chat.editMessage($event.index, $event.content)"
           @select-file="onSelectFile($event)"
-          @ensure-conv="chat.newConversation()"
+          @ensure-conv="ensureUploadConversation"
         />
 
         <!-- 右侧：认知面板（内含拖拽手柄） -->

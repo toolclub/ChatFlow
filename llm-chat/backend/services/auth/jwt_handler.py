@@ -31,6 +31,6 @@ def create_refresh_token(user_id: str) -> str:
 def verify_token(token: str) -> Optional[Dict[str, Any]]:
     """验证 Token"""
     try:
-        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM], options={"require": ["sub", "exp", "iat", "type"]})
     except jwt.PyJWTError:
         return None

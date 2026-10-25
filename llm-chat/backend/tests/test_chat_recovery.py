@@ -51,7 +51,8 @@ async def test_resume_drains_late_commit_without_switching_to_memory_tail(monkey
     reads = AsyncMock(side_effect=[[event(1, "content", "A")], [event(2, "content", "B"), event(3, "done", True)]])
     monkeypatch.setattr("db.event_store.get_events_since", reads)
     monkeypatch.setitem(runner._active_sessions, "resume-gap", SimpleNamespace(_sse_events=["already in memory"]))
-    chunks = [payload(c) async for c in runner.resume_stream("resume-gap", 0, "turn-2")]
+    chunks = [payload(frame) async for chunk in runner.resume_stream("resume-gap", 0, "turn-2")
+              for frame in chunk.split("\n\n") if frame.strip()]
     assert [c.get("content") for c in chunks if "content" in c] == ["A", "B"]
     assert [c["id"] for c in chunks] == [1, 2, 3]
     assert all(call.kwargs["message_id"] == "turn-2" for call in reads.call_args_list)
@@ -119,7 +120,7 @@ async def test_stop_cancels_waiting_graph_and_confirms_after_persistence(monkeyp
     await asyncio.sleep(0)
     session = SimpleNamespace(stop_event=asyncio.Event(), _graph_task=graph_task, _consumer_task=consumer_task)
     monkeypatch.setitem(runner._active_sessions, "stop", session)
-    monkeypatch.setattr("memory.store.db_get_conversation", AsyncMock(side_effect=lambda _: state.copy()))
+    monkeypatch.setattr("memory.store.db_get_conversation_view", AsyncMock(side_effect=lambda *args, **kwargs: state.copy()))
     monkeypatch.setattr("memory.store.db_get_conversation_meta", AsyncMock(side_effect=lambda _: state.copy()))
     publish = AsyncMock()
     monkeypatch.setattr("db.redis_state.publish_stop", publish)
@@ -323,3 +324,74 @@ async def test_shutdown_is_bounded_when_consumer_cannot_finish(monkeypatch):
     await asyncio.gather(session._graph_task, session._consumer_task, return_exceptions=True)
     assert session.stop_event.is_set()
     assert session._consumer_task.cancelled()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("admitted", [False, True])
+async def test_chat_hydrates_only_after_exclusive_turn_admission(monkeypatch, admitted):
+    from models import ChatRequest
+    calls = []
+    meta = {"user_id": "owner", "status": "error"}
+    monkeypatch.setattr("memory.store.db_get_conversation_meta", AsyncMock(return_value=meta))
+    monkeypatch.setattr("db.redis_state.is_streaming", AsyncMock(return_value=False))
+
+    async def reconcile(cid, observed, *, refresh_cache):
+        assert refresh_cache is False
+        calls.append("reconcile")
+        return observed
+
+    async def claim(cid):
+        calls.append("claim")
+        return admitted
+
+    async def hydrate(cid):
+        assert calls == ["reconcile", "claim"]
+        calls.append("hydrate")
+
+    async def stream(**kwargs):
+        yield sse({SSEEventType.DONE.value: True})
+
+    monkeypatch.setattr(conversation_service, "reconcile_stream_state", reconcile)
+    monkeypatch.setattr("memory.store.try_start_stream", claim)
+    monkeypatch.setattr("memory.store.db_get_conversation", hydrate)
+    monkeypatch.setattr(chat_router.graph_runner, "stream_response", stream)
+    monkeypatch.setattr(chat_router, "_stop_events", {})
+    request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
+    req = ChatRequest(conversation_id="admission", message="hello", model="test")
+    if not admitted:
+        with pytest.raises(HTTPException) as error:
+            await chat_router.chat(req, {"id": "owner"}, request)
+        assert error.value.status_code == 409
+        assert calls == ["reconcile", "claim"]
+    else:
+        response = await chat_router.chat(req, {"id": "owner"}, request)
+        assert [payload(c) async for c in response.body_iterator] == [{"done": True}]
+        assert calls == ["reconcile", "claim", "hydrate"]
+        assert not chat_router._stop_events
+
+
+@pytest.mark.asyncio
+async def test_stop_confirmation_read_cannot_replace_new_turn_cache(monkeypatch):
+    from memory import store
+    from memory.schema import Conversation, Message
+    newer = Conversation("stop-race", messages=[Message("user", "new turn")], status="streaming")
+    monkeypatch.setattr(store, "_store", {})
+    monkeypatch.setattr(store, "db_get_conversation_meta", AsyncMock(return_value={"user_id": "owner", "status": "active"}))
+    monkeypatch.setattr("db.redis_state.publish_stop", AsyncMock())
+    legacy = AsyncMock(side_effect=AssertionError("Stop confirmation must never hydrate model history"))
+    monkeypatch.setattr(store, "db_get_conversation", legacy)
+
+    async def view(cid, *, include_tools):
+        assert include_tools is False
+        # A second tab admits its next turn after the terminal-state check.
+        store._store[cid] = newer
+        return {"messages": [{"role": "assistant", "content": "saved reply"}]}
+
+    monkeypatch.setattr(store, "db_get_conversation_view", view)
+    response = await chat_router.stop_chat("stop-race", {"id": "owner"},
+        Request({"type": "http", "headers": []}), stop_token="old-stop", timeout_ms=1000)
+    chunks = [payload(c) async for c in response.body_iterator]
+    assert chunks == [{"stop_confirmed": True, "can_continue": True, "reason": "stopped", "stop_token": "old-stop"}]
+    assert store.get("stop-race") is newer
+    assert newer.messages[0].content == "new turn"
+    legacy.assert_not_awaited()

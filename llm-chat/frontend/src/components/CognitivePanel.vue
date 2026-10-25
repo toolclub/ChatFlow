@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue'
+import { ElMessage } from 'element-plus'
+import { fetchArtifactBlob } from '../api'
 import type { CognitiveState, PlanStep, ToolHistoryEvent, FileArtifact } from '../types'
 import { isPreviewable } from '../types'
 import { Delete } from '@element-plus/icons-vue'
@@ -260,40 +262,51 @@ const fileSizeKb = computed(() => {
   return ((props.selectedFile.content?.length ?? 0) / 1024).toFixed(1)
 })
 
-function downloadFile() {
-  if (!props.selectedFile) return
-  // 归档文件：内容未加载到内存（避免 50MB+ base64 卡死浏览器），走后端直链下载
-  if (props.selectedFile.language === 'archive' && props.selectedFile.id) {
-    const a = document.createElement('a')
-    a.href = `/api/artifacts/${props.selectedFile.id}/download`
-    a.download = props.selectedFile.name
-    a.click()
+const downloading = ref(false)
+async function downloadFile() {
+  const file = props.selectedFile
+  if (!file || downloading.value) return
+  if (file.id) {
+    downloading.value = true
+    try {
+      const blob = await fetchArtifactBlob(file.id)
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = file.name
+      anchor.click()
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (err) {
+      ElMessage.error(err instanceof Error ? err.message : '下载失败，请重试')
+    } finally {
+      downloading.value = false
+    }
     return
   }
-  const isBinary = props.selectedFile.binary || ['pptx', 'pdf'].includes(props.selectedFile.language)
+  const isBinary = file.binary || ['pptx', 'pdf'].includes(file.language)
   if (isBinary) {
     // base64 → 二进制 → Blob → 下载
     try {
-      const byteChars = atob(props.selectedFile.content)
+      const byteChars = atob(file.content)
       const bytes = new Uint8Array(byteChars.length)
       for (let i = 0; i < byteChars.length; i++) bytes[i] = byteChars.charCodeAt(i)
       const mimeMap: Record<string, string> = {
         pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
         pdf: 'application/pdf',
       }
-      const blob = new Blob([bytes], { type: mimeMap[props.selectedFile.language] || 'application/octet-stream' })
+      const blob = new Blob([bytes], { type: mimeMap[file.language] || 'application/octet-stream' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
-      a.href = url; a.download = props.selectedFile.name; a.click()
+      a.href = url; a.download = file.name; a.click()
       URL.revokeObjectURL(url)
     } catch (e) {
       console.error('下载失败:', e)
     }
   } else {
-    const blob = new Blob([props.selectedFile.content], { type: 'text/plain;charset=utf-8' })
+    const blob = new Blob([file.content], { type: 'text/plain;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
-    a.href = url; a.download = props.selectedFile.name; a.click()
+    a.href = url; a.download = file.name; a.click()
     URL.revokeObjectURL(url)
   }
 }
@@ -510,7 +523,7 @@ function copyFileContent() {
           </el-descriptions-item>
         </el-descriptions>
         <div class="file-info-actions">
-          <el-button size="small" text title="下载文件" @click="downloadFile">
+          <el-button size="small" text title="下载文件" :loading="downloading" @click="downloadFile">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
             </svg>

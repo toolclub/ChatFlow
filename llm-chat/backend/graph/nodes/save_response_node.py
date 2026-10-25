@@ -8,6 +8,7 @@ SaveResponseNode：保存响应节点
   - 写回语义缓存（chat/code 永不过期；search/search_code 带 TTL）
   - 清理工具调用残留文本（MiniMax 等模型在流式模式下可能输出 function call 文本）
 """
+import asyncio
 import json
 import logging
 import re
@@ -16,6 +17,7 @@ from langchain_core.callbacks.manager import adispatch_custom_event
 
 from config import (
     DEFAULT_SYSTEM_PROMPT,
+    CONTEXT_LOOKUP_TIMEOUT,
     SEMANTIC_CACHE_NAMESPACE_MODE,
     SEMANTIC_CACHE_SEARCH_TTL_HOURS,
     VISION_MODEL,
@@ -181,7 +183,7 @@ class SaveResponseNode(BaseNode):
             return
         if state.get("cache_hit"):
             return
-        if state.get("images"):
+        if state.get("images") or state.get("file_ids") or state.get("context_refs") or state.get("force_plan"):
             return
         # 含工具调用的响应不缓存：缓存命中时会跳过工具执行，
         # 导致文件产物、沙箱文件等副作用丢失
@@ -215,6 +217,8 @@ class SaveResponseNode(BaseNode):
 
             cache     = get_cache()
             conv      = memory_store.get(conv_id)
+            if conv and sum(message.role == "user" for message in conv.messages) > 1:
+                return
             namespace = SemanticCacheNode._derive_cache_namespace(
                 conv, SEMANTIC_CACHE_NAMESPACE_MODE, client_id
             )
@@ -226,7 +230,7 @@ class SaveResponseNode(BaseNode):
                 if route in ("search", "search_code", "finance")
                 else 24 * 3600  # chat/code 24 小时 TTL 兜底
             )
-            await cache.store(user_msg, full_response, namespace, ttl_seconds=ttl)
+            await asyncio.wait_for(cache.store(user_msg, full_response, namespace, ttl_seconds=ttl), timeout=CONTEXT_LOOKUP_TIMEOUT)
         except Exception as exc:
             logger.warning("写入语义缓存失败（不影响主流程）: %s", exc)
 

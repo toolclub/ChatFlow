@@ -1,5 +1,6 @@
 from fastapi import Depends, Request, HTTPException, Header
-from typing import Annotated, Optional
+from typing import Annotated
+import secrets
 from .jwt_handler import verify_token
 from db.user_store import get_user_by_id
 
@@ -17,24 +18,28 @@ async def get_current_user(request: Request) -> dict:
     - 已登录: {"id": "uuid", "name": "...", "is_anonymous": False}
     - 匿名: {"id": None, "client_id": "...", "is_anonymous": True}
     """
-    # 1. 优先验证 Access Token
+    client_id = request.headers.get("X-Client-ID", "").strip()
+    if len(client_id) > 36:
+        raise HTTPException(status_code=400, detail="X-Client-ID 长度不能超过 36 个字符")
+    # A supplied but expired token must remain an authentication failure. Falling
+    # back to guest identity hides signed-in history and prevents client refresh.
     auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer "):
-        token = auth_header[7:]
-        payload = verify_token(token)
-        if payload and payload.get("type") == "access":
-            user_id = payload["sub"]
-            user = await get_user_by_id(user_id)
-            if user and user["is_active"]:
-                return {**user, "is_anonymous": False}
+    if auth_header:
+        scheme, _, token = auth_header.partition(" ")
+        payload = verify_token(token) if scheme.lower() == "bearer" and token else None
+        if not payload or payload.get("type") != "access" or not payload.get("sub"):
+            raise HTTPException(status_code=401, detail="登录已过期，请刷新登录状态")
+        user = await get_user_by_id(payload["sub"])
+        if not user or not user.get("is_active"):
+            raise HTTPException(status_code=401, detail="登录用户不存在或已停用")
+        return {**user, "client_id": client_id, "is_anonymous": False}
 
-    # 2. 兼容模式：未登录时使用 client_id
-    client_id = request.headers.get("X-Client-ID", "")
-    if client_id:
-        return {"id": None, "client_id": client_id, "is_anonymous": True}
-
-    # 3. 实在没有信息，返回匿名但无 client_id (后续逻辑可能报错)
-    return {"id": None, "client_id": None, "is_anonymous": True}
+    client_id = request.headers.get("X-Client-ID", "").strip()
+    if not client_id:
+        raise HTTPException(status_code=401, detail="缺少用户身份")
+    if len(client_id) > 36:
+        raise HTTPException(status_code=400, detail="X-Client-ID 长度不能超过 36 个字符")
+    return {"id": None, "client_id": client_id, "is_anonymous": True}
 
 async def require_user(
     user: Annotated[dict, Depends(get_current_user)]
@@ -54,7 +59,7 @@ RequiredUser = Annotated[dict, Depends(require_user)]
 # 铁律 #1：拦截来自后端 403，非前端 v-show。
 async def verify_admin_access(x_admin_key: str = Header(None)) -> bool:
     """校验 X-Admin-Key header == ADMIN_SECRET_KEY，失败 403。"""
-    if x_admin_key != config.ADMIN_SECRET_KEY:
+    if not config.ADMIN_SECRET_KEY or not x_admin_key or not secrets.compare_digest(x_admin_key, config.ADMIN_SECRET_KEY):
         raise HTTPException(status_code=403, detail="管理员权限验证失败")
     return True
 

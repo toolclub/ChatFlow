@@ -77,7 +77,8 @@ async def test_real_database_round_recovery_and_prediction_ownership(monkeypatch
         ids = await append_events_batch(entries)
         assert len(await get_events_since(conv_id, 0, message_id=round_id)) == 500
         chunks = [chunk async for chunk in resume_stream(conv_id, 0, round_id)]
-        payloads = [json.loads(next(line[5:] for line in chunk.splitlines() if line.startswith('data:'))) for chunk in chunks]
+        payloads = [json.loads(line[5:]) for chunk in chunks for line in chunk.splitlines() if line.startswith('data:')]
+        assert len(chunks) < len(payloads) / 10  # Frames are batched, not one ASGI write per token.
         assert len(payloads) == 1002
         assert payloads[-1]['done'] is True
         assert [p['content'] for p in payloads[:-1]] == [str(i) for i in range(1001)]
@@ -102,6 +103,42 @@ async def test_real_database_round_recovery_and_prediction_ownership(monkeypatch
         assert await update_prediction_status(pred_id, 'inferring', allow_resume=True)
         assert await update_prediction_status(pred_id, 'done')
         assert not await update_prediction_status(pred_id, 'queued', allow_resume=True)
+        # UI reads preserve the model cache and use real projected SQL columns.
+        from services.conversation_service import conversation_service
+        from db.models import ToolExecutionModel, ArtifactModel, PlanStepModel, ToolEventModel, MessageDetailModel
+        cached = store.get(conv_id)
+        async with database.AsyncSessionLocal() as session:
+            session.add_all([
+                ToolExecutionModel(conv_id=conv_id, message_id=round_id, tool_name='test', status='done', created_at=now),
+                ArtifactModel(conv_id=conv_id, message_id=round_id, name='test.txt', path='test.txt', content='saved', created_at=now),
+                PlanStepModel(id=str(uuid.uuid4()), conv_id=conv_id, message_id=round_id, created_at=now, updated_at=now),
+                ToolEventModel(conv_id=conv_id, tool_name='test', created_at=now),
+                MessageDetailModel(conv_id=conv_id, msg_index=0, role='assistant', created_at=now, updated_at=now),
+            ])
+            await session.commit()
+        view = await conversation_service.get_full_state(conv_id)
+        assert store.get(conv_id) is cached
+        assert view['messages'][-1]['content'] == 'saved partial'
+        assert view['messages'][-1]['tool_executions'][0]['tool_name'] == 'test'
+        assert view['messages'][-1]['artifacts'][0]['name'] == 'test.txt'
+        assert await store.get_latest_assistant_message_id(conv_id) == round_id
+        # A new admitted turn blocks atomic deletion, with every row preserved.
+        assert await store.try_start_stream(conv_id)
+        assert await conversation_service.update_conversation(conv_id, title='renamed') == {'ok': True}
+        assert store.get(conv_id) is cached
+        assert (await store.db_get_conversation_meta(conv_id))['title'] == 'renamed'
+        with pytest.raises(TimeoutError):
+            await store.delete(conv_id)
+        assert await store.db_get_conversation_meta(conv_id)
+        current = await store.db_get_conversation_meta(conv_id)
+        assert await store.recover_interrupted_stream(conv_id, expected_updated_at=current['updated_at'])
+        await store.delete(conv_id)
+        assert store.get(conv_id) is None
+        async with database.AsyncSessionLocal() as session:
+            assert await session.get(ConversationModel, conv_id) is None
+            for model in (MessageModel, EventLogModel, ToolExecutionModel, ArtifactModel,
+                          PlanStepModel, ToolEventModel, MessageDetailModel):
+                assert (await session.execute(select(model).where(model.conv_id == conv_id))).first() is None
     finally:
         async with database.AsyncSessionLocal() as session:
             for model in (EventLogModel, MessageModel):

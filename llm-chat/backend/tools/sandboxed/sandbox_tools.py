@@ -433,10 +433,10 @@ async def sandbox_write(path: str, content: str) -> str:
     # 写入完成后，保存为文件产物并通知前端
     try:
         name = path.rsplit("/", 1)[-1] if "/" in path else path
-        await save_artifact(conv_id, name, path, content, message_id=msg_id, size=len(content))
+        artifact = await save_artifact(conv_id, name, path, content, message_id=msg_id, size=len(content.encode("utf-8")))
         await adispatch_custom_event(
             "file_artifact",
-            {"name": name, "path": path, "content": content, "language": detect_language(path), "message_id": msg_id},
+            {**artifact, "content": content, "language": detect_language(path)},
         )
     except Exception:
         logger.warning("file_artifact 事件发送失败 | conv=%s path=%s", conv_id, path, exc_info=True)

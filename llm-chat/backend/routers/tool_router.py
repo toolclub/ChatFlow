@@ -50,7 +50,7 @@ async def get_artifact_detail(artifact_id: int, user: CurrentUser):
     """按需加载单个产物的完整内容（含二进制、slides_html 等）。"""
     data = await get_artifact_content(artifact_id)
     if not data:
-        return {"error": "产物不存在"}
+        raise HTTPException(status_code=404, detail="产物不存在")
     
     await _check_artifact_access(data, user)
     return data
@@ -61,7 +61,7 @@ async def download_artifact(artifact_id: int, user: CurrentUser):
     """下载文件产物（二进制流，浏览器直接触发下载）。"""
     data = await get_artifact_content(artifact_id)
     if not data:
-        return {"error": "产物不存在"}
+        raise HTTPException(status_code=404, detail="产物不存在")
 
     await _check_artifact_access(data, user)
 
@@ -80,9 +80,10 @@ async def download_artifact(artifact_id: int, user: CurrentUser):
             except _json.JSONDecodeError:
                 pass
         try:
-            raw_bytes = base64.b64decode(binary_b64)
-        except Exception:
-            return {"error": "文件解码失败"}
+            raw_bytes = base64.b64decode(binary_b64, validate=True)
+        except (ValueError, TypeError):
+            logger.error("产物二进制内容无效 | artifact=%s", artifact_id)
+            raise HTTPException(status_code=422, detail="文件内容损坏，无法下载")
 
         # 用户上传：优先用上传时记录的 mime；否则按 language + 扩展名映射
         mime_map = {

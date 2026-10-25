@@ -11,6 +11,7 @@ import time
 from typing import Any, Iterable, Optional
 
 from sqlalchemy import select, desc, text, update
+from sqlalchemy.orm import load_only
 
 from db.database import AsyncSessionLocal
 from db.models import AnnouncementCacheModel, PredictionSnapshotModel
@@ -83,7 +84,7 @@ async def update_prediction_status(
     """状态机转换后写库（编排层先 sm.send_event 校验，再调本函数持久化，铁律 #6）。"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(PredictionSnapshotModel)
+            select(PredictionSnapshotModel).options(load_only(PredictionSnapshotModel.id, PredictionSnapshotModel.status))
             .where(PredictionSnapshotModel.id == snapshot_id).with_for_update()
         )
         snap = result.scalars().first()
@@ -122,7 +123,7 @@ async def update_prediction_progress(snapshot_id: str, progress: dict) -> None:
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(
-                select(PredictionSnapshotModel).where(PredictionSnapshotModel.id == snapshot_id)
+                select(PredictionSnapshotModel).options(load_only(PredictionSnapshotModel.id, PredictionSnapshotModel.status)).where(PredictionSnapshotModel.id == snapshot_id)
             )
             snap = result.scalars().first()
             if snap is None:
@@ -143,7 +144,7 @@ async def update_prediction_news(
     """资讯搜索阶段完成后回写 news_digest / news_sentiment（独立 JSONB 字段，铁律 #2）。"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(PredictionSnapshotModel).where(PredictionSnapshotModel.id == snapshot_id)
+            select(PredictionSnapshotModel).options(load_only(PredictionSnapshotModel.id, PredictionSnapshotModel.status)).where(PredictionSnapshotModel.id == snapshot_id)
         )
         snap = result.scalars().first()
         if snap is None:
@@ -170,7 +171,7 @@ async def update_prediction_forecast(
     """计算引擎完成后回写预测结果字段。"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(PredictionSnapshotModel).where(PredictionSnapshotModel.id == snapshot_id)
+            select(PredictionSnapshotModel).options(load_only(PredictionSnapshotModel.id, PredictionSnapshotModel.status)).where(PredictionSnapshotModel.id == snapshot_id)
         )
         snap = result.scalars().first()
         if snap is None:
@@ -204,7 +205,7 @@ async def update_prediction_analysis(
     """LLM 综合分析完成后回写 analysis / risk_notes / thinking_segments（同 snapshot 行）。"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(PredictionSnapshotModel).where(PredictionSnapshotModel.id == snapshot_id)
+            select(PredictionSnapshotModel).options(load_only(PredictionSnapshotModel.id, PredictionSnapshotModel.status)).where(PredictionSnapshotModel.id == snapshot_id)
         )
         snap = result.scalars().first()
         if snap is None:
@@ -311,7 +312,7 @@ async def update_prediction_model_params(snapshot_id: str, model_params: dict) -
     """计算引擎回写全参数（ARIMA/GARCH/事件分/GBM/MC/影线标定），供前端公式卡片复现推导。"""
     async with AsyncSessionLocal() as session:
         snap = (await session.execute(
-            select(PredictionSnapshotModel).where(PredictionSnapshotModel.id == snapshot_id)
+            select(PredictionSnapshotModel).options(load_only(PredictionSnapshotModel.id, PredictionSnapshotModel.status)).where(PredictionSnapshotModel.id == snapshot_id)
         )).scalars().first()
         if snap is None:
             logger.warning("update_prediction_model_params: 快照不存在 %s", snapshot_id)
@@ -325,7 +326,7 @@ async def update_prediction_formula_steps(snapshot_id: str, formula_steps: list[
     """整体覆盖写公式步骤（终态兜底；流式过程用 append_prediction_formula_step）。"""
     async with AsyncSessionLocal() as session:
         snap = (await session.execute(
-            select(PredictionSnapshotModel).where(PredictionSnapshotModel.id == snapshot_id)
+            select(PredictionSnapshotModel).options(load_only(PredictionSnapshotModel.id, PredictionSnapshotModel.status)).where(PredictionSnapshotModel.id == snapshot_id)
         )).scalars().first()
         if snap is None:
             logger.warning("update_prediction_formula_steps: 快照不存在 %s", snapshot_id)
@@ -339,7 +340,7 @@ async def update_prediction_candles(snapshot_id: str, forecast_candles: list[dic
     """整体覆盖写预测 OHLC 蜡烛（终态兜底；流式过程用 append_prediction_forecast_candle）。"""
     async with AsyncSessionLocal() as session:
         snap = (await session.execute(
-            select(PredictionSnapshotModel).where(PredictionSnapshotModel.id == snapshot_id)
+            select(PredictionSnapshotModel).options(load_only(PredictionSnapshotModel.id, PredictionSnapshotModel.status)).where(PredictionSnapshotModel.id == snapshot_id)
         )).scalars().first()
         if snap is None:
             logger.warning("update_prediction_candles: 快照不存在 %s", snapshot_id)
@@ -357,7 +358,7 @@ async def update_prediction_event_markers(
     """K 线公告打点 + 事件综合分 F（event_score ∈ [-1, 0]）回写。"""
     async with AsyncSessionLocal() as session:
         snap = (await session.execute(
-            select(PredictionSnapshotModel).where(PredictionSnapshotModel.id == snapshot_id)
+            select(PredictionSnapshotModel).options(load_only(PredictionSnapshotModel.id, PredictionSnapshotModel.status)).where(PredictionSnapshotModel.id == snapshot_id)
         )).scalars().first()
         if snap is None:
             logger.warning("update_prediction_event_markers: 快照不存在 %s", snapshot_id)
@@ -377,7 +378,7 @@ async def update_prediction_filings(
     """数据型维度整体回写（终态兜底；流式过程用 append_prediction_dimension(kind="data")）。"""
     async with AsyncSessionLocal() as session:
         snap = (await session.execute(
-            select(PredictionSnapshotModel).where(PredictionSnapshotModel.id == snapshot_id)
+            select(PredictionSnapshotModel).options(load_only(PredictionSnapshotModel.id, PredictionSnapshotModel.status)).where(PredictionSnapshotModel.id == snapshot_id)
         )).scalars().first()
         if snap is None:
             logger.warning("update_prediction_filings: 快照不存在 %s", snapshot_id)
@@ -400,7 +401,7 @@ async def update_prediction_historical_bars(snapshot_id: str, chart: dict) -> No
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(
-                select(PredictionSnapshotModel).where(PredictionSnapshotModel.id == snapshot_id)
+                select(PredictionSnapshotModel).options(load_only(PredictionSnapshotModel.id, PredictionSnapshotModel.status)).where(PredictionSnapshotModel.id == snapshot_id)
             )
             snap = result.scalars().first()
             if snap is None:
@@ -598,7 +599,11 @@ async def get_active_prediction(
     """
     one_hour_ago = time.time() - 3600
     async with AsyncSessionLocal() as session:
-        stmt = select(PredictionSnapshotModel).where(
+        stmt = select(PredictionSnapshotModel).options(load_only(
+            PredictionSnapshotModel.id, PredictionSnapshotModel.status,
+            PredictionSnapshotModel.criteria, PredictionSnapshotModel.progress,
+            PredictionSnapshotModel.created_at, PredictionSnapshotModel.updated_at,
+        )).where(
             PredictionSnapshotModel.created_at >= one_hour_ago,
             PredictionSnapshotModel.status.in_(
                 ["queued", "news_searching", "inferring", "paused"]
@@ -627,7 +632,14 @@ async def list_prediction_records(
 ) -> list[PredictionSnapshotModel]:
     """预测记录列表（el-table 数据源）。优先按 user_id，匿名按 client_id。"""
     async with AsyncSessionLocal() as session:
-        stmt = select(PredictionSnapshotModel)
+        model = PredictionSnapshotModel
+        stmt = select(model).options(load_only(*[
+            getattr(model, name) for name in (
+                'id', 'symbol', 'market', 'status', 'horizon', 'predicted_price',
+                'predicted_range', 'confidence', 'created_at', 'target_date',
+                'progress', 'updated_at', 'event_score',
+            )
+        ]))
         if user_id:
             stmt = stmt.where(PredictionSnapshotModel.user_id == user_id)
         else:
@@ -638,7 +650,7 @@ async def list_prediction_records(
         if market:
             stmt = stmt.where(PredictionSnapshotModel.market == market)
         result = await session.execute(
-            stmt.order_by(desc(PredictionSnapshotModel.created_at)).limit(limit)
+            stmt.order_by(desc(PredictionSnapshotModel.created_at)).limit(max(1, min(limit, 200)))
         )
         return list(result.scalars().all())
 

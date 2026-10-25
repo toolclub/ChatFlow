@@ -6,7 +6,7 @@
   - PostgreSQL 作为持久化后端，内存字典 _store 作为读缓存
   - 所有读操作（get / all_conversations）走缓存（保持向后兼容同步接口）
   - 所有写操作（create / save / add_message / delete）为 async，同时更新缓存和 DB
-  - 启动时从 PostgreSQL 加载全部对话到内存缓存
+  - 执行入口按需从 PostgreSQL 加载对话；UI 读取不改变推理缓存
 """
 import logging
 import time
@@ -36,7 +36,7 @@ def all_conversations(client_id: str = "", user_id: str = "") -> list[Conversati
         return [c for c in _store.values() if c.user_id == user_id]
     if client_id:
         return [c for c in _store.values() if c.client_id == client_id and not c.user_id]
-    return list(_store.values())
+    return []
 
 
 # ── DB 直查接口（多 worker 安全，供 API 端点使用）────────────────────────────────
@@ -53,6 +53,56 @@ async def db_get_conversation_meta(conv_id: str) -> Optional[dict]:
             ConversationModel.client_id, ConversationModel.status, ConversationModel.updated_at,
         ).where(ConversationModel.id == conv_id))).mappings().first()
         return dict(row) if row else None
+
+
+async def db_get_conversation_view(conv_id: str, *, include_tools: bool = True) -> Optional[dict]:
+    """Read UI data directly, without reconstructing or replacing model history.
+
+    Full-state already loads detailed tool executions; it passes include_tools=False
+    and reconstructs the compatibility tool_calls field from that one query.
+    """
+    async with AsyncSessionLocal() as session:
+        meta = (await session.execute(select(
+            ConversationModel.id, ConversationModel.title, ConversationModel.updated_at,
+            ConversationModel.system_prompt, ConversationModel.core_memory,
+            ConversationModel.mid_term_summary, ConversationModel.user_id,
+            ConversationModel.client_id, ConversationModel.status,
+        ).where(ConversationModel.id == conv_id))).mappings().first()
+        if meta is None:
+            return None
+        rows = (await session.execute(select(
+            MessageModel.role, MessageModel.content, MessageModel.thinking,
+            MessageModel.thinking_segments, MessageModel.message_id,
+            MessageModel.stream_completed, MessageModel.stream_buffer, MessageModel.images,
+            MessageModel.tool_summary, MessageModel.step_summary, MessageModel.prompt_tokens,
+            MessageModel.completion_tokens, MessageModel.reasoning_tokens,
+            MessageModel.clarification_data, MessageModel.created_at.label("timestamp"),
+        ).where(MessageModel.conv_id == conv_id)
+          .order_by(MessageModel.created_at.asc(), MessageModel.id.asc()))).mappings().all()
+        tool_calls: dict[str, list[dict]] = {}
+        if include_tools:
+            tools = (await session.execute(select(
+                ToolExecutionModel.id, ToolExecutionModel.message_id,
+                ToolExecutionModel.tool_name, ToolExecutionModel.tool_input,
+            ).where(ToolExecutionModel.conv_id == conv_id)
+              .order_by(ToolExecutionModel.sequence_number.asc(), ToolExecutionModel.id.asc()))).mappings().all()
+            for tool in tools:
+                tool_calls.setdefault(tool["message_id"], []).append({
+                    "id": f"call_{tool['id']}", "name": tool["tool_name"],
+                    "args": tool["tool_input"], "type": "tool_call",
+                })
+    return {**dict(meta), "messages": [
+        {**dict(row), "tool_calls": tool_calls.get(row["message_id"], [])} for row in rows
+    ]}
+
+
+async def get_latest_assistant_message_id(conv_id: str) -> str:
+    """Resolve an omitted replay round without loading a conversation transcript."""
+    async with AsyncSessionLocal() as session:
+        message_id = await session.scalar(select(MessageModel.message_id).where(
+            MessageModel.conv_id == conv_id, MessageModel.role == "assistant",
+        ).order_by(MessageModel.created_at.desc(), MessageModel.id.desc()).limit(1))
+    return message_id or ""
 
 
 async def db_get_conversation(conv_id: str) -> Optional[dict]:
@@ -150,6 +200,8 @@ async def db_get_conversation(conv_id: str) -> Optional[dict]:
 
 async def db_list_conversations(client_id: str = "", user_id: str = "") -> list[dict]:
     """从 DB 直接读取对话列表（跨 worker 一致性）。"""
+    if not client_id and not user_id:
+        return []
     async with AsyncSessionLocal() as session:
         query = select(ConversationModel).order_by(ConversationModel.updated_at.desc())
         if user_id:
@@ -171,82 +223,20 @@ async def db_list_conversations(client_id: str = "", user_id: str = "") -> list[
 # ── 初始化 ────────────────────────────────────────────────────────────────────
 
 async def init() -> None:
-    """应用启动时调用：从 PostgreSQL 加载全部对话到内存缓存。"""
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(select(ConversationModel))
-        conv_rows = result.scalars().all()
+    """Start invalidation without loading every user's history into each worker."""
+    logger.info("对话存储初始化完成，历史按执行需要加载")
 
-        for row in conv_rows:
-            msgs_result = await session.execute(
-                select(MessageModel)
-                .where(MessageModel.conv_id == row.id)
-                .order_by(MessageModel.created_at.asc(), MessageModel.id.asc())
-            )
-            msg_rows = msgs_result.scalars().all()
-            
-            # 批量获取本会话的所有工具调用记录
-            tool_execs_result = await session.execute(
-                select(ToolExecutionModel)
-                .where(ToolExecutionModel.conv_id == row.id)
-                .order_by(ToolExecutionModel.sequence_number.asc())
-            )
-            tool_rows = tool_execs_result.scalars().all()
-            
-            from collections import defaultdict
-            msg_tool_calls = defaultdict(list)
-            for tr in tool_rows:
-                msg_tool_calls[tr.message_id].append({
-                    "id": f"call_{tr.id}",
-                    "name": tr.tool_name,
-                    "args": tr.tool_input,
-                    "type": "tool_call"
-                })
-
-            messages = [
-                Message(
-                    role=mr.role,
-                    content=mr.content,
-                    timestamp=mr.created_at,
-                    id=mr.id,
-                    tool_summary=getattr(mr, "tool_summary", "") or "",
-                    step_summary=getattr(mr, "step_summary", "") or "",
-                    thinking=getattr(mr, "thinking", "") or "",
-                    thinking_segments=list(getattr(mr, "thinking_segments", []) or []),
-                    tool_calls=msg_tool_calls.get(getattr(mr, "message_id", ""), []),
-                    prompt_tokens=getattr(mr, "prompt_tokens", 0) or 0,
-                    completion_tokens=getattr(mr, "completion_tokens", 0) or 0,
-                    reasoning_tokens=getattr(mr, "reasoning_tokens", 0) or 0,
-                )
-                for mr in msg_rows
-            ]
-            conv = Conversation(
-                id=row.id,
-                title=row.title,
-                system_prompt=row.system_prompt,
-                core_memory=dict(getattr(row, "core_memory", {}) or {}),
-                messages=messages,
-                mid_term_summary=row.mid_term_summary,
-                mid_term_cursor=row.mid_term_cursor,
-                created_at=row.created_at,
-                updated_at=row.updated_at,
-                client_id=row.client_id,
-                user_id=getattr(row, "user_id", "") or "",
-                status=getattr(row, "status", "active") or "active",
-            )
-            _store[row.id] = conv
-
-    logger.info("对话存储初始化完成，共加载 %d 个对话", len(_store))
-
-    # 启动 Redis 缓存失效监听（收到其他 worker 的通知时重新从 DB 加载）
     async def _on_invalidate(conv_id: str):
-        """
-        其他 worker 修改了对话 → 刷新本地缓存（而非直接 pop，防止正在读取时 KeyError）。
-        从 DB 重新加载最新数据覆盖旧缓存。
-        """
-        try:
-            await db_get_conversation(conv_id)  # 内部会刷新 _store[conv_id]
-        except Exception:
-            _store.pop(conv_id, None)  # DB 也失败时才 pop
+        # UI reads do not need this cache. Execution entry points hydrate from
+        # DB, so invalidation must not fan out full-history reads to all workers.
+        conv = _store.get(conv_id)
+        if conv is None or conv.status == "streaming":
+            return
+        # Background extraction retains its own Conversation reference. Keep
+        # the active graph's history stable until its next explicit hydration.
+        from graph.runner.stream import is_streaming_in_worker
+        if not is_streaming_in_worker(conv_id):
+            _store.pop(conv_id, None)
 
     try:
         from db.redis_state import start_cache_invalidation_listener
@@ -319,14 +309,49 @@ async def save(conv: Conversation) -> None:
     await _notify_cache_invalidation(conv.id)
 
 
-async def delete(conv_id: str) -> None:
-    """删除对话：从缓存和 DB 中删除（messages / tool_events 级联删除）。"""
-    _store.pop(conv_id, None)
+async def update_conversation_fields(
+    conv_id: str, *, title: str | None = None, system_prompt: str | None = None,
+) -> bool:
+    """Patch only requested fields without replacing an active model's history."""
+    values = {"updated_at": time.time()}
+    if title is not None:
+        values["title"] = title
+    if system_prompt is not None:
+        values["system_prompt"] = system_prompt
     async with AsyncSessionLocal() as session:
-        await session.execute(
-            sa_delete(ConversationModel).where(ConversationModel.id == conv_id)
-        )
+        result = await session.execute(sa_update(ConversationModel).where(
+            ConversationModel.id == conv_id,
+        ).values(**values).returning(ConversationModel.id))
+        exists = result.scalar_one_or_none() is not None
         await session.commit()
+    if exists:
+        cached = _store.get(conv_id)
+        if cached:
+            for field, value in values.items():
+                setattr(cached, field, value)
+        await _notify_cache_invalidation(conv_id)
+    return exists
+
+
+async def delete(conv_id: str) -> None:
+    """Atomically delete idle conversations under the same lock as turn admission."""
+    from db.models import (
+        ArtifactModel, PlanStepModel, ToolEventModel, MessageDetailModel, EventLogModel,
+    )
+    async with AsyncSessionLocal() as session:
+        row = (await session.execute(
+            select(ConversationModel).where(ConversationModel.id == conv_id).with_for_update()
+        )).scalar_one_or_none()
+        if row and row.status == "streaming":
+            raise TimeoutError("对话仍在运行，请稍后重试删除")
+        # Legacy tables have no reliable ON DELETE CASCADE constraint.
+        for model in (EventLogModel, ToolExecutionModel, MessageDetailModel,
+                      ToolEventModel, PlanStepModel, ArtifactModel, MessageModel):
+            await session.execute(sa_delete(model).where(model.conv_id == conv_id))
+        await session.execute(sa_delete(ConversationModel).where(ConversationModel.id == conv_id))
+        await session.commit()
+    _store.pop(conv_id, None)
+    await _notify_cache_invalidation(conv_id)
 
 
 async def add_message(

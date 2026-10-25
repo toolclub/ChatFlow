@@ -78,7 +78,10 @@ async def update_conversation(conv_id: str, req: UpdateConversationRequest, user
 @router.delete("/conversations/{conv_id}")
 async def delete_conversation(conv_id: str, user: CurrentUser):
     await _check_conv_access(conv_id, user)
-    return await conversation_service.delete_conversation(conv_id)
+    try:
+        return await conversation_service.delete_conversation(conv_id)
+    except TimeoutError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 # ── 批量删除 ──────────────────────────────────────────────────────────────────
@@ -87,13 +90,17 @@ async def delete_conversation(conv_id: str, user: CurrentUser):
 async def batch_delete(req: BatchDeleteRequest, user: CurrentUser):
     # 鉴权：过滤掉不属于该用户的 ID
     allowed_ids = []
+    errors = []
     for cid in req.conversation_ids:
         try:
             await _check_conv_access(cid, user)
             allowed_ids.append(cid)
-        except Exception:
-            pass
-    return await conversation_service.batch_delete_conversations(allowed_ids)
+        except HTTPException as exc:
+            errors.append({"conv_id": cid, "error": str(exc.detail)})
+    result = await conversation_service.batch_delete_conversations(allowed_ids)
+    result["errors"].extend(errors)
+    result["ok"] = not result["errors"]
+    return result
 
 
 # ── 完整状态 ──────────────────────────────────────────────────────────────────

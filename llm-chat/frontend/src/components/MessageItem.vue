@@ -2,6 +2,7 @@
 import { computed, ref, watch, onMounted, onUnmounted, type Directive } from 'vue'
 import 'katex/dist/katex.min.css'
 import { Marked } from 'marked'
+import { sanitizeHtml } from '../utils/sanitizeHtml'
 import hljs from 'highlight.js/lib/common'
 import type { Message, ToolCallRecord, StepRecord, AgentStatus, CognitiveState, ThinkingSegment } from '../types'
 import { makeEmptyCognitiveState } from '../types'
@@ -110,14 +111,14 @@ const markedInstance = new Marked({ gfm: true, breaks: false })
 // table 必须改用 extensions API 才能拿到 token 对象。
 markedInstance.use({
   renderer: {
-    code(token: any): string {
-      return buildCodeHtml(token)
+    code(token: any, language?: string): string {
+      return buildCodeHtml(typeof token === 'string' ? { text: token, lang: language } : token)
     },
 
     // 图片：支持 data URI（模型可能输出 inline SVG 预览图）和普通 URL
-    image(token: any): string {
-      const href: string = token.href ?? ''
-      const alt: string = token.text ?? token.title ?? ''
+    image(token: any, title?: string | null, text?: string): string {
+      const href: string = typeof token === 'string' ? token : token.href ?? ''
+      const alt: string = typeof token === 'string' ? text ?? title ?? '' : token.text ?? token.title ?? ''
       // data URI 图片：直接渲染（marked 默认可能无法正确处理超长 data URI）
       if (href.startsWith('data:')) {
         return `<img src="${href}" alt="${alt}" style="max-width:100%;border-radius:8px;margin:8px 0;" />`
@@ -129,7 +130,7 @@ markedInstance.use({
     // 拦截 marked 识别出的 HTML 块，防止原始 HTML 直接渲染到 DOM
     // 场景：模型输出 <!DOCTYPE html>... 不包裹代码围栏时，marked 会把它当 HTML 块直接透传
     html(token: any): string {
-      const raw: string = (token.raw ?? token.text ?? '').trim()
+      const raw: string = (typeof token === 'string' ? token : token.raw ?? token.text ?? '').trim()
       // 完整 HTML 页面 → 以代码块形式展示
       if (/^<!doctype\s+html/i.test(raw) || /^<html[\s>]/i.test(raw)) {
         return buildCodeHtml({ text: raw, lang: 'html' })
@@ -319,7 +320,9 @@ function renderContent(raw: string, streaming = false): string {
   trimmed = trimmed.replace(
     /!\[([^\]]*)\]\((data:image\/[^)]+)\)/g,
     (_match, alt, uri) => {
-      const id = `__DATA_IMG_${dataUriImages.length}__`
+      // Underscores are Markdown emphasis, so use a plain collision-free token.
+      let id = `CHATFLOWDATAIMAGE${dataUriImages.length}PLACEHOLDER`
+      while (content.includes(id)) id += 'X'
       dataUriImages.push({ placeholder: id, alt, uri })
       return id
     }
@@ -330,7 +333,7 @@ function renderContent(raw: string, streaming = false): string {
   try {
     // 模型直接输出裸 HTML 页面时（没有 markdown 代码块包裹），自动包裹为 html 代码块渲染
     if (/^<!doctype\s+html/i.test(trimmed) || /^<html[\s>]/i.test(trimmed)) {
-      return buildCodeHtml({ text: trimmed, lang: 'html' })
+      return sanitizeHtml(buildCodeHtml({ text: trimmed, lang: 'html' }))
     }
     let result = markedInstance.parse(trimmed) as string
     // 还原 data URI 图片占位符为 <img> 标签
@@ -340,7 +343,7 @@ function renderContent(raw: string, streaming = false): string {
         `<img src="${img.uri}" alt="${img.alt}" style="max-width:100%;border-radius:8px;margin:8px 0;" />`
       )
     }
-    return result
+    return sanitizeHtml(result)
   } finally {
     _skipHljs = false
   }
@@ -412,21 +415,24 @@ function _doRender(streaming = false) {
 }
 
 watch(
-  sections,
-  (secs) => {
+  () => sections.value.map(section => section.content),
+  (contents, previous) => {
+    // Tool output and thinking are independent streams. They must not cause
+    // Markdown parsing/highlighting of unchanged answer text on every delta.
+    if (previous && contents.length === previous.length && contents.every((content, index) => content === previous[index])) return
     const streaming = props.isLastLoading ?? false
-    const maxLen = Math.max(0, ...secs.map(s => s.content.length))
+    const maxLen = Math.max(0, ...contents.map(content => content.length))
     if (maxLen < _RENDER_LARGE_CHARS) {
       // 小内容：立即渲染，不节流（无需跳过 hljs）
       if (_renderTimer !== null) { clearTimeout(_renderTimer); _renderTimer = null }
-      renderedHtml.value = secs.map(s => renderContent(s.content, false))
+      renderedHtml.value = contents.map(content => renderContent(content, false))
     } else if (_renderTimer === null) {
       // 大内容：节流 + 流式期间跳过 hljs，避免每 token 全量高亮阻塞主线程
       _renderTimer = setTimeout(() => _doRender(streaming), _RENDER_THROTTLE_MS)
     }
     // else: 已有待执行的定时器，等它触发即可
   },
-  { deep: true, immediate: true },
+  { immediate: true },
 )
 
 // 流式结束后触发最终全量 hljs 高亮（之前跳过 hljs 的占位内容替换为正式高亮版本）
@@ -574,83 +580,11 @@ const vAutoScroll: Directive<HTMLElement> = {
   },
 }
 
-// ─── 文件产物：优先 message.artifacts（DB 外键），其次 cognitive.artifacts（SSE 实时） ──
-const fileArtifacts = computed<FileArtifact[]>(() => {
-  if (props.message.role !== 'assistant') return []
-
-  // 正在生成中（loading）→ 从 cognitive.artifacts 中过滤出当前消息关联的产物
-  // 不能直接返回全部 cognitive.artifacts，否则第一轮产物会跑到第二轮消息下面
-  if (props.isLastLoading && props.cognitive?.artifacts?.length) {
-    // 收集当前消息中所有工具写入的文件名
-    const myFiles = new Set<string>()
-    const collectNames = (toolCalls: ToolCallRecord[]) => {
-      for (const tc of toolCalls) {
-        // file_write 模式：从 input.path 提取文件名
-        if (tc.displayMode === 'file_write' && tc.done) {
-          const path = String((tc.input as any).path || '')
-          if (path) myFiles.add(path.split('/').pop() || path)
-        }
-        // terminal 模式的 output 中可能包含产物文件名
-        if (tc.displayMode === 'terminal' && tc.done && tc.output) {
-          const match = tc.output.match(/文件名:\s*(\S+)/i) || tc.output.match(/已生成:\s*(\S+)/i)
-          if (match) myFiles.add(match[1].trim())
-        }
-        // downloadable 产物通过标记直接放行，不在此处匹配
-      }
-    }
-    if (props.message.steps?.length) {
-      for (const step of props.message.steps) collectNames(step.toolCalls)
-    }
-    if (props.message.toolCalls?.length) collectNames(props.message.toolCalls)
-
-    // downloadable 产物（sandbox_download 产出的打包文件）不需要文件名匹配，直接通过
-    const downloadable = props.cognitive.artifacts.filter(a => (a as any).downloadable)
-
-    if (myFiles.size > 0) {
-      const matched = props.cognitive.artifacts.filter(a => myFiles.has(a.name))
-      return [...matched, ...downloadable.filter(a => !matched.includes(a))]
-    }
-    if (downloadable.length > 0) return downloadable
-    return []
-  }
-
-  // ── 已完成：从 message.artifacts 恢复（DB message_id 外键，不依赖正则） ──
-  if (props.message.artifacts?.length) {
-    return props.message.artifacts.map(meta => {
-      // 优先从 cognitive.artifacts 找完整版（含 content/slides_html）
-      const full = props.cognitive?.artifacts?.find(a => a.name === meta.name && a.content)
-      return full || meta
-    })
-  }
-
-  // ── 兜底：从 cognitive.artifacts 按工具调用匹配 ──
-  const myFiles = new Set<string>()
-  const extractNames = (toolCalls: ToolCallRecord[]) => {
-    for (const tc of toolCalls) {
-      if (tc.displayMode === 'file_write' && tc.done) {
-        const path = String((tc.input as any).path || '')
-        if (path) myFiles.add(path.split('/').pop() || path)
-      }
-      if (tc.displayMode === 'terminal' && tc.done && tc.output) {
-        const match = tc.output.match(/文件名:\s*(\S+)/i)
-          || tc.output.match(/已生成:\s*(\S+)/i)
-          || tc.output.match(/文件已准备好下载:\s*(\S+)/)
-        if (match) myFiles.add(match[1].trim())
-      }
-    }
-  }
-  if (props.message.steps?.length) {
-    for (const step of props.message.steps) extractNames(step.toolCalls)
-  }
-  if (props.message.toolCalls?.length) extractNames(props.message.toolCalls)
-  if (myFiles.size === 0) return []
-
-  if (props.cognitive?.artifacts?.length) {
-    const matched = props.cognitive.artifacts.filter(a => myFiles.has(a.name))
-    if (matched.length > 0) return matched
-  }
-  return []
-})
+// Artifact ownership is established at ingestion and restored from DB message_id.
+// Rendering never infers ownership from output text or the active conversation panel.
+const fileArtifacts = computed<FileArtifact[]>(() =>
+  props.message.role === 'assistant' ? props.message.artifacts || [] : [],
+)
 
 // ─── 整条消息是否有可复制内容 ───────────────────────────────────────────────
 const hasContent = computed(() => {
@@ -744,7 +678,7 @@ function fmtFileSize(n: number): string {
           <textarea v-model="editContent" class="edit-textarea" rows="3" @keydown.ctrl.enter="submitEdit"></textarea>
           <div class="edit-actions">
             <button class="edit-btn edit-cancel" @click="cancelEdit">取消</button>
-            <button class="edit-btn edit-submit" @click="submitEdit">发送</button>
+            <button class="edit-btn edit-submit" @click="submitEdit" title="作为新一轮发送，保留原对话">提交修订</button>
           </div>
         </div>
         <!-- Plain text bubble -->
@@ -752,7 +686,7 @@ function fmtFileSize(n: number): string {
         <div v-if="message.content" class="user-bubble" @dblclick="startEdit">{{ message.content }}</div>
         <!-- User message hover actions -->
         <div v-if="message.content && !isEditing" class="user-actions">
-          <button class="action-btn-sm" @click="startEdit" title="编辑消息">
+          <button class="action-btn-sm" @click="startEdit" title="提交修订（保留原对话）">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
           </button>
         </div>
@@ -1104,8 +1038,8 @@ function fmtFileSize(n: number): string {
         <!-- 文件产物卡片（sandbox_write 生成的文件） -->
         <div v-if="fileArtifacts.length > 0" class="file-artifacts">
           <FileArtifactCard
-            v-for="(f, fi) in fileArtifacts"
-            :key="fi"
+            v-for="f in fileArtifacts"
+            :key="f.id ? `artifact:${f.id}` : `${f.message_id || message.message_id || message.ui_id}:${f.path || f.name}`"
             :file="f"
             @select="emit('selectFile', $event)"
           />
@@ -1119,10 +1053,10 @@ function fmtFileSize(n: number): string {
               <span>{{ copied ? '已复制' : '复制' }}</span>
             </button>
           </el-tooltip>
-          <el-tooltip content="重新生成" placement="top" :show-after="300">
+          <el-tooltip content="重新回答（保留原回答）" placement="top" :show-after="300">
             <button class="action-btn" @click="emit('regenerate')">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
-              <span>重新生成</span>
+              <span>重新回答</span>
             </button>
           </el-tooltip>
         </div>

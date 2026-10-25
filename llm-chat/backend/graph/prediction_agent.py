@@ -36,6 +36,7 @@ from typing import AsyncGenerator, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from db.event_store import append_event, get_events_since
+from db.prediction_view import get_compact_prediction_events
 from db.prediction_store import (
     get_prediction_snapshot,
     get_prediction_runtime_snapshot,
@@ -865,10 +866,12 @@ async def stop_prediction(prediction_id: str) -> dict:
             logger.exception("跨 worker 停止预测信号失败 pred=%s", prediction_id)
 
     # 3. 状态置 stopped（经 PredictionSM，铁律 #6；从任何运行态都可 stop，终态则 no-op）
-    try:
-        await _transition_status(prediction_id, "stopped", error_message="用户停止")
-    except Exception as exc:
-        logger.warning("stop_prediction 置 stopped 失败 pred=%s: %s", prediction_id, exc)
+    changed = await _transition_status(prediction_id, "stopped", error_message="用户停止")
+    if not changed:
+        current = await get_prediction_runtime_snapshot(prediction_id)
+        return {"ok": False, "prediction_id": prediction_id,
+                "status": current.status if current else "",
+                "error": "任务状态已变化，未确认停止，请刷新后重试"}
 
     # 4. 清空阶段进度（否则记录列表会残留「正在搜索：地缘政治 (3/12)」标签）
     await _finalize_progress(prediction_id)
@@ -969,7 +972,11 @@ async def pause_prediction(prediction_id: str) -> dict:
 
     # Persist the pause before cancellation. A concurrent reader must never
     # observe a missing owner with a still-running DB status and restart it.
-    await _transition_status(prediction_id, _PAUSED)
+    if not await _transition_status(prediction_id, _PAUSED):
+        current = await get_prediction_runtime_snapshot(prediction_id)
+        return {"ok": False, "prediction_id": prediction_id,
+                "status": current.status if current else "",
+                "error": "任务状态已变化，未确认暂停，请刷新后重试"}
     session = _SESSIONS.get(prediction_id)
     cancelled = False
     if session:
@@ -1062,6 +1069,7 @@ async def resume_prediction(prediction_id: str) -> dict:
 async def stream_predict(
     snapshot_id: str,
     after_event_id: int = 0,
+    *, compact: bool = False,
 ) -> AsyncGenerator[dict, None]:
     """Read a private durable cursor per subscriber; reconnect never steals events.
 
@@ -1069,12 +1077,15 @@ async def stream_predict(
     is not proof of an interrupted job: only acquiring the distributed lease
     permits recovery. Each database page is drained before checking completion.
     """
+    async def read_events(after_id: int):
+        if compact:
+            return await get_compact_prediction_events(snapshot_id, after_id)
+        return await get_events_since(snapshot_id, after_id=after_id, message_id=snapshot_id)
+
     last_id = after_event_id
     last_ping = time.monotonic()
     while True:
-        events = await get_events_since(
-            snapshot_id, after_id=last_id, message_id=snapshot_id,
-        )
+        events = await read_events(last_id)
         terminal = False
         for row in events:
             eid = row.get("id") or 0
@@ -1105,9 +1116,7 @@ async def stream_predict(
         if status in (*_TERMINAL_STATUSES, _PAUSED):
             # Catch the race where the final event was persisted after this
             # iteration's read. If unavailable, the DB status still ends SSE.
-            tail = await get_events_since(
-                snapshot_id, after_id=last_id, message_id=snapshot_id,
-            )
+            tail = await read_events(last_id)
             if tail:
                 continue
             event_type = {

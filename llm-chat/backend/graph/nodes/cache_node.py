@@ -12,11 +12,13 @@ SemanticCacheNode：语义缓存检查节点
   "prompt" → 同 system prompt 跨用户共享
   "global" → 全局共享
 """
+import asyncio
 import hashlib
 import logging
 
 from config import (
     DEFAULT_SYSTEM_PROMPT,
+    CONTEXT_LOOKUP_TIMEOUT,
     SEMANTIC_CACHE_NAMESPACE_MODE,
 )
 from graph.event_types import CacheHitNodeOutput
@@ -54,7 +56,7 @@ class SemanticCacheNode(BaseNode):
             return {"cache_hit": False, "full_response": "", "cache_similarity": 0.0}
 
         # 含图片时跳过缓存
-        if state.get("images"):
+        if state.get("images") or state.get("file_ids") or state.get("context_refs"):
             clog.info(
                 "Cache SKIP  | 含图片请求，跳过语义缓存 | user_msg='%.60s'",
                 user_msg,
@@ -62,9 +64,16 @@ class SemanticCacheNode(BaseNode):
             return {"cache_hit": False, "full_response": "", "cache_similarity": 0.0}
 
         conv = memory_store.get(conv_id)
+        if conv and conv.messages:
+            return {"cache_hit": False, "full_response": "", "cache_similarity": 0.0}
         namespace = self._derive_cache_namespace(conv, SEMANTIC_CACHE_NAMESPACE_MODE, client_id)
         cache = get_cache()
-        result = await cache.lookup(user_msg, namespace)
+        try:
+            async with asyncio.timeout(CONTEXT_LOOKUP_TIMEOUT):
+                result = await cache.lookup(user_msg, namespace)
+        except Exception as exc:
+            logger.warning("语义缓存不可用，继续推理 | conv=%s | error=%s", conv_id, exc)
+            result = None
 
         if result is None:
             clog.info(

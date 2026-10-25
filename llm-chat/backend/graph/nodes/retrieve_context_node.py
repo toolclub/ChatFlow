@@ -10,11 +10,12 @@ RetrieveContextNode：上下文检索节点
 工厂注入：
   - tool_names: 用于 context_builder 中标注工具使用情况
 """
+import asyncio
 import logging
 
 from langchain_core.messages import HumanMessage
 
-from config import LONGTERM_MEMORY_ENABLED
+from config import LONGTERM_MEMORY_ENABLED, CONTEXT_LOOKUP_TIMEOUT
 from db.artifact_store import get_artifacts_by_ids
 from graph.nodes.base import BaseNode
 from graph.state import GraphState
@@ -82,26 +83,27 @@ class RetrieveContextNode(BaseNode):
         # ── 长期记忆检索（embedding 失败时降级为无记忆，不阻断主流程） ────────
         if LONGTERM_MEMORY_ENABLED and user_msg:
             try:
-                from rag import retriever as rag_retriever
-                # user_id 非空时跨对话检索，否则退化为本会话检索
-                user_id = state.get("client_id", "") or (conv.client_id if conv else "")
-                long_term = await rag_retriever.search_memories(
-                    conv_id, user_msg, user_id=user_id,
-                )
+                async with asyncio.timeout(CONTEXT_LOOKUP_TIMEOUT):
+                    from rag import retriever as rag_retriever
+                    # user_id 非空时跨对话检索，否则退化为本会话检索
+                    user_id = state.get("client_id", "") or (conv.client_id if conv else "")
+                    long_term = await rag_retriever.search_memories(
+                        conv_id, user_msg, user_id=user_id,
+                    )
 
-                # 长期记忆为空时，判断是否与当前话题相关（触发遗忘模式）
-                if not long_term and conv:
-                    if conv.mid_term_summary:
-                        relevant = await rag_retriever.is_relevant_to_summary(
-                            user_msg, conv.mid_term_summary
-                        )
-                    else:
-                        recent = [m.content for m in conv.messages if m.role == "user"][-2:]
-                        if recent:
-                            relevant = await rag_retriever.is_relevant_to_recent(user_msg, recent)
+                    # 长期记忆为空时，判断是否与当前话题相关（触发遗忘模式）
+                    if not long_term and conv:
+                        if conv.mid_term_summary:
+                            relevant = await rag_retriever.is_relevant_to_summary(
+                                user_msg, conv.mid_term_summary
+                            )
                         else:
-                            relevant = True
-                    forget_mode = not relevant
+                            recent = [m.content for m in conv.messages if m.role == "user"][-2:]
+                            if recent:
+                                relevant = await rag_retriever.is_relevant_to_recent(user_msg, recent)
+                            else:
+                                relevant = True
+                        forget_mode = not relevant
             except Exception as exc:
                 logger.warning("长期记忆检索失败（已降级为无记忆）| conv=%s | error=%s", conv_id, exc)
 
@@ -109,13 +111,12 @@ class RetrieveContextNode(BaseNode):
         context_refs = state.get("context_refs", [])
         quant_snapshots_text = []
         if context_refs:
-            from db.quant_store import get_quant_snapshot
+            from services.context_reference_service import load_context_reference
             for ref in context_refs:
-                if ref.get("type") == "quant_snapshot":
-                    snap = await get_quant_snapshot(ref["id"])
-                    if snap:
-                        text = f"【量化选股快照 {snap.id}】\n筛选条件: {snap.criteria}\n分析结果: {snap.analysis}\n风险提示: {snap.risk_notes}\n前5名标的: {[r['symbol'] + r.get('name', '') for r in snap.rows[:5]]}"
-                        quant_snapshots_text.append(text)
+                quant_snapshots_text.append(await load_context_reference(
+                    ref, user_id=state.get("user_id", "") or "",
+                    client_id=state.get("client_id", "") or "",
+                ))
 
         # ── 组装历史消息 ────────────────────────────────────────────────────
         history_messages = build_messages(

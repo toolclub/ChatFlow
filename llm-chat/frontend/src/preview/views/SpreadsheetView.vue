@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import { sanitizeHtml } from '../../utils/sanitizeHtml'
 import type { ViewProps } from '../types'
 
 const props = defineProps<ViewProps>()
@@ -37,7 +38,7 @@ async function renderSheet(name: string) {
       truncated = true
     }
   }
-  const html = XLSX.utils.sheet_to_html(ws, { id: '', editable: false })
+  const html = sanitizeHtml(XLSX.utils.sheet_to_html(ws, { id: '', editable: false }))
   sheets.value = { ...sheets.value, [name]: { name, html, truncated, loaded: true } }
 }
 

@@ -11,12 +11,15 @@
 
 已迁移：使用原生 openai LLMClient，不再依赖 langchain_openai。
 """
+import asyncio
 import logging
 
 from config import (
     FACT_EXTRACTION_ENABLED,
     LONGTERM_MEMORY_ENABLED,
     SUMMARY_SYSTEM_PROMPT,
+    SUMMARY_TIMEOUT,
+    CONTEXT_LOOKUP_TIMEOUT,
 )
 from prompts import load_prompt as _lp
 
@@ -62,9 +65,9 @@ async def maybe_compress(conv_id: str) -> tuple[bool, dict]:
     if LONGTERM_MEMORY_ENABLED and not FACT_EXTRACTION_ENABLED:
         try:
             from rag.ingestor import batch_store_pairs
-            await batch_store_pairs(
+            await asyncio.wait_for(batch_store_pairs(
                 conv_id, to_summarise, conv.mid_term_cursor, user_id=conv.client_id,
-            )
+            ), timeout=CONTEXT_LOOKUP_TIMEOUT)
         except Exception as exc:
             logger.warning("长期记忆写入失败（已跳过，不影响压缩）| conv=%s | error=%s", conv_id, exc)
 
@@ -94,8 +97,10 @@ async def maybe_compress(conv_id: str) -> tuple[bool, dict]:
         {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
         {"role": "user", "content": prompt_content},
     ]
-    completion = await llm.ainvoke(messages)
+    completion = await llm.ainvoke(messages, timeout=SUMMARY_TIMEOUT)
     new_summary = (completion.choices[0].message.content or "").strip()
+    if not new_summary:
+        raise ValueError("摘要为空，保留原始上下文与压缩游标")
     
     usage = {
         "prompt_tokens": completion.usage.prompt_tokens,

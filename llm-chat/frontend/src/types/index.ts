@@ -91,6 +91,7 @@ export interface UploadedFile {
 }
 
 export interface Message {
+  ui_id?: string                     // Stable render identity while the server assigns message_id
   role: 'user' | 'assistant'
   content: string
   intent?: string            // 胶囊意图标签（显示在气泡里），如"写代码 · 算法题"
@@ -786,6 +787,9 @@ export interface NewsItem {
   url: string
   snippet: string
   full_content?: string
+  /** Lightweight recovery views expose a lazy source reference. */
+  source_index?: number
+  body_available?: boolean
 }
 
 /** 资讯维度（LLM 查询 + Tavily 结果 + 情绪打分） */
@@ -821,6 +825,10 @@ export interface Forecast {
 
 /** 预测快照完整状态（GET /api/prediction/{id}，刷新回放用） */
 export interface PredictionSnapshot {
+  /** Every event through this cursor is represented in this atomic recovery view. */
+  event_cursor?: number
+  /** Exact ordered thinking + content stream; null means legacy log unavailable. */
+  stream_text?: string | null
   id: string
   client_id?: string
   user_id?: string

@@ -16,15 +16,8 @@ import logging
 import time
 import uuid
 
-from sqlalchemy import delete as sa_delete
-
 from memory import store as memory_store
 from memory.tool_events import get_tool_events
-from db.database import AsyncSessionLocal
-from db.models import (
-    MessageModel, ArtifactModel, PlanStepModel,
-    ToolEventModel, MessageDetailModel,
-)
 from db.artifact_store import get_artifact_meta_list
 from db.plan_store import get_latest_plan_for_conv
 from db.tool_store import get_tool_executions_for_conv
@@ -43,7 +36,7 @@ class ConversationService:
         return await memory_store.db_list_conversations(client_id, user_id)
 
     async def get_conversation(self, conv_id: str) -> dict | None:
-        return await memory_store.db_get_conversation(conv_id)
+        return await memory_store.db_get_conversation_view(conv_id)
 
     # ── 创建 ─────────────────────────────────────────────────────────────────
 
@@ -65,18 +58,10 @@ class ConversationService:
     async def update_conversation(
         self, conv_id: str, title: str | None = None, system_prompt: str | None = None,
     ) -> dict:
-        conv_data = await memory_store.db_get_conversation(conv_id)
-        if not conv_data:
-            return {"error": "对话不存在"}
-        conv = memory_store.get(conv_id)
-        if not conv:
-            return {"error": "对话不存在"}
-        if title is not None:
-            conv.title = title
-        if system_prompt is not None:
-            conv.system_prompt = system_prompt
-        await memory_store.save(conv)
-        return {"ok": True}
+        updated = await memory_store.update_conversation_fields(
+            conv_id, title=title, system_prompt=system_prompt,
+        )
+        return {"ok": True} if updated else {"error": "对话不存在"}
 
     # ── 单个删除（完整清理） ─────────────────────────────────────────────────
 
@@ -88,8 +73,9 @@ class ConversationService:
 
     async def batch_delete_conversations(self, conv_ids: list[str]) -> dict:
         if not conv_ids:
-            return {"ok": True, "deleted": 0}
+            return {"ok": True, "deleted": 0, "deleted_ids": [], "errors": []}
 
+        conv_ids = list(dict.fromkeys(conv_ids))
         # 并行停止所有活跃流 + 清理
         tasks = [self._cleanup_conversation(cid) for cid in conv_ids]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -102,23 +88,30 @@ class ConversationService:
         if errors:
             logger.warning("批量删除部分失败: %s", errors)
 
-        return {"ok": True, "deleted": deleted, "errors": errors}
+        return {"ok": not errors, "deleted": deleted, "deleted_ids": [
+            cid for cid, result in zip(conv_ids, results) if not isinstance(result, Exception)
+        ], "errors": errors}
 
     # ── 完整状态查询 ──────────────────────────────────────────────────────────
 
     async def get_full_state(self, conv_id: str) -> dict:
-        conv_data = await memory_store.db_get_conversation(conv_id)
-        if not conv_data:
-            return {"error": "对话不存在"}
-
-        conv_data = await self.reconcile_stream_state(conv_id, conv_data)
         from db.plan_store import get_all_plans_for_conv
-        tool_execs, all_plans, artifacts, last_event_id = await asyncio.gather(
+        # Independent UI reads use separate sessions. Tools are read only once,
+        # and a browser refresh never replaces the model's in-flight history.
+        conv_data, tool_execs, all_plans, artifacts, last_event_id = await asyncio.gather(
+            memory_store.db_get_conversation_view(conv_id, include_tools=False),
             get_tool_executions_for_conv(conv_id),
             get_all_plans_for_conv(conv_id),
             get_artifact_meta_list(conv_id),
             get_latest_event_id(conv_id),
         )
+        if not conv_data:
+            return {"error": "对话不存在"}
+        original_status = conv_data.get("status")
+        conv_data = await self.reconcile_stream_state(conv_id, conv_data, refresh_cache=False)
+        if conv_data.get("status") != original_status:
+            # Orphan recovery finalizes running tools as well as messages.
+            tool_execs = await get_tool_executions_for_conv(conv_id)
 
         has_streaming = conv_data.get("status") == "streaming" and any(
             not m.get("stream_completed", True)
@@ -141,6 +134,10 @@ class ConversationService:
             msg_id = m.get("message_id", "")
             if msg_id and msg_id in tool_by_msg:
                 msg["tool_executions"] = tool_by_msg[msg_id]
+                msg["tool_calls"] = [{
+                    "id": f"call_{tool['id']}", "name": tool["tool_name"],
+                    "args": tool["tool_input"], "type": "tool_call",
+                } for tool in sorted(tool_by_msg[msg_id], key=lambda t: (t.get("sequence_number", 0), t["id"]))]
             if msg_id and msg_id in artifact_by_msg:
                 msg["artifacts"] = artifact_by_msg[msg_id]
             enriched_messages.append(msg)
@@ -168,12 +165,12 @@ class ConversationService:
         conv_data = await memory_store.db_get_conversation_meta(conv_id)
         if not conv_data:
             return {"streaming": False, "last_event_id": 0}
-        conv_data = await self.reconcile_stream_state(conv_id, conv_data)
+        conv_data = await self.reconcile_stream_state(conv_id, conv_data, refresh_cache=False)
         is_streaming = conv_data.get("status") == "streaming"
         last_eid = await get_latest_event_id(conv_id) if is_streaming else 0
         return {"streaming": is_streaming, "last_event_id": last_eid}
 
-    async def reconcile_stream_state(self, conv_id: str, conv_data: dict | None = None) -> dict:
+    async def reconcile_stream_state(self, conv_id: str, conv_data: dict | None = None, *, refresh_cache: bool = True) -> dict:
         conv_data = conv_data or await memory_store.db_get_conversation_meta(conv_id) or {}
         if conv_data.get("status") != "streaming":
             return conv_data
@@ -188,7 +185,11 @@ class ConversationService:
             logger.warning("无法确认流存活状态 | conv=%s | %s", conv_id, exc)
             return conv_data
         if not alive and await memory_store.recover_interrupted_stream(conv_id, expected_updated_at=conv_data["updated_at"]):
-            return await memory_store.db_get_conversation(conv_id) or conv_data
+            if refresh_cache:
+                return await memory_store.db_get_conversation(conv_id) or conv_data
+            if "messages" in conv_data:
+                return await memory_store.db_get_conversation_view(conv_id, include_tools=False) or conv_data
+            return await memory_store.db_get_conversation_meta(conv_id) or conv_data
         return conv_data
 
     # ── 工具历史 ──────────────────────────────────────────────────────────────
@@ -203,6 +204,9 @@ class ConversationService:
         from tools import get_tool_names
 
         conv = memory_store.get(conv_id)
+        if not conv:
+            await memory_store.db_get_conversation(conv_id)
+            conv = memory_store.get(conv_id)
         if not conv:
             return {"error": "对话不存在"}
         lt_count = (
@@ -222,19 +226,9 @@ class ConversationService:
     # ══════════════════════════════════════════════════════════════════════════
 
     async def _cleanup_conversation(self, conv_id: str) -> None:
-        """
-        完整清理一个对话的所有关联数据：
-          1. 停止活跃流
-          2. 清理 Redis 状态（stop signal / streaming key）
-          3. 清理 RAG 向量
-          4. 清理沙箱会话
-          5. 删除 DB 数据（无 CASCADE 的表手动删 + conversations 主表级联删其余）
-          6. 清理内存缓存
-        """
-        # 1. 停止活跃流
+        """Stop the owner and atomically delete DB rows before clearing stop keys."""
         await self._stop_active_stream(conv_id)
-
-        # 2. 清理 Redis 状态
+        await memory_store.delete(conv_id)
         await self._cleanup_redis(conv_id)
 
         # 3. 清理 RAG 向量（长期记忆）
@@ -248,45 +242,46 @@ class ConversationService:
         # 4. 清理沙箱会话
         await self._cleanup_sandbox_session(conv_id)
 
-        # 5. 手动删除无 CASCADE 外键的关联表，再删主表（CASCADE 处理 tool_executions + event_log）
-        async with AsyncSessionLocal() as session:
-            await session.execute(
-                sa_delete(MessageModel).where(MessageModel.conv_id == conv_id)
-            )
-            await session.execute(
-                sa_delete(ArtifactModel).where(ArtifactModel.conv_id == conv_id)
-            )
-            await session.execute(
-                sa_delete(PlanStepModel).where(PlanStepModel.conv_id == conv_id)
-            )
-            await session.execute(
-                sa_delete(ToolEventModel).where(ToolEventModel.conv_id == conv_id)
-            )
-            try:
-                await session.execute(
-                    sa_delete(MessageDetailModel).where(MessageDetailModel.conv_id == conv_id)
-                )
-            except Exception:
-                pass  # 旧表可能不存在
-            await session.commit()
+    async def _stop_active_stream(self, conv_id: str, timeout: float = 10.0) -> None:
+        """Wait for persistence, leaving stop signals intact on timeout.
 
-        # 删除主表（级联删除 tool_executions + event_log）+ 内存缓存
-        await memory_store.delete(conv_id)
+        The graph's consumer still owns final writes after graph cancellation.
+        Never cancel that consumer to make a destructive cleanup proceed.
+        """
+        from graph.runner.stream import _active_sessions
+        from db.redis_state import publish_stop
 
-    async def _stop_active_stream(self, conv_id: str) -> None:
-        """停止对话的活跃流（本 worker + 跨 worker）。"""
+        async def stop_and_wait():
+            local = _active_sessions.get(conv_id)
+            if local:
+                local.stop_event.set()
+                if local._graph_task and not local._graph_task.done():
+                    local._graph_task.cancel()
+            meta = await memory_store.db_get_conversation_meta(conv_id)
+            if meta and meta.get("status") == "streaming":
+                try:
+                    await asyncio.wait_for(publish_stop(conv_id), timeout=2)
+                except Exception as exc:
+                    logger.warning("停止信号发布失败 | conv=%s | %s", conv_id, exc)
+            tasks = [task for task in (
+                getattr(local, "_graph_task", None), getattr(local, "_consumer_task", None),
+            ) if task and not task.done()]
+            if tasks:
+                # Cancelling this waiter never cancels the finalizer.
+                await asyncio.wait(tasks)
+            while True:
+                meta = await memory_store.db_get_conversation_meta(conv_id)
+                if not meta or meta.get("status") != "streaming":
+                    return
+                meta = await self.reconcile_stream_state(conv_id, meta, refresh_cache=False)
+                if meta.get("status") != "streaming":
+                    return
+                await asyncio.sleep(0.1)
+
         try:
-            from graph.runner.stream import _active_sessions
-            session = _active_sessions.get(conv_id)
-            if session and session._graph_task and not session._graph_task.done():
-                session._graph_task.cancel()
-        except Exception:
-            pass
-        try:
-            from db.redis_state import publish_stop
-            await publish_stop(conv_id)
-        except Exception:
-            pass
+            await asyncio.wait_for(stop_and_wait(), timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError("任务仍在停止并保存结果，请稍后重试删除") from exc
 
     async def _cleanup_redis(self, conv_id: str) -> None:
         """清理 Redis 中该对话的所有 key。"""
@@ -306,8 +301,8 @@ class ConversationService:
             cache = get_cache()
             if hasattr(cache, "delete_by_namespace"):
                 await cache.delete_by_namespace(conv_id)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("语义缓存清理失败 conv=%s: %s", conv_id, exc)
 
     async def _cleanup_sandbox_session(self, conv_id: str) -> None:
         """清理沙箱会话（从内存映射中移除）。"""

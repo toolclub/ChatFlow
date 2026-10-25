@@ -1,11 +1,14 @@
 import { ref, computed, readonly } from 'vue'
 import type { User, UserSettings } from '../types'
 import * as authApi from '../api/auth'
+import { setAccessToken } from '../api/http'
 
 const user = ref<User | null>(null)
 const settings = ref<UserSettings | null>(null)
 const loading = ref(false)
 const initialized = ref(false)
+let identityGeneration = 0
+let pendingInit: Promise<void> | null = null
 
 export function useAuth() {
   const isLoggedIn = computed(() => !!user.value)
@@ -17,23 +20,33 @@ export function useAuth() {
    * 初始化认证状态
    * 尝试拉取用户信息。如果 access_token 失效或缺失，api 拦截器会自动尝试 cookie 刷新。
    */
-  async function init() {
-    if (initialized.value) return
-
+  function init(): Promise<void> {
+    if (initialized.value) return Promise.resolve()
+    if (pendingInit) return pendingInit
+    const generation = identityGeneration
     loading.value = true
-    try {
-      const me = await authApi.fetchMe()
-      user.value = me.user
-      settings.value = me.settings
-    } catch (err) {
-      console.error('[Auth] Init failed:', err)
-      // 只要报错（比如 401 且刷新也失败了），就把用户状态重置为 null
-      user.value = null
-      settings.value = null
-    } finally {
-      initialized.value = true
-      loading.value = false
-    }
+    const task = (async () => {
+      try {
+        const me = await authApi.fetchMe()
+        if (generation !== identityGeneration) return
+        user.value = me.user
+        settings.value = me.settings
+      } catch (err) {
+        if (generation !== identityGeneration) return
+        console.error('[Auth] Init failed:', err)
+        user.value = null
+        settings.value = null
+      } finally {
+        if (generation === identityGeneration) {
+          initialized.value = true
+          loading.value = false
+        }
+      }
+    })()
+    pendingInit = task
+    const clearPending = () => { if (pendingInit === task) pendingInit = null }
+    void task.then(clearPending, clearPending)
+    return task
   }
 
   /**
@@ -51,23 +64,33 @@ export function useAuth() {
    * 由 App.vue 在检测到 URL 参数/Hash 时调用
    */
   async function handleAuthSuccess(accessToken: string): Promise<boolean> {
-    localStorage.setItem('cf_access_token', accessToken)
+    const generation = ++identityGeneration
+    pendingInit = null
+    setAccessToken(accessToken)
+    user.value = null
+    settings.value = null
     initialized.value = false // 强制重新获取用户信息
     await init()
-    return true
+    return generation === identityGeneration && isLoggedIn.value
   }
 
   /**
    * 登出
    */
   async function logout() {
+    const generation = ++identityGeneration
+    pendingInit = null
+    initialized.value = true
+    user.value = null
+    settings.value = null
     loading.value = true
     try {
       await authApi.logout()
     } catch (err) {
       console.warn('[Auth] Logout API failed:', err)
     } finally {
-      localStorage.removeItem('cf_access_token')
+      if (generation !== identityGeneration) return
+      setAccessToken(null)
       user.value = null
       settings.value = null
       loading.value = false

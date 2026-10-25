@@ -58,7 +58,7 @@ async def chat(req: ChatRequest, user: CurrentUser, request: Request):
         len(req.message),
     )
 
-    conv_data = await memory_store.db_get_conversation(req.conversation_id)
+    conv_data = await memory_store.db_get_conversation_meta(req.conversation_id)
     if conv_data:
         _assert_access(conv_data, user)
     else:
@@ -78,9 +78,21 @@ async def chat(req: ChatRequest, user: CurrentUser, request: Request):
         raise HTTPException(status_code=409, detail="该对话仍在生成，请恢复连接或先停止当前回复")
 
     from services.conversation_service import conversation_service
-    await conversation_service.reconcile_stream_state(req.conversation_id, conv_data)
+    await conversation_service.reconcile_stream_state(req.conversation_id, conv_data, refresh_cache=False)
     if not await memory_store.try_start_stream(req.conversation_id):
         raise HTTPException(status_code=409, detail="该对话仍在生成，请恢复连接或先停止当前回复")
+
+    # Hydrate only after exclusive admission. Rejected concurrent requests must
+    # not replace the live worker's in-memory conversation with a partial view.
+    try:
+        await memory_store.db_get_conversation(req.conversation_id)
+    except Exception:
+        logger.exception("对话历史加载失败 | conv=%s", req.conversation_id)
+        from fsm.conversation import ConversationSM
+        sm = ConversationSM.from_db_status("streaming", conv_id=req.conversation_id)
+        sm.send_event("error")
+        await memory_store.update_status(req.conversation_id, sm.current_value)
+        raise
 
     stop_event = asyncio.Event()
     _stop_events[req.conversation_id] = stop_event
@@ -166,7 +178,7 @@ async def stop_chat(
             state = await memory_store.db_get_conversation_meta(conv_id)
             local_done = session is None or (session._consumer_task is not None and session._consumer_task.done())
             if local_done and (not state or state.get("status") != "streaming"):
-                saved = await memory_store.db_get_conversation(conv_id)
+                saved = await memory_store.db_get_conversation_view(conv_id, include_tools=False)
                 last = next((m for m in reversed((saved or {}).get("messages", [])) if m.get("role") == "assistant"), {})
                 yield sse({SSEEventType.STOP_CONFIRMED.value: True,
                            "can_continue": bool(last.get("content") or last.get("stream_buffer")),

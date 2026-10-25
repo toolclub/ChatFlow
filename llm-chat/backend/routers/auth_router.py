@@ -2,9 +2,10 @@ import time
 import secrets
 import logging
 import traceback
-from typing import Optional
+from typing import Optional, Literal
 from fastapi import APIRouter, Request, Response, HTTPException
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, ConfigDict, Field
 
 from config import settings, COOKIE_SECURE
 from services.auth.jwt_handler import create_access_token, create_refresh_token, verify_token
@@ -30,10 +31,7 @@ async def _verify_oauth_state(state: str) -> Optional[str]:
     """验证 OAuth state，返回关联的 client_id，验证后自动删除"""
     r = _get_redis()
     key = f"{_STATE_KEY_PREFIX}{state}"
-    client_id = await r.get(key)
-    if client_id:
-        await r.delete(key)  # 验证后立即删除，防重放
-    return client_id
+    return await r.getdel(key)  # atomic single-use, including an empty guest ID
 
 # OAuth Provider 映射
 PROVIDERS = {
@@ -46,6 +44,9 @@ async def oauth_login(provider: str, client_id: str = ""):
     """发起 OAuth 登录"""
     if provider not in PROVIDERS:
         raise HTTPException(status_code=400, detail="Unsupported provider")
+
+    if len(client_id) > 36:
+        raise HTTPException(status_code=400, detail="client_id 长度不能超过 36 个字符")
 
     # 生成随机 state token（仅包含随机部分，不含 client_id）
     state_token = secrets.token_urlsafe(32)
@@ -161,7 +162,10 @@ async def refresh_token(request: Request, response: Response):
     if not payload or payload.get("type") != "refresh":
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
-    user_id = payload["sub"]
+    user_id = payload.get("sub")
+    user = await user_store.get_user_by_id(user_id) if user_id else None
+    if not user or not user.get("is_active"):
+        raise HTTPException(status_code=401, detail="User unavailable")
     # 验证 Session 是否有效
     session = await session_store.validate_refresh_token(user_id, refresh_token)
     if not session:
@@ -184,25 +188,41 @@ async def get_me(user: RequiredUser):
         "oauth_accounts": []  # TODO: 返回关联的账号列表
     }
 
+class ProfileUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = Field(None, min_length=1, max_length=100)
+    avatar_url: str | None = Field(None, max_length=512)
+    bio: str | None = Field(None, max_length=20000)
+    locale: str | None = Field(None, max_length=10)
+    timezone: str | None = Field(None, max_length=50)
+
+
+class SettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    theme: Literal["system", "light", "dark"] | None = None
+    default_model: str | None = Field(None, max_length=100)
+    agent_mode_default: bool | None = None
+    language: str | None = Field(None, max_length=10)
+    notifications_enabled: bool | None = None
+    sidebar_collapsed: bool | None = None
+    custom_settings: dict | None = None
+
+
 @router.put("/me")
-async def update_me(data: dict, user: RequiredUser):
-    """更新用户信息"""
-    # 仅允许更新部分字段
-    allowed_fields = ["name", "avatar_url", "bio", "locale", "timezone"]
-    update_data = {k: v for k, v in data.items() if k in allowed_fields}
-    # TODO: 实现更新逻辑
-    return {"success": True}
+async def update_me(data: ProfileUpdate, user: RequiredUser):
+    """Persist profile edits and return the saved profile."""
+    return await user_store.update_user_profile(user["id"], data.model_dump(exclude_none=True))
+
 
 @router.get("/me/settings")
 async def get_settings(user: RequiredUser):
-    """获取用户设置"""
     return await user_store.get_user_settings(user["id"])
 
+
 @router.put("/me/settings")
-async def update_settings(data: dict, user: RequiredUser):
-    """更新用户设置"""
-    await user_store.update_user_settings(user["id"], data)
-    return {"success": True}
+async def update_settings(data: SettingsUpdate, user: RequiredUser):
+    await user_store.update_user_settings(user["id"], data.model_dump(exclude_none=True))
+    return await user_store.get_user_settings(user["id"])
 
 @router.get("/me/sessions")
 async def get_sessions(user: RequiredUser):

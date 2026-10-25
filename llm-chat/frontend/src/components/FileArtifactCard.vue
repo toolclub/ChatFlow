@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import { computed, ref } from 'vue'
+import { ElMessage } from 'element-plus'
+import { fetchArtifactBlob } from '../api'
 import type { FileArtifact } from '../types'
 import { isPreviewable } from '../types'
 import { Download, View } from '@element-plus/icons-vue'
@@ -38,27 +41,41 @@ const LANG_TAG_TYPE: Record<string, string> = {
   sql: 'info', text: 'info',
 }
 
-const icon = LANG_ICON[props.file.language] || '📄'
-const langLabel = LANG_LABEL[props.file.language] || props.file.language
-const langTagType = LANG_TAG_TYPE[props.file.language] || 'info'
-const previewable = isPreviewable(props.file.language)
-const isPpt = props.file.language === 'pptx'
-const isArchive = props.file.language === 'archive'
-const isDownloadable = isArchive || !!props.file.downloadable || !!props.file.binary
+const icon = computed(() => LANG_ICON[props.file.language] || '📄')
+const langLabel = computed(() => LANG_LABEL[props.file.language] || props.file.language)
+const langTagType = computed(() => LANG_TAG_TYPE[props.file.language] || 'info')
+const previewable = computed(() => isPreviewable(props.file.language))
+const isPpt = computed(() => props.file.language === 'pptx')
+const isArchive = computed(() => props.file.language === 'archive')
+const isDownloadable = computed(() => isArchive.value || !!props.file.downloadable || !!props.file.binary)
 
 // 文件大小：二进制文件用 size 字段，文本用 content.length
-const sizeKb = props.file.size
+const sizeKb = computed(() => props.file.size
   ? (props.file.size / 1024).toFixed(1)
-  : (props.file.content.length / 1024).toFixed(1)
+  : (new TextEncoder().encode(props.file.content || '').length / 1024).toFixed(1))
 
-function downloadFile(e?: Event) {
-  e?.stopPropagation()  // 不触发 select
-  if (props.file.id) {
-    // 通过后端 API 下载（支持二进制/打包文件）
-    const a = document.createElement('a')
-    a.href = `/api/artifacts/${props.file.id}/download`
-    a.download = props.file.name
-    a.click()
+const downloading = ref(false)
+async function downloadFile(e?: Event) {
+  e?.stopPropagation()
+  if (downloading.value) return
+  const file = props.file
+  if (file.id) {
+    // API requests carry both bearer auth and anonymous client identity; a bare
+    // download URL cannot satisfy the artifact ownership checks.
+    downloading.value = true
+    try {
+      const blob = await fetchArtifactBlob(file.id)
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = file.name
+      anchor.click()
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (err) {
+      ElMessage.error(err instanceof Error ? err.message : '下载失败，请重试')
+    } finally {
+      downloading.value = false
+    }
     return
   }
   // 兜底：前端直接下载（内存中有 content 时）
@@ -125,6 +142,7 @@ function downloadFile(e?: Event) {
       text
       :icon="Download"
       class="dl-btn"
+      :loading="downloading"
       title="下载"
       @click="downloadFile($event)"
     />
@@ -134,6 +152,7 @@ function downloadFile(e?: Event) {
 
       :icon="isDownloadable && !previewable && !isPpt ? Download : (isPpt ? View : undefined)"
       class="action-btn"
+      :disabled="downloading"
       @click.stop="isDownloadable && !previewable && !isPpt ? downloadFile($event) : emit('select', file)"
     >
       <svg v-if="!isDownloadable && !isPpt" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">

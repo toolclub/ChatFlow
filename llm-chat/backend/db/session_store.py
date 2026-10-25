@@ -4,6 +4,7 @@ import uuid
 from typing import Optional, List
 from sqlalchemy import select, update, delete
 from db.database import AsyncSessionLocal
+from config import settings
 from db.models import SessionModel
 
 def _hash_token(token: str) -> str:
@@ -19,7 +20,7 @@ async def create_session(user_id: str, refresh_token: str, device_info: str = ""
             device_info=device_info,
             ip_address=ip_address,
             is_active=True,
-            expires_at=now + (7 * 24 * 60 * 60), # 7 days
+            expires_at=now + settings.jwt_refresh_expire_days * 24 * 60 * 60,
             created_at=now
         )
         session.add(new_session)

@@ -42,7 +42,14 @@ const error = ref('')
 // shallowRef：PreparedData 内含大 ArrayBuffer，不需要深响应
 const prepared = shallowRef<PreparedData | null>(null)
 
+let loadVersion = 0
+let loadController: AbortController | null = null
+
 function dispose() {
+  ++loadVersion
+  loadController?.abort()
+  loadController = null
+  loading.value = false
   if (prepared.value && prepared.value.type === 'blobUrl') {
     prepared.value.revoke()
   }
@@ -53,20 +60,31 @@ function dispose() {
 async function load() {
   dispose()
   if (!props.file || !renderer.value) return
+  const version = loadVersion
+  const controller = new AbortController()
+  loadController = controller
   loading.value = true
   try {
-    prepared.value = await prepare(renderer.value.source, props.file.id)
+    const data = await prepare(renderer.value.source, props.file.id, controller.signal)
+    if (version !== loadVersion) {
+      if (data.type === 'blobUrl') data.revoke()
+      return
+    }
+    prepared.value = data
   } catch (e: any) {
-    error.value = e?.message || '加载失败'
+    if (version === loadVersion && e?.name !== 'AbortError') error.value = e?.message || '加载失败'
   } finally {
-    loading.value = false
+    if (version === loadVersion) {
+      loading.value = false
+      loadController = null
+    }
   }
 }
 
 watch([visible, () => props.file?.id], ([v]) => {
   if (v) load()
   else dispose()
-})
+}, { immediate: true })
 
 onBeforeUnmount(dispose)
 </script>

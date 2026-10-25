@@ -117,7 +117,10 @@ const modelParams = computed<ModelParams | null>(
 )
 
 let _predictAbort: AbortController | null = null
+let _recordsRequest: { key: string; promise: Promise<void> } | null = null
+let _recordsVersion = 0
 let _snapshotVersion = 0
+let _snapshotAbort: AbortController | null = null
 let _chartAbort: AbortController | null = null
 /** pause/resume/delete 在途标记，避免用户狂点导致并发请求 */
 const isPausing = ref(false)
@@ -312,13 +315,23 @@ export function usePrediction() {
   }
 
   /** 拉取当前用户的预测记录列表 */
-  async function loadRecords(market?: 'cn_a' | 'us_stock') {
-    try {
-      const key = admin.verifiedAdminKey.value
-      records.value = await api.fetchPredictionRecords(market, key)
-    } catch (e: any) {
-      errorMsg.value = e?.message || '获取预测记录失败'
-    }
+  function loadRecords(market?: 'cn_a' | 'us_stock'): Promise<void> {
+    const requestKey = `${market || ''}:${admin.verifiedAdminKey.value}`
+    if (_recordsRequest?.key === requestKey) return _recordsRequest.promise
+    const version = ++_recordsVersion
+    const request = { key: requestKey, promise: Promise.resolve() }
+    request.promise = (async () => {
+      try {
+        const rows = await api.fetchPredictionRecords(market, admin.verifiedAdminKey.value)
+        if (version === _recordsVersion) records.value = rows
+      } catch (e: any) {
+        if (version === _recordsVersion) errorMsg.value = e?.message || '获取预测记录失败'
+      } finally {
+        if (_recordsRequest === request) _recordsRequest = null
+      }
+    })()
+    _recordsRequest = request
+    return request.promise
   }
 
   /**
@@ -329,10 +342,13 @@ export function usePrediction() {
    */
   async function loadSnapshot(id: string): Promise<PredictionSnapshot | null> {
     const version = ++_snapshotVersion
+    _snapshotAbort?.abort()
+    const snapshotController = new AbortController()
+    _snapshotAbort = snapshotController
     _chartAbort?.abort()
     try {
       const key = admin.verifiedAdminKey.value
-      const snap = await api.fetchPredictionSnapshot(id, key)
+      const snap = await api.fetchPredictionSnapshot(id, key, snapshotController.signal)
       if (version !== _snapshotVersion || viewingId.value !== id) return null
 
       // K 线历史。已完成记录后端已把当时的 bars 落库到 historical_bars（图表契约结构），
@@ -369,7 +385,10 @@ export function usePrediction() {
       currentSnapshot.value = snap
       newsDigest.value = snap.news_digest || []
       forecast.value = snap.forecast || null
-      thinking.value = snap.thinking_segments?.map(s => s.content).join('\n') || ''
+      _resetThinkingBuffers()
+      thinking.value = snap.stream_text ?? snap.thinking_segments?.map(s => s.content).join('\n') ?? ''
+      _lastEventPid = id
+      _lastEventId = snap.event_cursor ?? 0
 
       // ── v2：从落库列重建（DB 列优先，其次 forecast 内嵌的同名字段）──
       filingDigest.value = snap.filing_digest || []
@@ -395,7 +414,7 @@ export function usePrediction() {
       }
       return snap
     } catch (e: any) {
-      if (version === _snapshotVersion && viewingId.value === id) errorMsg.value = e?.message || '获取预测快照失败'
+      if (!snapshotController.signal.aborted && version === _snapshotVersion && viewingId.value === id) errorMsg.value = e?.message || '获取预测快照失败'
       return null
     }
   }
@@ -406,20 +425,24 @@ export function usePrediction() {
    * 关键：重连 SSE 的同时必须把详情面板打开并定位到那条记录（viewingId），
    * 否则会变成一条看不见的流 —— 后台在跑、屏幕上什么都没有。
    */
-  async function checkActiveSession(market?: 'cn_a' | 'us_stock') {
+  async function checkActiveSession(isCurrent: () => boolean = () => true, market?: 'cn_a' | 'us_stock') {
     try {
       const key = admin.verifiedAdminKey.value
+      const version = _snapshotVersion
+      const previousView = viewingId.value
       const res = await api.fetchActivePrediction(market, key)
+      if (!isCurrent() || version !== _snapshotVersion || viewingId.value !== previousView) return
       if (!res.active || !res.prediction_id) return
 
       const pid = res.prediction_id
+      _abortStream()
       resetTransient()
       viewingId.value = pid                        // ← 打开详情面板并定位到这条
       const snap = await loadSnapshot(pid)
       // ★ 用 isPredictionStreamable 而不是 !isPredictionTerminal：paused 非终态但后台图已被
       //   cancel，连上去只会挂一条死流 → 30s 停滞 → 假的「连接已断开」。
       if (snap && isPredictionStreamable(snap.status)) {
-        void streamPredict(pid, 0, { replay: true })
+        void streamPredict(pid, snap.event_cursor ?? 0, { hydrated: true })
       }
     } catch (e) {
       console.warn('Check active prediction session failed', e)
@@ -430,6 +453,8 @@ export function usePrediction() {
    * 发起预测。POST 立即返回 prediction_id，随后连 SSE（单流贯穿全阶段）。
    */
   async function startPredict(criteria: api.PredictionCriteria) {
+    const version = ++_snapshotVersion
+    _snapshotAbort?.abort()
     _abortStream()
     _lastEventId = 0
     _lastEventPid = null
@@ -459,9 +484,18 @@ export function usePrediction() {
       if (!res.prediction_id) {
         throw new Error('后端未返回 prediction_id')
       }
+      if (version !== _snapshotVersion || viewingId.value !== PENDING_ID) {
+        void loadRecords()
+        return
+      }
       viewingId.value = res.prediction_id
-      await loadSnapshot(res.prediction_id)
-      void streamPredict(res.prediction_id, 0, { replay: false })
+      const snap = await loadSnapshot(res.prediction_id)
+      if (!snap || viewingId.value !== res.prediction_id) return
+      if (isPredictionStreamable(snap.status)) {
+        void streamPredict(res.prediction_id, snap.event_cursor ?? 0, { hydrated: true })
+      } else {
+        isPredicting.value = false
+      }
       void loadRecords()
     } catch (e: any) {
       errorMsg.value = e?.message || '发起预测失败'
@@ -476,11 +510,10 @@ export function usePrediction() {
    * 暂停态**不连流**（后台图已 cancel），界面全靠 loadSnapshot 的落库列重建。
    */
   async function openDetail(id: string) {
-    if (streamingId.value && streamingId.value !== id) {
-      // 只断客户端的流，不停后台的图（后台该跑还得跑）
-      _abortStream()
-      isPredicting.value = false
-    }
+    // Stop callbacks before hydrating a checkpoint, including reopening the
+    // same prediction; otherwise new tokens can be overwritten by the GET.
+    _abortStream()
+    isPredicting.value = false
     _resetThinkingBuffers()
     resetTransient()
     _resetV2()
@@ -488,11 +521,15 @@ export function usePrediction() {
 
     const snap = await loadSnapshot(id)
     if (snap && isPredictionStreamable(snap.status)) {
-      void streamPredict(id, 0, { replay: true })
+      void streamPredict(id, snap.event_cursor ?? 0, { hydrated: true })
     }
   }
 
   function backToList() {
+    ++_snapshotVersion
+    _snapshotAbort?.abort()
+    _chartAbort?.abort()
+    if (viewingId.value === PENDING_ID) isPredicting.value = false
     viewingId.value = null
     // 不断流：后台还在跑的那条继续跑，回列表还能看到进度行
   }
@@ -523,7 +560,7 @@ export function usePrediction() {
   async function streamPredict(
     predictionId: string,
     afterEventId: number = 0,
-    opts: { replay?: boolean } = {},
+    opts: { replay?: boolean; hydrated?: boolean } = {},
   ) {
     _abortStream()
     _predictAbort = new AbortController()
@@ -542,14 +579,15 @@ export function usePrediction() {
     const isThisStream = () => streamingId.value === predictionId && _predictAbort?.signal === signal
 
     // 重放不立刻清空 thinking（会闪白），等第一条 thinking 事件到达再清（见 appendThinking）
+    _flushThinking()
     _resetThinkingBuffers()
-    _pendingThinkingReset = true
+    _pendingThinkingReset = afterEventId === 0 && !opts.hydrated
     if (opts.replay) _replayUntil = Date.now() + REPLAY_WINDOW_MS
 
     // ★ 只有全量重放（游标 0）才清空已渲染的维度/预测。
     //   游标 > 0 的续传（手动重连 / resume）只会收到 cursor 之后的新事件 —— 此时清空
     //   等于把已经跑完的 8 个维度、已经画好的蜡烛全擦掉，且永远不会被重新发一遍。
-    if (afterEventId === 0) {
+    if (afterEventId === 0 && !opts.hydrated) {
       newsDigest.value = []
       forecast.value = null
       _resetV2()
@@ -904,10 +942,11 @@ export function usePrediction() {
       // 已完成的维度/公式/蜡烛在 DB 里，游标续传不会重发 → 先拉回来再连流
       const snap = await loadSnapshot(pid)
       if (!snap || viewingId.value !== pid) return
-      if (currentSnapshot.value) {
-        currentSnapshot.value.status = (res.status || 'queued') as PredictionSnapshot['status']
+      if (isPredictionStreamable(snap.status)) {
+        void streamPredict(pid, snap.event_cursor ?? 0, { hydrated: true })
+      } else {
+        isPredicting.value = false
       }
-      void streamPredict(pid, _cursorFor(pid), { replay: true })
       void loadRecords()
     } catch (e: any) {
       if (viewingId.value === pid) errorMsg.value = e?.message || '继续预测失败'

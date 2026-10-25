@@ -945,3 +945,11 @@ pytest tests/ -m smoke         # 冒烟拨测（端到端）
 | 新增 DB 字段 | T-DB-04 (迁移幂等) |
 | 新增 quant provider | T-QUANT-05 + T-QUANT-06 |
 | 文件上传相关 | T-DB-02 + T-SANDBOX-04 + T-UPLOAD-* |
+
+### 预测轻量恢复与完整原文（2026-10）
+
+- `GET /api/prediction/{id}?compact=true` 在同一个只读 REPEATABLE READ 事务中读取快照与事件投影，返回 `event_cursor` 和按事件 ID 聚合的 `stream_text`。游标前的 token、结构化产物、DONE 结果必须已体现在恢复视图中；禁止另查 latest ID 后直接跳过日志。
+- 新闻列表仅下发来源标题、URL、500 字符摘要预览和 `source_index`；原始 `full_content` 与完整摘要仍原样存库。`GET /{id}/source?dimension=...&source_index=...&url=...` 读取单个完整来源，包含事件已提交但快照未写入的回退路径。无 compact 参数的旧接口保留全量契约。
+- `GET /{id}/stream?compact=true&after_event_id=...` 在 SQL 端裁剪 NEWS_ITEM 和 DONE 内嵌新闻正文，保留增量事件 ID；页面先展示恢复视图，再只消费游标后的事件，增量重连不得清除既有思考/结果。
+- `tests/test_prediction_view.py`：覆盖全部结构化事件投影、原始文本完整性、1001 条 token 顺序、legacy type/sse_string、快照读取和事件读取之间并发提交、历史 marker score 保留及暂停 CAS 失败。
+- 前端 `workspaceLifecycle.test.mjs`：覆盖 checkpoint 续传、0 游标快照保留、buffered token 重连不丢失、创建请求晚到、列表请求去重/旧市场结果拒收及卸载后不恢复活跃详情。

@@ -9,14 +9,14 @@ artifact_store：文件产物的 DB 持久化层
 
 设计原则：
   - artifacts 通过 message_id 关联到具体消息（外键语义）
-  - 同一对话同一路径只保留最新版（upsert）
+  - 同一消息同一路径更新；不同消息保留独立版本，历史归属不可迁移
   - PPT 等二进制文件以 JSON 打包存储（binary_b64 + slides_html）
-  - 所有操作 try/except，失败仅记录日志
+  - 写入失败记录日志并抛出，禁止向用户报告未持久化产物
 """
 import logging
 import time
 
-from sqlalchemy import select, update as sa_update
+from sqlalchemy import select, text, update as sa_update
 
 from db.database import AsyncSessionLocal
 from db.models import ArtifactModel
@@ -69,17 +69,25 @@ async def save_artifact(
     }
     try:
         async with AsyncSessionLocal() as session:
+            # Serialize concurrent writes to the same message/path. Different
+            # turns create independent snapshots even if the sandbox path is reused.
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                {"key": f"artifact:{conv_id}:{message_id}:{source}:{path}"},
+            )
             existing = await session.execute(
                 select(ArtifactModel).where(
                     ArtifactModel.conv_id == conv_id,
                     ArtifactModel.path == path,
+                    ArtifactModel.message_id == message_id,
+                    ArtifactModel.source == source,
                 )
             )
             row = existing.scalar_one_or_none()
             if row:
                 row.content = content
                 row.language = lang
-                row.message_id = message_id or row.message_id
+                row.name = name
                 row.size = size or row.size
                 row.slide_count = slide_count or row.slide_count
                 row.source = source or row.source
@@ -99,6 +107,7 @@ async def save_artifact(
                 await session.commit()
     except Exception:
         logger.exception("save_artifact failed | conv=%s path=%s", conv_id, path)
+        raise
     return artifact_data
 
 

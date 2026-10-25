@@ -140,6 +140,7 @@ class BaseNode(ABC):
             "FunctionMessage": "function",
         }
         result: list[dict[str, Any]] = []
+        pending_tool_ids: set[str] = set()
         for i, msg in enumerate(messages):
             role = role_map.get(type(msg).__name__, "user")
             content = msg.content
@@ -149,17 +150,24 @@ class BaseNode(ABC):
             if role == "assistant":
                 lc_tool_calls = getattr(msg, "tool_calls", None) or []
                 if lc_tool_calls:
-                    # 检查后续是否紧跟 tool 响应
-                    has_responses = False
-                    if i + 1 < len(messages):
-                        next_msg = messages[i+1]
-                        # 只要紧跟了一个 ToolMessage，我们就认为这一组调用是有效的（简化判断）
-                        if type(next_msg).__name__ in ("ToolMessage", "FunctionMessage"):
-                            has_responses = True
-                    
+                    # Interrupted parallel batches may contain only some replies.
+                    # Pair by call ID, not just the type of the next message.
+                    response_ids = set()
+                    for following in messages[i + 1:]:
+                        if type(following).__name__ != "ToolMessage":
+                            break
+                        response_ids.add(getattr(following, "tool_call_id", ""))
+                    completed_calls = []
+                    seen_ids = set()
+                    for call in lc_tool_calls:
+                        call_id = call.get("id", "") if isinstance(call, dict) else getattr(call, "id", "")
+                        if call_id and call_id in response_ids and call_id not in seen_ids:
+                            completed_calls.append(call)
+                            seen_ids.add(call_id)
+                    has_responses = bool(completed_calls)
                     if has_responses:
                         oai_tool_calls = []
-                        for tc in lc_tool_calls:
+                        for tc in completed_calls:
                             if isinstance(tc, dict):
                                 tc_id   = tc.get("id", "")
                                 tc_name = tc.get("name", "")
@@ -176,6 +184,7 @@ class BaseNode(ABC):
                                     "arguments": json.dumps(tc_args, ensure_ascii=False),
                                 },
                             })
+                        pending_tool_ids = seen_ids
                         content = None  # 有 tool_calls 时 content 须为 None
                     else:
                         # 悬挂的 tool_calls：如果没有紧跟工具响应，DeepSeek 会报 400
@@ -197,9 +206,17 @@ class BaseNode(ABC):
                 if oai_tool_calls:
                     entry["tool_calls"] = oai_tool_calls
 
-            # ToolMessage 需要带上 tool_call_id
+            # Orphan/duplicate replies can occur after truncation or recovery.
+            # Never send a tool role without a matching outstanding call.
             if role == "tool":
-                entry["tool_call_id"] = getattr(msg, "tool_call_id", "")
+                call_id = getattr(msg, "tool_call_id", "")
+                if call_id not in pending_tool_ids:
+                    logger.warning("忽略未配对的历史工具响应 | index=%d", i)
+                    continue
+                pending_tool_ids.remove(call_id)
+                entry["tool_call_id"] = call_id
+            elif role != "assistant" or not oai_tool_calls:
+                pending_tool_ids.clear()
 
             result.append(entry)
         return result

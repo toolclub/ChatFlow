@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
 import type { SendPayload, UploadedFile } from '../types'
 import { Picture, Promotion, Loading } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
@@ -14,7 +14,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   send: [payload: SendPayload]
-  ensureConv: []   // 请求父组件先创建对话（上传需要 conv_id）
+  ensureConv: [complete: (id: string | null) => void]   // 请求父组件先创建对话（上传需要 conv_id）
   'agent-change': [mode: boolean]   // Agent ⇄ Chat 切换时广播，供外层联动（比如空状态胶囊只在 Agent 显示）
 }>()
 
@@ -41,6 +41,33 @@ const tipVisible = ref(false)
 const tipText = ref('')
 const flipping = ref(false)
 let tipTimer: ReturnType<typeof setTimeout> | null = null
+let draftGeneration = 0
+let themeGeneration = 0
+let disposed = false
+const uploads = new Map<string, AbortController>()
+function cancelUploads() {
+  draftGeneration++
+  for (const controller of uploads.values()) controller.abort()
+  uploads.clear()
+}
+watch(() => props.currentConvId, (next, previous) => {
+  // Creating the first conversation for an upload belongs to the same draft.
+  if (!previous && next) return
+  cancelUploads()
+  pendingFiles.value = []
+  pendingImages.value = []
+  input.value = ''
+  selectedPptTheme.value = null
+  pptThemeImageUri.value = null
+  selectedMode.value = null
+  activePicker.value = null
+  previewVisible.value = false
+}, { flush: 'sync' })
+onUnmounted(() => {
+  disposed = true
+  cancelUploads()
+  if (tipTimer) clearTimeout(tipTimer)
+})
 
 onMounted(() => {
   const saved = localStorage.getItem(AGENT_MODE_KEY)
@@ -214,6 +241,8 @@ const pptThemeImageUri = ref<string | null>(null)
 
 /** 选中主题 → fetch 本地 webp → base64 dataURI → 加入 pendingImages 作为 mood board */
 async function selectPptTheme(theme: PptTheme) {
+  const draft = draftGeneration
+  const request = ++themeGeneration
   activePicker.value = null
   try {
     const res = await fetch(theme.image)
@@ -225,6 +254,7 @@ async function selectPptTheme(theme: PptTheme) {
       r.onerror = () => reject(r.error)
       r.readAsDataURL(blob)
     })
+    if (disposed || draft !== draftGeneration || request !== themeGeneration) return
     // 如果之前已有主题图，先从 pending 移除
     if (pptThemeImageUri.value) {
       pendingImages.value = pendingImages.value.filter(i => i !== pptThemeImageUri.value)
@@ -233,6 +263,7 @@ async function selectPptTheme(theme: PptTheme) {
     pendingImages.value.unshift(dataUri)
     selectedPptTheme.value = { id: theme.id, label: theme.label }
   } catch (err) {
+    if (disposed || draft !== draftGeneration || request !== themeGeneration) return
     ElMessage.error('加载主题图片失败')
     return
   }
@@ -240,6 +271,7 @@ async function selectPptTheme(theme: PptTheme) {
 }
 
 function clearPptTheme() {
+  themeGeneration++
   if (pptThemeImageUri.value) {
     pendingImages.value = pendingImages.value.filter(i => i !== pptThemeImageUri.value)
     pptThemeImageUri.value = null
@@ -257,6 +289,7 @@ const canSend = () =>
 
 function handleSend() {
   if (!canSend()) return
+  draftGeneration++  // Late image/theme preparation belongs to the sent draft.
   let text = input.value
   // 选了胶囊模式但没打字，自动填一个最小占位（确保 intent 能送达后端）
   if (!text.trim() && selectedMode.value) {
@@ -328,17 +361,21 @@ function compressImage(dataUrl: string, maxPx = 1280, quality = 0.82): Promise<s
 
 async function addImageFile(file: File) {
   if (!file.type.startsWith('image/')) return
+  const generation = draftGeneration
   const reader = new FileReader()
   reader.onload = async ev => {
     const raw = ev.target?.result as string
     if (!raw) return
-    pendingImages.value.push(await compressImage(raw))
+    const compressed = await compressImage(raw)
+    if (!disposed && generation === draftGeneration) pendingImages.value.push(compressed)
   }
   reader.readAsDataURL(file)
 }
 
 /** 非图片文件：调用 /api/files/upload 上传到沙箱 + artifacts。 */
 async function addAttachmentFile(file: File) {
+  const generation = draftGeneration
+  if (disposed) return
   // 前端尺寸校验（后端也会再校验一次）
   if (file.size > MAX_FILE_SIZE_BYTES) {
     ElMessage.warning(`文件过大（>${MAX_FILE_SIZE_BYTES / 1024 / 1024}MB）：${file.name}`)
@@ -348,15 +385,16 @@ async function addAttachmentFile(file: File) {
     ElMessage.warning(`单次最多附 ${MAX_FILES_PER_MSG} 个文件`)
     return
   }
-  // 需要当前对话 ID 才能上传；若没有，请求父组件创建，并轮询等待 prop 更新
-  if (!props.currentConvId) {
-    emit('ensureConv')
-    const deadline = Date.now() + 8000
-    while (!props.currentConvId && Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 50))
-    }
+  // The creator returns the exact ID. A navigation into another existing
+  // conversation must never be mistaken for this upload's new conversation.
+  let convId = props.currentConvId
+  if (!convId) {
+    convId = await new Promise<string | null>(resolve => {
+      const timer = setTimeout(() => resolve(null), 8000)
+      emit('ensureConv', id => { clearTimeout(timer); resolve(id) })
+    })
   }
-  const convId = props.currentConvId
+  if (disposed || generation !== draftGeneration || (convId && props.currentConvId !== convId)) return
   if (!convId) {
     ElMessage.error('无法上传：对话未就绪，请稍候重试')
     return
@@ -366,18 +404,24 @@ async function addAttachmentFile(file: File) {
     _localId, id: 0, name: file.name, size: file.size, uploading: true,
   }
   pendingFiles.value.push(entry)
+  const controller = new AbortController()
+  uploads.set(_localId, controller)
   try {
-    const meta = await apiUploadFile(convId, file)
+    const meta = await apiUploadFile(convId, file, controller.signal)
+    if (disposed || generation !== draftGeneration || props.currentConvId !== convId) return
     const idx = pendingFiles.value.findIndex(f => f._localId === _localId)
     if (idx >= 0) {
       pendingFiles.value[idx] = { ...entry, ...meta, uploading: false, error: undefined }
     }
   } catch (exc: any) {
+    if (disposed || generation !== draftGeneration || controller.signal.aborted) return
     const idx = pendingFiles.value.findIndex(f => f._localId === _localId)
     if (idx >= 0) {
       pendingFiles.value[idx] = { ...entry, uploading: false, error: exc?.message || '上传失败' }
     }
     ElMessage.error(`上传失败：${file.name} — ${exc?.message || ''}`)
+  } finally {
+    uploads.delete(_localId)
   }
 }
 
@@ -406,6 +450,8 @@ function handleDrop(e: DragEvent) {
 }
 function removeImage(i: number) { pendingImages.value.splice(i, 1) }
 function removePendingFile(localId: string) {
+  uploads.get(localId)?.abort()
+  uploads.delete(localId)
   const idx = pendingFiles.value.findIndex(f => f._localId === localId)
   if (idx >= 0) pendingFiles.value.splice(idx, 1)
 }

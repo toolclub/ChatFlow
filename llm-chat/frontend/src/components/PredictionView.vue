@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import PredictionNewsSource from './PredictionNewsSource.vue'
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { usePrediction } from '../composables/usePrediction'
 import { useAdmin } from '../composables/useAdmin'
@@ -95,6 +96,7 @@ const showInteraction = computed(() => pred.viewingId.value !== null)
 // 密码输入（未验证时）
 const adminKeyInput = ref('')
 const verifying = ref(false)
+let disposed = false
 
 async function doVerify() {
   verifying.value = true
@@ -115,9 +117,9 @@ async function doVerify() {
 watch(
   () => admin.isVerified.value,
   async (verified) => {
-    if (!verified) return
+    if (!verified || disposed) return
     await pred.loadRecords()
-    await pred.checkActiveSession()
+    if (!disposed) await pred.checkActiveSession(() => !disposed)
   },
 )
 
@@ -422,8 +424,9 @@ function hasActive(): boolean {
 onMounted(async () => {
   if (admin.isVerified.value) {
     await pred.loadRecords()
-    await pred.checkActiveSession()
+    if (!disposed) await pred.checkActiveSession(() => !disposed)
   }
+  if (disposed) return
 
   _tickTimer = window.setInterval(() => { nowMs.value = Date.now() }, 1_000) as unknown as number
 
@@ -443,6 +446,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  disposed = true
   if (_refreshTimer !== null) clearInterval(_refreshTimer)
   if (_tickTimer !== null) clearInterval(_tickTimer)
 })
@@ -731,9 +735,11 @@ onUnmounted(() => {
                 <p v-if="dim.answer" class="dim-answer">{{ dim.answer }}</p>
                 <p v-if="dim.sentiment_reason" class="dim-reason">{{ dim.sentiment_reason }}</p>
                 <div v-if="dim.results?.length" class="dim-results">
-                  <a v-for="(r, i) in dim.results.slice(0, 3)" :key="i" :href="r.url" target="_blank" class="news-link">
-                    {{ r.title }}
-                  </a>
+                  <PredictionNewsSource
+                    v-for="(r, i) in dim.results" :key="`${r.url}:${i}`"
+                    :prediction-id="pred.viewingId.value || ''" :dimension="dim.dimension"
+                    :source="r" :index="i"
+                  />
                 </div>
               </div>
               <!-- 骨架屏：搜索中的维度（屏幕上始终有东西在动，不是一片空白） -->
