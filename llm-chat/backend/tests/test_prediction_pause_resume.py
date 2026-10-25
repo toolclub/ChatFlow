@@ -48,21 +48,32 @@ def store(monkeypatch):
     async def _get_snap(sid):
         return state["snap"]
 
-    async def _update_status(sid, status, error_message=None):
+    async def _update_status(sid, status, error_message=None, **kwargs):
         state["statuses"].append(status)
         state["snap"].status = status
 
     async def _update_progress(sid, payload):
         return None
 
-    async def _start_graph(sid, st):
+    async def _start_graph(sid, st, **kwargs):
         state["started"].append(dict(st))
         return pa.PredictionSession(sid)
 
     monkeypatch.setattr(pa, "get_prediction_snapshot", _get_snap)
+    monkeypatch.setattr(pa, "get_prediction_runtime_snapshot", _get_snap)
     monkeypatch.setattr(pa, "update_prediction_status", _update_status)
     monkeypatch.setattr(pa, "update_prediction_progress", _update_progress)
     monkeypatch.setattr(pa, "start_prediction_graph", _start_graph)
+    async def _not_owned(_sid):
+        return False
+    monkeypatch.setattr(pa.prediction_runtime, "owned", _not_owned)
+    async def _cancel(*args):
+        return False
+    monkeypatch.setattr(pa.prediction_runtime, "request_cancel", _cancel)
+    async def _acquire(_sid):
+        return "resume-owner"
+    monkeypatch.setattr(pa.prediction_runtime, "acquire", _acquire)
+    monkeypatch.setattr(pa.prediction_runtime, "release", _cancel)
     return state
 
 

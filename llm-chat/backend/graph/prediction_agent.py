@@ -38,6 +38,7 @@ from langgraph.graph import END, START, StateGraph
 from db.event_store import append_event, get_events_since
 from db.prediction_store import (
     get_prediction_snapshot,
+    get_prediction_runtime_snapshot,
     update_prediction_analysis,
     update_prediction_progress,
     update_prediction_status,
@@ -52,6 +53,7 @@ from graph.nodes.prediction import (
 )
 from graph.nodes.prediction.news_search_node import resolve_dimensions
 from graph.prediction.config import PREDICTION_HORIZON_DAYS
+from graph.prediction import runtime as prediction_runtime
 
 logger = logging.getLogger("graph.prediction_agent")
 
@@ -66,6 +68,7 @@ __all__ = [
     "resume_prediction",
     "remaining_dimensions",
     "discard_session",
+    "shutdown_prediction_sessions",
     "build_initial_state",
     "HEARTBEAT_INTERVAL_SECONDS",
 ]
@@ -82,6 +85,7 @@ _PAUSED = "paused"
 _CANCEL_STOPPED = "stopped"
 _CANCEL_PAUSED = "paused"
 _CANCEL_DELETED = "deleted"
+_CANCEL_LEASE_LOST = "lease_lost"
 
 # 对**一条 SSE 流**而言的终点事件。paused 在状态机里不是终态（可 resume），但对这条流是：
 # 后台图已被 cancel，不会再有任何事件。不把它算进来的话，replay 完 paused 事件后会继续往下
@@ -100,42 +104,44 @@ HEARTBEAT_INTERVAL_SECONDS = 3.0
 _DRAIN_POLL_TIMEOUT_SECONDS = 5.0
 
 
-async def _transition_status(snapshot_id: str, target: str, error_message: str | None = None) -> None:
-    """铁律 #6：终态转换先走 PredictionSM.send_event 校验，再写库（当前状态从 DB 读）。
+async def _transition_status(
+    snapshot_id: str, target: str, error_message: str | None = None,
+    *, allow_resume: bool = False,
+) -> bool:
+    """Validate every transition; never force an old graph over pause/stop.
 
-    校验失败（非法跳转）或写库异常时兜底直接写 target，不让状态卡死（铁律 #9 不吞）。
-    用于编排层终态落库（done/failed）；节点内中间态转换由各节点经 PredictionSM 完成。
+    The store repeats validation under a row lock to reject stale node writes.
+    When a completed graph missed an intermediate write, follow the legal FSM
+    path to completion rather than bypassing the state machine.
     """
-    cur_status = "queued"
     try:
         cur = await get_prediction_snapshot(snapshot_id)
-        cur_status = (cur.status if cur else "queued") or "queued"
-        sm = PredictionSM.from_db_status(cur_status)
-        new_status = sm.send_event(target)
-        if new_status != target and target in _TERMINAL_STATUSES:
-            # ★ PredictionSM.send_event 对非法转换是「记 warning + 返回当前值」而不是抛异常
-            # （fsm/prediction.py:95-102），所以下面的 except 兜底根本不会被触发 —— 直接写
-            # new_status 会把旧状态原样写回，任务永远停在 queued/news_searching：
-            #   · /active 会一直把它当成进行中的任务
-            #   · stream_predict 会把它当成"worker 重启遗留"，整单重跑一遍
-            # 终态是不可协商的（图已经跑完/挂了，事件也已落 event_log），强制写入并留痕。
-            # 触发场景：中间态转换丢失（如 finish 要求 inferring，但 start_infer 那次写库失败）。
-            logger.warning(
-                "预测状态机拒绝 %s→%s（缺中间态转换）snap=%s；终态不可回退，强制写 %s",
-                cur_status, target, snapshot_id, target,
+        if cur is None:
+            return False
+        current = cur.status or "queued"
+        if current == target:
+            return True
+        if current in _TERMINAL_STATUSES:
+            return False
+        if current == _PAUSED and target != "stopped" and not allow_resume:
+            return False
+        path = [target]
+        if target == "done" and current in ("queued", "news_searching"):
+            path = (["news_searching"] if current == "queued" else []) + ["inferring", "done"]
+        sm = PredictionSM.from_db_status(current)
+        for step in path:
+            if sm.send_event(step) != step:
+                return False
+            options = {"allow_resume": True} if allow_resume else {}
+            changed = await update_prediction_status(
+                snapshot_id, step, error_message=error_message, **options,
             )
-        else:
-            await update_prediction_status(snapshot_id, new_status, error_message=error_message)
-            return
-    except Exception as exc:
-        logger.warning(
-            "_transition_status %s→%s 校验/写库失败 snap=%s: %s；兜底直接写",
-            cur_status, target, snapshot_id, exc,
-        )
-    try:
-        await update_prediction_status(snapshot_id, target, error_message=error_message)
-    except Exception as exc2:
-        logger.warning("_transition_status 兜底直接写也失败 snap=%s: %s", snapshot_id, exc2)
+            if changed is False:
+                return False
+        return True
+    except Exception:
+        logger.exception("预测状态转换失败 snap=%s target=%s", snapshot_id, target)
+        return False
 
 
 async def _finalize_progress(snapshot_id: str, error_kind: str = "") -> None:
@@ -362,7 +368,9 @@ class PredictionSession:
     def __init__(self, prediction_id: str):
         self.prediction_id = prediction_id
         # 队列项：(eid, ev) 或 None（终态哨兵）
-        self.queue: asyncio.Queue = asyncio.Queue()
+        self.queue: asyncio.Queue = asyncio.Queue(maxsize=256)
+        self.changed = asyncio.Event()
+        self.lease_token: str | None = None
         self.graph_task: asyncio.Task | None = None
         self.hb_task: asyncio.Task | None = None
         self.terminal: bool = False
@@ -375,6 +383,15 @@ class PredictionSession:
         """以后台任务启动图协程 + 心跳（均 survives SSE disconnect）。"""
         self.graph_task = asyncio.create_task(graph_coro)
         self.hb_task = asyncio.create_task(self._heartbeat())
+
+    def enqueue(self, item) -> None:
+        # This bounded local buffer is only a low-latency convenience. Public
+        # streams read their own durable event_log cursor, so slow/disconnected
+        # tabs cannot accumulate unbounded memory or steal one another's events.
+        if self.queue.full():
+            self.queue.get_nowait()
+        self.queue.put_nowait(item)
+        self.changed.set()
 
     async def _heartbeat(self) -> None:
         """每 3s 往队列 put 一个 ping（镜像 graph/runner/stream.py:665-669）。
@@ -389,7 +406,31 @@ class PredictionSession:
                 if self.terminal:
                     break
                 # eid=0：不在 event_log 中，drain 的 skip_eid 去重逻辑不会误跳过它
-                await self.queue.put((0, _ping_event()))
+                self.enqueue((0, _ping_event()))
+                if self.lease_token:
+                    try:
+                        if not await prediction_runtime.renew(self.prediction_id, self.lease_token):
+                            raise RuntimeError("prediction ownership lease lost")
+                        reason = await prediction_runtime.cancellation(self.prediction_id, self.lease_token)
+                        if reason in (_CANCEL_PAUSED, _CANCEL_STOPPED, _CANCEL_DELETED):
+                            self.cancel_reason = reason
+                            if self.graph_task and not self.graph_task.done():
+                                self.graph_task.cancel()
+                            return
+                        snap = await get_prediction_runtime_snapshot(self.prediction_id)
+                        if snap is None or snap.status in (_PAUSED, "stopped"):
+                            self.cancel_reason = (
+                                _CANCEL_DELETED if snap is None else snap.status
+                            )
+                            if self.graph_task and not self.graph_task.done():
+                                self.graph_task.cancel()
+                            return
+                    except Exception:
+                        logger.exception("预测租约续期失败，停止当前 worker pred=%s", self.prediction_id)
+                        self.cancel_reason = _CANCEL_LEASE_LOST
+                        if self.graph_task and not self.graph_task.done():
+                            self.graph_task.cancel()
+                        return
                 # Redis 活跃会话续期（带超时，防 Redis 慢时拖垮心跳；不可用时降级到进程内）
                 try:
                     from db.redis_state import heartbeat_streaming
@@ -487,16 +528,21 @@ async def _emit(session: "PredictionSession", ev: dict) -> None:
     out = dict(ev)
     if eid > 0:
         out["id"] = eid
-    await session.queue.put((eid, out))
+    session.enqueue((eid, out))
 
 
 async def _finish_session(session: "PredictionSession") -> None:
     """放 None 哨兵 + 标记终态 + 停心跳 + 清理注册表。"""
     session.terminal = True
     session._cancel_heartbeat()
-    await session.queue.put(None)
+    session.enqueue(None)
     if _SESSIONS.get(session.prediction_id) is session:
         _SESSIONS.pop(session.prediction_id, None)
+    if session.lease_token:
+        try:
+            await prediction_runtime.release(session.prediction_id, session.lease_token)
+        except Exception:
+            logger.exception("释放预测租约失败 pred=%s", session.prediction_id)
     # 注销 Redis 活跃会话（可选，跨 worker）
     try:
         from db.redis_state import unregister_streaming
@@ -563,6 +609,11 @@ async def _run_prediction_graph(session: "PredictionSession", state: dict) -> No
                     final_state.update(output)
 
     except asyncio.CancelledError:
+        if session.cancel_reason == _CANCEL_LEASE_LOST:
+            # Another owner may have taken over. Never write a stopped/paused
+            # status or terminal event on behalf of that new execution.
+            await _finish_session(session)
+            return
         # ── 删除（discard_session）：一条事件都不能再写 ──────────────────────
         # 否则 append_event 会在 DELETE FROM event_log 之后又插一行 STOPPED —— 那条预测
         # 已经不存在了，这行孤儿事件永远没人读、也永远删不掉（event_log 上零 FK）。
@@ -604,7 +655,9 @@ async def _run_prediction_graph(session: "PredictionSession", state: dict) -> No
             "预测图异常 snap=%s err=%s", snapshot_id, exc, exc_info=True,
         )
         try:
-            await _transition_status(snapshot_id, "failed", error_message=str(exc))
+            if not await _transition_status(snapshot_id, "failed", error_message=str(exc)):
+                await _finish_session(session)
+                return
         except Exception as persist_exc:
             logger.warning("回写 failed 失败 snap=%s: %s", snapshot_id, persist_exc)
         await _finalize_progress(snapshot_id)
@@ -632,7 +685,9 @@ async def _run_prediction_graph(session: "PredictionSession", state: dict) -> No
     # 节点级 error（预检判死 / 资讯全挂 / forecast 失败）→ 落 failed（带错误类别）
     if err:
         try:
-            await _transition_status(snapshot_id, "failed", error_message=err)
+            if not await _transition_status(snapshot_id, "failed", error_message=err):
+                await _finish_session(session)
+                return
         except Exception as exc:
             logger.warning("回写 failed(error field) 失败 snap=%s: %s", snapshot_id, exc)
         # 清空进度 + 落错误类别（前端据 kind 区分「稍后重试」和「改代码」）
@@ -650,7 +705,9 @@ async def _run_prediction_graph(session: "PredictionSession", state: dict) -> No
         return
 
     try:
-        await _transition_status(snapshot_id, "done")
+        if not await _transition_status(snapshot_id, "done"):
+            await _finish_session(session)
+            return
     except Exception as exc:
         logger.warning("回写 done 失败 snap=%s: %s", snapshot_id, exc)
 
@@ -680,22 +737,104 @@ async def _run_prediction_graph(session: "PredictionSession", state: dict) -> No
     await _finish_session(session)
 
 
-async def start_prediction_graph(snapshot_id: str, state: dict) -> "PredictionSession":
-    """创建 PredictionSession 并以后台任务启动图（fire-and-forget，survives disconnect）。
+async def start_prediction_graph(
+    snapshot_id: str, state: dict, *, lease_token: str | None = None,
+) -> "PredictionSession | None":
+    """Start one owner per prediction, even when requests hit different workers.
 
-    由 POST /predict 调用：保存快照行后立即返回，图在后台运行，
-    /stream 只负责 replay event_log + drain 队列。
+    Redis unavailability propagates to the caller: guessing ownership would
+    duplicate market requests and model spend. An occupied lease is a normal
+    attach-to-existing-execution outcome, represented by None.
     """
-    session = PredictionSession(snapshot_id)
-    _SESSIONS[snapshot_id] = session
-    session.start(_run_prediction_graph(session, state))
-    # 注册 Redis 活跃会话（跨 worker 可见，可选）
+    existing = _SESSIONS.get(snapshot_id)
+    if existing and not existing.terminal and lease_token is None:
+        return existing
+    token = lease_token or await prediction_runtime.acquire(snapshot_id)
+    if token is None:
+        return None
+    session = None
     try:
-        from db.redis_state import register_streaming
-        await register_streaming(snapshot_id)
-    except Exception:
-        pass
-    return session
+        snap = await get_prediction_snapshot(snapshot_id)
+        if snap is None or snap.status in (*_TERMINAL_STATUSES, _PAUSED):
+            await prediction_runtime.release(snapshot_id, token)
+            return None
+        if state.get("resume") and snap.status != "queued":
+            if not await _transition_status(snapshot_id, "queued"):
+                await prediction_runtime.release(snapshot_id, token)
+                return None
+            state = {**state, "status": "queued"}
+        session = PredictionSession(snapshot_id)
+        session.lease_token = token
+        _SESSIONS[snapshot_id] = session
+        try:
+            from db.redis_state import register_streaming
+            await register_streaming(snapshot_id)
+        except Exception:
+            logger.exception("注册预测活跃标记失败 pred=%s", snapshot_id)
+        session.start(_run_prediction_graph(session, state))
+        return session
+    except BaseException:
+        if session is not None and _SESSIONS.get(snapshot_id) is session:
+            _SESSIONS.pop(snapshot_id, None)
+        await prediction_runtime.release(snapshot_id, token)
+        raise
+
+
+async def shutdown_prediction_sessions(timeout: float = 10.0) -> int:
+    """Pause this worker's predictions before infrastructure is shut down.
+
+    Set cancellation reasons before the first await so loop teardown cannot
+    mistake a service restart for a user's permanent stop. Other workers' jobs
+    are deliberately not queried or cancelled. If persistence/cleanup stalls,
+    leave the ownership lease to expire instead of freeing a still-running job.
+    """
+    sessions = [session for session in list(_SESSIONS.values()) if not session.terminal]
+    if not sessions:
+        return 0
+    for session in sessions:
+        session.cancel_reason = _CANCEL_PAUSED
+        session._cancel_heartbeat()
+
+    async def pause_and_finish(session):
+        changed = await _transition_status(
+            session.prediction_id, _PAUSED, error_message="服务关闭，已保留完成结果，可点击继续",
+        )
+        if not changed:
+            # Completion/stop may have won the DB race, or persistence failed.
+            # Do not emit a misleading PAUSED event over an unchanged DB state.
+            session.cancel_reason = _CANCEL_LEASE_LOST
+        task = session.graph_task
+        if task and not task.done():
+            task.cancel()
+        if task:
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if not task.cancelled():
+                    raise
+        if not session.terminal:
+            await _finish_session(session)
+        return bool(changed)
+
+    def observe(task):
+        if not task.cancelled() and task.exception() is not None:
+            exc = task.exception()
+            logger.error("预测停机收尾异常", exc_info=(type(exc), exc, exc.__traceback__))
+
+    jobs = [asyncio.create_task(pause_and_finish(session)) for session in sessions]
+    for job in jobs:
+        job.add_done_callback(observe)
+    done, pending = await asyncio.wait(jobs, timeout=max(0.0, timeout))
+    if pending:
+        logger.warning("预测停机收尾超时，%d 个任务等待租约过期恢复", len(pending))
+        for job in pending:
+            job.cancel()
+        # A slow DB pause might have prevented its helper from reaching cancel.
+        for session in sessions:
+            if session.graph_task and not session.graph_task.done():
+                session.graph_task.cancel()
+        await asyncio.sleep(0)
+    return sum(bool(job.result()) for job in done if not job.cancelled() and job.exception() is None)
 
 
 async def stop_prediction(prediction_id: str) -> dict:
@@ -719,6 +858,11 @@ async def stop_prediction(prediction_id: str) -> dict:
             session.stop()  # terminal=True + graph_task.cancel()
         except Exception as exc:
             logger.warning("stop_prediction session.stop 失败 pred=%s: %s", prediction_id, exc)
+    else:
+        try:
+            await prediction_runtime.request_cancel(prediction_id, _CANCEL_STOPPED)
+        except Exception:
+            logger.exception("跨 worker 停止预测信号失败 pred=%s", prediction_id)
 
     # 3. 状态置 stopped（经 PredictionSM，铁律 #6；从任何运行态都可 stop，终态则 no-op）
     try:
@@ -741,14 +885,27 @@ async def discard_session(prediction_id: str) -> bool:
     """
     session = _SESSIONS.pop(prediction_id, None)
     if session is None:
+        if await prediction_runtime.request_cancel(prediction_id, _CANCEL_DELETED):
+            for _ in range(50):
+                if not await prediction_runtime.owned(prediction_id):
+                    return True
+                await asyncio.sleep(0.1)
+            raise RuntimeError("预测仍在停止中，请稍后重试删除")
         return False
     try:
         session.stop()
         # ★ 必须在 stop() 之后覆盖：stop() 内部会把 cancel_reason 设回 _CANCEL_STOPPED，
         #   而 CancelledError 分支要靠它判断"别再写库/发事件了，这行马上要被删"。
         session.cancel_reason = _CANCEL_DELETED
+        if session.graph_task:
+            try:
+                await asyncio.wait_for(asyncio.shield(session.graph_task), timeout=5)
+            except asyncio.CancelledError:
+                if not session.graph_task.cancelled():
+                    raise
     except Exception as exc:
         logger.warning("discard_session 取消失败 pred=%s: %s", prediction_id, exc)
+        raise
     try:
         from db.redis_state import unregister_streaming
         await unregister_streaming(prediction_id)
@@ -810,6 +967,9 @@ async def pause_prediction(prediction_id: str) -> dict:
     if status == _PAUSED:
         return {"ok": True, "prediction_id": prediction_id, "status": _PAUSED}
 
+    # Persist the pause before cancellation. A concurrent reader must never
+    # observe a missing owner with a still-running DB status and restart it.
+    await _transition_status(prediction_id, _PAUSED)
     session = _SESSIONS.get(prediction_id)
     cancelled = False
     if session:
@@ -817,9 +977,8 @@ async def pause_prediction(prediction_id: str) -> dict:
             cancelled = session.request_pause()
         except Exception as exc:
             logger.warning("pause_prediction request_pause 失败 pred=%s: %s", prediction_id, exc)
-
-    # 铁律 #7：先过状态机再写库（pause 从 queued/news_searching/inferring 均合法）
-    await _transition_status(prediction_id, _PAUSED)
+    else:
+        await prediction_runtime.request_cancel(prediction_id, _CANCEL_PAUSED)
 
     completed, remaining = remaining_dimensions(snap)
     logger.info(
@@ -836,70 +995,66 @@ async def pause_prediction(prediction_id: str) -> dict:
 
 
 async def resume_prediction(prediction_id: str) -> dict:
-    """从 paused 续跑：重启图，跳过已完成维度。
+    """Resume under an ownership lease, then recheck DB state before mutation.
 
-    转换事件按**剩余工作量**选（三个独立单目标事件，见 fsm/prediction.py）：
-      还有维度没跑完 → news_searching（resume_news）
-      维度全跑完了   → inferring（resume_infer）—— 图仍从 preflight 走，但 news_search 节点
-                       会发现"剩余 0 维"，一次外部调用都不发直接过
-      快照里没有任何维度结果 → queued（resume）：整单重来
-    图本身没有 checkpointer，永远从 START 重跑；"跳过已完成"由 news_search 节点按 DB 做差实现
-    （state["resume"]=True 触发），不靠图的记忆。
+    Competing resume requests must not cancel each other's newly started graph
+    or change state before knowing which worker owns this execution.
     """
     snap = await get_prediction_snapshot(prediction_id)
     if snap is None:
         return {"ok": False, "prediction_id": prediction_id, "status": "", "error": "预测任务不存在"}
-
-    status = snap.status or "queued"
-    if status != _PAUSED:
-        return {"ok": False, "prediction_id": prediction_id, "status": status,
-                "error": f"任务当前状态为 {status}，只有 paused 才能继续"}
-
-    completed, remaining = remaining_dimensions(snap)
-    if not completed:
-        target = "queued"          # 一个维度都没跑完 → 整单重来
-    elif remaining:
-        target = "news_searching"  # 还有维度要跑 → 续跑资讯阶段
-    else:
-        target = "inferring"       # 维度全跑完 → 直接进推理
-
-    # 旧 session（已 cancel）残留在注册表里会让 stream_predict 走 drain 空队列 → 前端干等
-    old = _SESSIONS.pop(prediction_id, None)
-    if old:
-        old.terminal = True
-        old._cancel_heartbeat()
-
-    # 上一轮若曾发过 Redis stop 信号（用户先 stop 又改主意…），清掉再跑，免得刚起就被掐
+    if snap.status != _PAUSED:
+        return {"ok": False, "prediction_id": prediction_id, "status": snap.status,
+                "error": f"任务当前状态为 {snap.status}，只有 paused 才能继续"}
     try:
-        from db.redis_state import clear_stop
-        await clear_stop(prediction_id)
-    except Exception as exc:
-        logger.debug("resume_prediction clear_stop 失败 pred=%s: %s", prediction_id, exc)
+        token = await prediction_runtime.acquire(prediction_id)
+    except Exception:
+        logger.exception("预测恢复获取租约失败 pred=%s", prediction_id)
+        return {"ok": False, "prediction_id": prediction_id, "status": _PAUSED,
+                "error": "预测服务暂时不可用，请稍后重试"}
+    if token is None:
+        return {"ok": False, "prediction_id": prediction_id, "status": _PAUSED,
+                "error": "任务正在恢复或暂停收尾，请稍后重试"}
 
-    # 铁律 #7：先过状态机（paused → target，走 resume/resume_news/resume_infer）再写库
-    await _transition_status(prediction_id, target)
-
-    state = build_initial_state(
-        snapshot_id=prediction_id,
-        client_id=snap.client_id,
-        user_id=snap.user_id or "",
-        criteria=snap.criteria or {},
-        status=target,
-        resume=True,               # ★ news_search 节点据此读回已完成维度、只跑剩余
-    )
-    await start_prediction_graph(prediction_id, state)
-
-    logger.info(
-        "预测已续跑 pred=%s → %s 已完成=%d 剩余=%d(%s)",
-        prediction_id, target, len(completed), len(remaining), remaining,
-    )
-    return {
-        "ok": True,
-        "prediction_id": prediction_id,
-        "status": target,
-        "completed_dimensions": completed,
-        "remaining_dimensions": remaining,
-    }
+    handed_off = False
+    try:
+        snap = await get_prediction_snapshot(prediction_id)
+        if snap is None or snap.status != _PAUSED:
+            return {"ok": False, "prediction_id": prediction_id,
+                    "status": snap.status if snap else "",
+                    "error": "任务状态已变化，请刷新后重试"}
+        completed, remaining = remaining_dimensions(snap)
+        target = "queued" if not completed else "news_searching" if remaining else "inferring"
+        if not await _transition_status(prediction_id, target, allow_resume=True):
+            return {"ok": False, "prediction_id": prediction_id, "status": _PAUSED,
+                    "error": "无法恢复任务状态，请稍后重试"}
+        try:
+            from db.redis_state import clear_stop
+            await clear_stop(prediction_id)
+        except Exception:
+            logger.exception("清理旧预测停止信号失败 pred=%s", prediction_id)
+        old = _SESSIONS.get(prediction_id)
+        if old and old.graph_task and not old.graph_task.done():
+            # Lease acquisition proves this old task no longer owns the job.
+            old.cancel_reason = _CANCEL_LEASE_LOST
+            old.graph_task.cancel()
+            old._cancel_heartbeat()
+        state = build_initial_state(
+            snapshot_id=prediction_id, client_id=snap.client_id,
+            user_id=snap.user_id or "", criteria=snap.criteria or {},
+            status=target, resume=True,
+        )
+        started = await start_prediction_graph(prediction_id, state, lease_token=token)
+        handed_off = started is not None
+        if not handed_off:
+            return {"ok": False, "prediction_id": prediction_id, "status": target,
+                    "error": "任务状态已变化，请刷新后重试"}
+        logger.info("预测已续跑 pred=%s 已完成=%d 剩余=%d", prediction_id, len(completed), len(remaining))
+        return {"ok": True, "prediction_id": prediction_id, "status": target,
+                "completed_dimensions": completed, "remaining_dimensions": remaining}
+    finally:
+        if not handed_off:
+            await prediction_runtime.release(prediction_id, token)
 
 
 # ── PRIMARY：SSE 流式 + RESUME（replay event_log → drain 队列 / 重跑）─────────
@@ -908,99 +1063,99 @@ async def stream_predict(
     snapshot_id: str,
     after_event_id: int = 0,
 ) -> AsyncGenerator[dict, None]:
-    """PRIMARY 流式路径。yield SSE dict，由路由层包成 text/event-stream。
+    """Read a private durable cursor per subscriber; reconnect never steals events.
 
-    协议（铁律 #3：事件类型来自 SSEEventType 枚举）。除 ping 外每条都带 event_log 自增 `id`，
-    前端用它推进 after_event_id 游标：
-      {"event":"thinking"/"content","text":"...","id":N}   # emit_thinking 映射
-      {"event":"news_item", ..., "id":N}                    # 每维资讯
-      {"event":"forecast","forecast":{...},"id":N}         # 预测数值
-      {"event":"inflection","points":[...],"id":N}         # 拐点
-      {"event":"prediction_progress","phase":"...", ...}   # 阶段进度（phase/label/index/total/detail）
-      {"event":"done", ..., "id":N}                         # 完成（含最终字段）
-      {"event":"error","message":"...","error_kind":"..."} # 失败（kind 供前端分流处置）
-      {"event":"ping"}                                      # 心跳：不入 event_log、不带 id、不推游标
-
-    RESUME 流程（修复刷新丢失部分状态）：
-      1. REPLAY：从 event_log 读取 after_event_id 之后的所有事件并回放。
-      2. LIVE：
-         - session 存在且未终态 → drain 实时队列（skip 已 replay 的 eid）。
-         - DB 终态但 replay 没抓到（race）→ 补抓 event_log 尾部。
-         - 无 session + 非终态（worker 重启，图已死）→ 重置 queued 重跑。
+    Local and remote-worker subscriptions share this path. Missing local state
+    is not proof of an interrupted job: only acquiring the distributed lease
+    permits recovery. Each database page is drained before checking completion.
     """
-    # ── 1. REPLAY：从 event_log 回放遗漏事件 ──────────────────────────────
-    events = await get_events_since(
-        snapshot_id, after_id=after_event_id, message_id=snapshot_id,
-    )
     last_id = after_event_id
-    has_terminal = False
-    for evt in events:
-        eid = evt.get("id") or 0
-        if eid > last_id:
-            last_id = eid
-        if evt.get("event_type") in _STREAM_TERMINAL_EVENTS:
-            has_terminal = True
-        yield _decode_event_row(evt)
-    if has_terminal:
-        return
-
-    # ── 2. LIVE ───────────────────────────────────────────────────────────
-    snap = await get_prediction_snapshot(snapshot_id)
-    if snap is None:
-        yield {"event": SSEEventType.ERROR.value, "message": "预测任务不存在"}
-        return
-
-    snap_status = snap.status or "queued"
-    session = _SESSIONS.get(snapshot_id)
-
-    if session and not session.terminal:
-        # 实时 drain（skip 已 replay 的 eid，避免重复）
-        async for ev in session.drain(skip_eid=last_id):
-            yield ev
-        return
-
-    if snap_status in _TERMINAL_STATUSES or snap_status == _PAUSED:
-        # DB 终态（或已暂停）但 replay 没抓到 done/error/paused（race）→ 补抓 event_log 尾部。
-        # ★ paused 必须在这里收口：它是"非终态"，若掉进下面的重跑分支，用户一刷新页面
-        #   暂停就被自动撤销、整单重跑 —— 续跑只能由显式的 POST /resume 触发。
-        tail = await get_events_since(
+    last_ping = time.monotonic()
+    while True:
+        events = await get_events_since(
             snapshot_id, after_id=last_id, message_id=snapshot_id,
         )
-        for evt in tail:
-            yield _decode_event_row(evt)
-        if snap_status == _PAUSED and not any(
-            e.get("event_type") == SSEEventType.PAUSED.value for e in tail
-        ):
-            # pause 的 cancel 落在 replay 与 tail 之间时事件还没落库 —— 补一条，
-            # 否则前端只看到流无声结束（→ 判成连接断开 → 退避重连）
-            yield {"event": SSEEventType.PAUSED.value, "status": _PAUSED,
-                   "message": "预测已暂停（已完成的维度已保留，可继续）"}
-        return
+        terminal = False
+        for row in events:
+            eid = row.get("id") or 0
+            if eid <= last_id:
+                continue
+            last_id = eid
+            kind = row.get("event_type")
+            if kind == SSEEventType.PAUSED.value:
+                # A previous run's pause is historical after an explicit resume.
+                # Sending it again would make the browser close the new stream.
+                paused_snap = await get_prediction_runtime_snapshot(snapshot_id)
+                if paused_snap and paused_snap.status != _PAUSED:
+                    continue
+            yield _decode_event_row(row)
+            terminal = kind in _STREAM_TERMINAL_EVENTS
+        if terminal:
+            return
+        if events:
+            # get_events_since is paginated. Do not stop after page one merely
+            # because the snapshot has already reached its final status.
+            continue
 
-    # 无 session + 非终态（worker 重启，图已死）→ 重置 queued 重跑。
-    # 注：此为恢复操作（系统级），直接写库；业务终态 done/failed 走 _transition_status。
-    if snap_status in _RUNNING_STATUSES and snap_status != "queued":
-        logger.info(
-            "stream_predict 检测到无 session 非终态 snap=%s status=%s → 重置 queued 重跑",
-            snapshot_id, snap_status,
-        )
-        try:
-            await update_prediction_status(snapshot_id, "queued")
-        except Exception as exc:
-            logger.warning("重置 queued 失败 snap=%s: %s", snapshot_id, exc)
+        snap = await get_prediction_runtime_snapshot(snapshot_id)
+        if snap is None:
+            yield {"event": SSEEventType.ERROR.value, "message": "预测任务不存在"}
+            return
+        status = snap.status or "queued"
+        if status in (*_TERMINAL_STATUSES, _PAUSED):
+            # Catch the race where the final event was persisted after this
+            # iteration's read. If unavailable, the DB status still ends SSE.
+            tail = await get_events_since(
+                snapshot_id, after_id=last_id, message_id=snapshot_id,
+            )
+            if tail:
+                continue
+            event_type = {
+                "done": SSEEventType.DONE,
+                "failed": SSEEventType.ERROR,
+                "stopped": SSEEventType.STOPPED,
+                _PAUSED: SSEEventType.PAUSED,
+            }[status]
+            yield {
+                "event": event_type.value, "status": status,
+                "message": getattr(snap, "error_message", "") or (
+                    "预测已暂停（已完成的维度已保留，可继续）" if status == _PAUSED else "预测已结束"
+                ),
+            }
+            return
 
-    state = build_initial_state(
-        snapshot_id=snapshot_id,
-        client_id=snap.client_id,
-        user_id=snap.user_id or "",
-        criteria=snap.criteria or {},
-        status="queued",
-        # worker 重启重跑也复用增量落库的成果：上一轮已跑完的维度不再烧一遍 Tavily/LLM
-        resume=True,
-    )
-    session = await start_prediction_graph(snapshot_id, state)
-    async for ev in session.drain(skip_eid=last_id):
-        yield ev
+        session = _SESSIONS.get(snapshot_id)
+        if session is None or session.terminal:
+            try:
+                if not await prediction_runtime.owned(snapshot_id):
+                    state = build_initial_state(
+                        snapshot_id=snapshot_id,
+                        client_id=snap.client_id,
+                        user_id=snap.user_id or "",
+                        criteria=snap.criteria or {},
+                        status=status,
+                        resume=True,
+                    )
+                    session = await start_prediction_graph(snapshot_id, state)
+            except Exception:
+                logger.exception("预测恢复暂不可用 pred=%s", snapshot_id)
+                yield {"event": SSEEventType.ERROR.value,
+                       "message": "预测服务暂时无法恢复，请稍后重试；已完成的结果已保存"}
+                return
+        if time.monotonic() - last_ping >= HEARTBEAT_INTERVAL_SECONDS:
+            yield _ping_event()
+            last_ping = time.monotonic()
+        if session and not session.terminal:
+            session.changed.clear()
+            try:
+                await asyncio.wait_for(session.changed.wait(), timeout=0.5)
+                # Coalesce token bursts into one DB read instead of polling
+                # once per token per open browser tab.
+                await asyncio.sleep(0.05)
+            except asyncio.TimeoutError:
+                pass
+        else:
+            await asyncio.sleep(0.5)
 
 
 def _decode_event_row(evt: dict) -> dict:

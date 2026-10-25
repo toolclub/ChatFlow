@@ -73,18 +73,18 @@ _STREAMING_KEY_PREFIX = "chatflow:streaming:"
 _STREAMING_TTL = 600  # 10 分钟 TTL（心跳续期，超时自动清理）
 
 
-async def register_streaming(conv_id: str, worker_id: str = "") -> None:
+async def register_streaming(conv_id: str, worker_id: str = "", ttl_seconds: int = _STREAMING_TTL) -> None:
     """注册当前对话为活跃流式会话（跨 worker 可见）。"""
     r = _get_redis()
     key = f"{_STREAMING_KEY_PREFIX}{conv_id}"
-    await r.set(key, worker_id or str(time.time()), ex=_STREAMING_TTL)
+    await r.set(key, worker_id or str(time.time()), ex=ttl_seconds)
 
 
-async def heartbeat_streaming(conv_id: str) -> None:
+async def heartbeat_streaming(conv_id: str, ttl_seconds: int = _STREAMING_TTL) -> None:
     """续期活跃会话 TTL（心跳时调用）。"""
     r = _get_redis()
     key = f"{_STREAMING_KEY_PREFIX}{conv_id}"
-    await r.expire(key, _STREAMING_TTL)
+    await r.expire(key, ttl_seconds)
 
 
 async def unregister_streaming(conv_id: str) -> None:

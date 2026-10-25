@@ -65,6 +65,12 @@ class Settings(BaseSettings):
     search_model: str
     route_model_map: dict[str, str]
 
+    # Per-role OpenAI-compatible request options. Role values override defaults;
+    # use max_completion_tokens instead of max_tokens for providers requiring it.
+    # Example: {"router":{"max_tokens":512,"temperature":0},
+    #           "chat":{"max_completion_tokens":8192}}
+    llm_role_options: dict[str, dict[str, Any]] = {}
+
     # ── 上下文窗口 ────────────────────────────────────────────────────────────
     chat_num_ctx: int
     summary_num_ctx: int

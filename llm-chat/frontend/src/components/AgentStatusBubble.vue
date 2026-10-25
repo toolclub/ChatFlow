@@ -17,6 +17,10 @@ interface PhaseConfig {
 }
 
 const PHASE: Record<string, PhaseConfig> = {
+  reconnecting: {
+    label: '恢复连接', desc: '连接暂时中断，正在接回本轮输出…',
+    color: '#FF9736', bg: 'rgba(255,151,54,0.06)', pulse: '#FFBC73',
+  },
   vision_analyze: {
     label: '图像解析',
     desc:  '正在解析图像内容，理解视觉信息...',

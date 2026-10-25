@@ -1,5 +1,6 @@
+import { consumeChatStream } from './chatStream'
 import type {
-  ClarificationData, FileArtifact, PlanStep, ThinkingEvent, ToolHistoryEvent, UploadedFile,
+  ClarificationData, FileArtifact, PlanStep, ThinkingEvent, ToolHistoryEvent, UploadedFile, ToolDisplayMode,
   QuantProviderInfo, QuantScreenCriteria, QuantScreenResult,
   PredictionRecord, PredictionSnapshot, NewsItem, NewsDimension, Forecast,
   PredictionProgress, MarketDataErrorKind, PredictionMarket,
@@ -157,18 +158,6 @@ export async function patch<T>(path: string, body: any): Promise<T> {
   return res.json()
 }
 
-function commonHeaders(): Record<string, string> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'X-Client-ID': getClientId(),
-  }
-  const token = localStorage.getItem('cf_access_token')
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`
-  }
-  return headers
-}
-
 export async function fetchModels(): Promise<string[]> {
   const res = await fetchWithAuth(`${API_BASE}/api/models`)
   const data = await res.json()
@@ -182,7 +171,7 @@ export async function fetchConversations() {
 }
 
 export async function createConversation(title: string = '新对话') {
-  return post('/api/conversations', { title })
+  return post<{ id: string }>('/api/conversations', { title })
 }
 
 export async function fetchConversation(id: string) {
@@ -234,8 +223,6 @@ export async function stopStreamWithToken(
       }),
       signal: controller.signal,
     })
-    clearTimeout(timeoutId)
-
     if (!res.ok) return null
 
     // 读取 SSE 流获取 stop_confirmed
@@ -269,9 +256,11 @@ export async function stopStreamWithToken(
     }
 
     return null
-  } catch (e) {
-    clearTimeout(timeoutId)
+  } catch {
     return null
+  } finally {
+    clearTimeout(timeoutId)
+    controller.abort()
   }
 }
 
@@ -339,6 +328,10 @@ export async function fetchArtifactBlob(artifactId: number): Promise<Blob> {
 /** 获取对话的完整状态（含消息详情、计划、产物等，供刷新后恢复） */
 export async function fetchFullState(convId: string) {
   const res = await fetchWithAuth(`${API_BASE}/api/conversations/${convId}/full-state`)
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}))
+    throw new Error(error.detail || `加载对话失败 (${res.status})`)
+  }
   return res.json()
 }
 
@@ -353,9 +346,9 @@ export async function resumeStream(
   convId: string,
   lastIndex: number,
   onChunk: (text: string) => void,
-  onToolCall: (name: string, input: Record<string, unknown>, displayMode?: string) => void,
+  onToolCall: (name: string, input: Record<string, unknown>, displayMode?: ToolDisplayMode, toolRunId?: string) => void,
   onToolResult: (name: string, data: Record<string, unknown>) => void,
-  onSearchItem: (item: { url: string; title: string; status: string }) => void,
+  onSearchItem: (item: { url: string; title: string; status: string; tool_run_id?: string }) => void,
   onStatus: (status: string, model?: string) => void,
   onRoute: (model: string, intent: string) => void,
   onPlanGenerated: (steps: PlanStep[]) => void,
@@ -364,79 +357,53 @@ export async function resumeStream(
   onStopped: () => void,
   signal?: AbortSignal,
   onThinking?: (ev: ThinkingEvent) => void,
-  onSandboxOutput?: (toolName: string, stream: string, text: string) => void,
+  onSandboxOutput?: (toolName: string, stream: string, text: string, toolRunId?: string) => void,
   onFileArtifact?: (artifact: FileArtifact) => void,
-  onToolCallStart?: (name: string, displayMode?: string) => void,
-  onResumeContext?: (userMessage: string, images: string[]) => void,
+  onToolCallStart?: (name: string, displayMode?: ToolDisplayMode) => void,
+  _onResumeContext?: (userMessage: string, images: string[]) => void,
   messageId?: string,
   onToolCallArgs?: (text: string) => void,
   onClarification?: (data: ClarificationData) => void,
   onInterrupted?: () => void,
 ) {
-  let url = `${API_BASE}/api/conversations/${convId}/resume?after_event_id=${lastIndex}`
-  if (messageId) url += `&message_id=${encodeURIComponent(messageId)}`
-  const res = await fetchWithAuth(url, {
+  const result = await consumeChatStream({
+    initial: () => reconnect(lastIndex, messageId || ''),
+    initialRequestSafe: true,
+    reconnect,
+    cursor: lastIndex,
+    messageId,
     signal,
+    onEvent: dispatch,
+    onConnection: (reconnecting) => onStatus(reconnecting ? 'reconnecting' : 'connected'),
   })
+  if (result === 'done') onDone()
+  else if (result === 'stopped') onStopped()
+  else onInterrupted?.()
 
-  const reader = res.body?.getReader()
-  const decoder = new TextDecoder()
-  if (!reader) return
-
-  let lastDataTime = Date.now()
-  let buffer = ''
-  let streamDone = false
-
-  function processLine(line: string) {
-    if (!line.startsWith('data: ')) return
-    try {
-      const data = JSON.parse(line.slice(6))
-      if (data.thinking) {
-        const ev = normalizeThinking(data.thinking)
-        if (ev) onThinking?.(ev)
-      }
-      if (data.clarification)   onClarification?.(data.clarification)
-      if (data.sandbox_output)  onSandboxOutput?.(data.sandbox_output.tool_name, data.sandbox_output.stream, data.sandbox_output.text)
-      if (data.file_artifact)   onFileArtifact?.(data.file_artifact as FileArtifact)
-      if (data.tool_call_start) onToolCallStart?.(data.tool_call_start.name, data.tool_call_start.display_mode)
-      if (data.tool_call_args)     { lastDataTime = Date.now(); onToolCallArgs?.(data.tool_call_args.text || '') }
-      if (data.content)         onChunk(data.content)
-      if (data.tool_call)       onToolCall(data.tool_call.name, data.tool_call.input, data.tool_call.display_mode)
-      if (data.tool_result)     onToolResult(data.tool_result.name, data.tool_result)
-      if (data.search_item)     onSearchItem(data.search_item)
-      if (data.status)          onStatus(data.status, data.model)
-      if (data.route)           onRoute(data.route.model, data.route.intent)
-      if (data.plan_generated)  onPlanGenerated(data.plan_generated.steps)
-      if (data.reflection)      onReflection(data.reflection.content, data.reflection.decision)
-      if (data.error)           { onChunk('\n\n⚠️ ' + data.error); if (data.can_continue) onInterrupted?.() }
-      if (data.ping)            lastDataTime = Date.now()
-      if (data.done)            { streamDone = true; try { onDone() } catch(e) { console.error('[SSE] onDone error', e) } }
-      if (data.stopped)         { streamDone = true; try { onStopped() } catch(e) { console.error('[SSE] onStopped error', e) } }
-    } catch {}
+  function reconnect(cursor: number, roundId: string) {
+    const query = new URLSearchParams({ after_event_id: String(cursor) })
+    if (roundId) query.set('message_id', roundId)
+    return fetchWithAuth(`${API_BASE}/api/conversations/${convId}/resume?${query}`, { signal })
   }
-
-  try {
-    while (true) {
-      let done: boolean
-      let value: Uint8Array | undefined
-      try {
-        const result = await reader.read()
-        done = result.done
-        value = result.value
-      } catch {
-        break
-      }
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() ?? ''
-      for (const line of lines) processLine(line)
+  function dispatch(data: Record<string, any>) {
+    if (data.thinking) {
+      const ev = normalizeThinking(data.thinking)
+      if (ev) onThinking?.(ev)
     }
-    if (buffer.trim()) processLine(buffer.trim())
-  } finally {}
-
-  if (!streamDone) {
-    if (signal?.aborted) onStopped()
+    if (data.clarification) onClarification?.(data.clarification)
+    if (data.sandbox_output) onSandboxOutput?.(data.sandbox_output.tool_name, data.sandbox_output.stream, data.sandbox_output.text, data.sandbox_output.tool_run_id)
+    if (data.file_artifact) onFileArtifact?.(data.file_artifact)
+    if (data.tool_call_start) onToolCallStart?.(data.tool_call_start.name, data.tool_call_start.display_mode)
+    if (data.tool_call_args) onToolCallArgs?.(data.tool_call_args.text || '')
+    if (data.content) onChunk(data.content)
+    if (data.tool_call) onToolCall(data.tool_call.name, data.tool_call.input, data.tool_call.display_mode, data.tool_call.tool_run_id)
+    if (data.tool_result) onToolResult(data.tool_result.name, data.tool_result)
+    if (data.search_item) onSearchItem(data.search_item)
+    if (data.status) onStatus(data.status, data.model)
+    if (data.route) onRoute(data.route.model, data.route.intent)
+    if (data.plan_generated) onPlanGenerated(data.plan_generated.steps)
+    if (data.reflection) onReflection(data.reflection.content, data.reflection.decision)
+    if (data.error) onChunk('\n\n⚠️ ' + data.error)
   }
 }
 
@@ -446,11 +413,11 @@ export async function sendMessage(
   model: string,
   images: string[],
   agentMode: boolean,
-  forcePlan?: Record<string, unknown>[] | null,
+  forcePlan: Record<string, unknown>[] | null | undefined,
   onChunk: (text: string) => void,
-  onToolCall: (name: string, input: Record<string, unknown>, displayMode?: string) => void,
+  onToolCall: (name: string, input: Record<string, unknown>, displayMode?: ToolDisplayMode, toolRunId?: string) => void,
   onToolResult: (name: string, data: Record<string, unknown>) => void,
-  onSearchItem: (item: { url: string; title: string; status: string }) => void,
+  onSearchItem: (item: { url: string; title: string; status: string; tool_run_id?: string }) => void,
   onStatus: (status: string, model?: string) => void,
   onRoute: (model: string, intent: string) => void,
   onPlanGenerated: (steps: PlanStep[]) => void,
@@ -461,9 +428,9 @@ export async function sendMessage(
   onThinking?: (ev: ThinkingEvent) => void,
   onClarification?: (data: ClarificationData) => void,
   onInterrupted?: () => void,
-  onSandboxOutput?: (toolName: string, stream: string, text: string) => void,
+  onSandboxOutput?: (toolName: string, stream: string, text: string, toolRunId?: string) => void,
   onFileArtifact?: (artifact: FileArtifact) => void,
-  onToolCallStart?: (name: string, displayMode?: string) => void,
+  onToolCallStart?: (name: string, displayMode?: ToolDisplayMode) => void,
   onToolCallArgs?: (text: string) => void,
   fileIds?: number[],
   contextRefs?: {type: string, id: string}[],
@@ -487,96 +454,42 @@ export async function sendMessage(
     body.context_refs = contextRefs
   }
 
-  const res = await fetchWithAuth(`${API_BASE}/api/chat`, {
-    method: 'POST',
-    body: JSON.stringify(body),
+  const result = await consumeChatStream({
+    initial: () => fetchWithAuth(`${API_BASE}/api/chat`, {
+      method: 'POST', body: JSON.stringify(body), signal,
+    }),
+    reconnect: (cursor, roundId) => {
+      const query = new URLSearchParams({ after_event_id: String(cursor) })
+      if (roundId) query.set('message_id', roundId)
+      return fetchWithAuth(`${API_BASE}/api/conversations/${conversationId}/resume?${query}`, { signal })
+    },
     signal,
+    onEvent: dispatch,
+    onConnection: (reconnecting) => onStatus(reconnecting ? 'reconnecting' : 'connected'),
   })
+  if (result === 'done') onDone()
+  else if (result === 'stopped') onStopped()
+  else onInterrupted?.()
 
-  const reader = res.body?.getReader()
-  const decoder = new TextDecoder()
-
-  if (!reader) return
-
-  const IDLE_TIMEOUT_MS = 300_000  // 5 分钟：生成大 HTML / 长文档时 LLM 可能持续输出 2~3 分钟
-  let lastDataTime = Date.now()
-  let buffer = ''
-  let streamDone = false
-
-  // 用 setInterval 独立检查空闲超时，完全不干扰 reader.read() 的 await
-  const idleTimer = setInterval(() => {
-    if (Date.now() - lastDataTime > IDLE_TIMEOUT_MS) {
-      console.warn('[SSE] 超过 120s 无数据，主动断开')
-      reader.cancel()
+  function dispatch(data: Record<string, any>) {
+    if (data.thinking) {
+      const ev = normalizeThinking(data.thinking)
+      if (ev) onThinking?.(ev)
     }
-  }, 5000)
-
-  function processLine(line: string) {
-    if (!line.startsWith('data: ')) return
-    try {
-      const data = JSON.parse(line.slice(6))
-      // ── 诊断：追踪 tool_call 和 sandbox_output 的处理 ──
-      if (data.tool_call) console.log('[SSE诊断] tool_call 到达', data.tool_call.name)
-      if (data.sandbox_output) console.log('[SSE诊断] sandbox_output 到达', data.sandbox_output.tool_name, data.sandbox_output.text?.slice(0, 50))
-      if (data.thinking) {
-        const ev = normalizeThinking(data.thinking)
-        if (ev) onThinking?.(ev)
-      }
-      if (data.clarification)  onClarification?.(data.clarification)
-      if (data.sandbox_output) onSandboxOutput?.(data.sandbox_output.tool_name, data.sandbox_output.stream, data.sandbox_output.text)
-      if (data.file_artifact)    onFileArtifact?.(data.file_artifact as FileArtifact)
-      if (data.tool_call_start) onToolCallStart?.(data.tool_call_start.name, data.tool_call_start.display_mode)
-      if (data.tool_call_args)     { lastDataTime = Date.now(); onToolCallArgs?.(data.tool_call_args.text || '') }
-      if (data.content)         onChunk(data.content)
-      if (data.tool_call)      onToolCall(data.tool_call.name, data.tool_call.input, data.tool_call.display_mode)
-      if (data.tool_result)    onToolResult(data.tool_result.name, data.tool_result)
-      if (data.search_item)    onSearchItem(data.search_item)
-      if (data.status)         onStatus(data.status, data.model)
-      if (data.route)          onRoute(data.route.model, data.route.intent)
-      if (data.plan_generated) onPlanGenerated(data.plan_generated.steps)
-      if (data.reflection)     onReflection(data.reflection.content, data.reflection.decision)
-      if (data.error)          { onChunk('\n\n⚠️ ' + data.error); if (data.can_continue) onInterrupted?.() }
-      if (data.ping)           lastDataTime = Date.now()
-      // done/stopped 单独 try-catch，确保 streamDone 标记不丢失
-      if (data.done)           { streamDone = true; try { onDone() } catch(e) { console.error('[SSE] onDone error', e) } }
-      if (data.stopped)        { streamDone = true; try { onStopped() } catch(e) { console.error('[SSE] onStopped error', e) } }
-    } catch {}
-  }
-
-  try {
-    while (true) {
-      let done: boolean
-      let value: Uint8Array | undefined
-      try {
-        const result = await reader.read()
-        done = result.done
-        value = result.value
-      } catch {
-        break
-      }
-      if (done) break
-
-      lastDataTime = Date.now()
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() ?? ''
-      for (const line of lines) processLine(line)
-    }
-    // 处理残留 buffer（最后一个事件可能没以 \n 结尾）
-    if (buffer.trim()) processLine(buffer.trim())
-  } finally {
-    clearInterval(idleTimer)
-  }
-
-  if (!streamDone) {
-    // 区分"用户主动 Stop"和"连接意外断开"：
-    //   signal.aborted → 用户点了停止按钮，走 onStopped（不显示 Continue）
-    //   其他情况      → 网络中断 / 服务端取消，走 onInterrupted（显示 Continue 按钮）
-    if (signal?.aborted) {
-      onStopped()
-    } else {
-      onInterrupted?.()
-    }
+    if (data.clarification) onClarification?.(data.clarification)
+    if (data.sandbox_output) onSandboxOutput?.(data.sandbox_output.tool_name, data.sandbox_output.stream, data.sandbox_output.text, data.sandbox_output.tool_run_id)
+    if (data.file_artifact) onFileArtifact?.(data.file_artifact)
+    if (data.tool_call_start) onToolCallStart?.(data.tool_call_start.name, data.tool_call_start.display_mode)
+    if (data.tool_call_args) onToolCallArgs?.(data.tool_call_args.text || '')
+    if (data.content) onChunk(data.content)
+    if (data.tool_call) onToolCall(data.tool_call.name, data.tool_call.input, data.tool_call.display_mode, data.tool_call.tool_run_id)
+    if (data.tool_result) onToolResult(data.tool_result.name, data.tool_result)
+    if (data.search_item) onSearchItem(data.search_item)
+    if (data.status) onStatus(data.status, data.model)
+    if (data.route) onRoute(data.route.model, data.route.intent)
+    if (data.plan_generated) onPlanGenerated(data.plan_generated.steps)
+    if (data.reflection) onReflection(data.reflection.content, data.reflection.decision)
+    if (data.error) onChunk('\n\n⚠️ ' + data.error)
   }
 }
 
@@ -637,10 +550,10 @@ export async function fetchQuantSnapshot(snapshotId: string, adminKey?: string):
   return res.json()
 }
 
-export async function fetchStockChart(symbol: string, days: number = 240, adminKey?: string): Promise<any> {
+export async function fetchStockChart(symbol: string, days: number = 240, adminKey?: string, signal?: AbortSignal): Promise<any> {
   const headers: Record<string, string> = {}
   if (adminKey) headers['X-Admin-Key'] = adminKey
-  const res = await fetchWithAuth(`${API_BASE}/api/quant/stock/${symbol}/chart?days=${days}`, { headers })
+  const res = await fetchWithAuth(`${API_BASE}/api/quant/stock/${symbol}/chart?days=${days}`, { headers, signal })
   if (!res.ok) throw new Error(`获取图表失败: ${res.status}`)
   return res.json()
 }

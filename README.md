@@ -634,6 +634,7 @@ ChatFlow/
 | 文档 | 说明 |
 |------|------|
 | [spec.md](spec.md) | 开发规格、铁律、协议、踩坑记录 |
+| [docs/reliability-review-2026-10-25.md](docs/reliability-review-2026-10-25.md) | 本地卡顿/恢复修复、验证方式与 Codex 源码对照 |
 | [docs/pain-points-analysis.md](docs/pain-points-analysis.md) | 痛点分析与 2.0 升级路线图 |
 | [docs/ux-design.md](docs/ux-design.md) | UX 设计分析与改进建议 |
 | [llm-chat/backend/README.md](llm-chat/backend/README.md) | 后端架构详解 |

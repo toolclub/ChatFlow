@@ -217,30 +217,8 @@ class CallModelAfterToolNode(BaseNode):
 
     @staticmethod
     async def _check_last_tool_failed(state: GraphState) -> bool:
-        """
-        从 tool_executions 表查询最近一次工具调用的状态。
-
-        DB-first：通过 status='error' 判断失败，不依赖 ToolMessage 文本中的关键词匹配。
-        降级：DB 查询失败时回退到文本关键词匹配（COMPAT）。
-        """
-        conv_id = state.get("conv_id", "")
-        if not conv_id:
-            return False
-        try:
-            from db.tool_store import get_tool_executions_for_conv
-            tool_execs = await get_tool_executions_for_conv(conv_id)
-            if tool_execs:
-                last_exec = tool_execs[-1]
-                return last_exec.get("status") == "error"
-        except Exception:
-            pass
-        # COMPAT: DB 查询失败时降级到文本关键词匹配
-        messages = list(state.get("messages", []))
-        for m in reversed(messages):
-            if type(m).__name__ == "ToolMessage":
-                content_str = str(getattr(m, "content", ""))
-                return any(kw in content_str for kw in ("exit_code=1", "执行失败", "Traceback"))
-        return False
+        """DB execution status is authoritative, with structured-message fallback."""
+        return await BaseNode._latest_tool_batch_failed(state)
 
     # 视觉调用超时（秒）：GLM-4.6V 推理模式较慢
     _VISION_TIMEOUT = 300.0

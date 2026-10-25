@@ -13,6 +13,7 @@
 """
 import asyncio
 import logging
+import time
 import uuid
 
 from sqlalchemy import delete as sa_delete
@@ -110,6 +111,7 @@ class ConversationService:
         if not conv_data:
             return {"error": "对话不存在"}
 
+        conv_data = await self.reconcile_stream_state(conv_id, conv_data)
         from db.plan_store import get_all_plans_for_conv
         tool_execs, all_plans, artifacts, last_event_id = await asyncio.gather(
             get_tool_executions_for_conv(conv_id),
@@ -118,7 +120,7 @@ class ConversationService:
             get_latest_event_id(conv_id),
         )
 
-        has_streaming = any(
+        has_streaming = conv_data.get("status") == "streaming" and any(
             not m.get("stream_completed", True)
             for m in conv_data["messages"]
             if m.get("role") == "assistant"
@@ -154,18 +156,40 @@ class ConversationService:
             "plans": all_plans,                            # 新增：所有计划，供前端按 message_id 匹配
             "artifacts": orphan_artifacts,
             "has_streaming": has_streaming,
+            "can_continue": conv_data.get("status") in {"active", "error"} and any(
+                m.get("role") == "assistant" for m in conv_data["messages"]
+            ),
             "last_event_id": last_event_id,
         }
 
     # ── 流式状态 ──────────────────────────────────────────────────────────────
 
     async def get_streaming_status(self, conv_id: str) -> dict:
-        conv_data = await memory_store.db_get_conversation(conv_id)
+        conv_data = await memory_store.db_get_conversation_meta(conv_id)
         if not conv_data:
             return {"streaming": False, "last_event_id": 0}
+        conv_data = await self.reconcile_stream_state(conv_id, conv_data)
         is_streaming = conv_data.get("status") == "streaming"
         last_eid = await get_latest_event_id(conv_id) if is_streaming else 0
         return {"streaming": is_streaming, "last_event_id": last_eid}
+
+    async def reconcile_stream_state(self, conv_id: str, conv_data: dict | None = None) -> dict:
+        conv_data = conv_data or await memory_store.db_get_conversation_meta(conv_id) or {}
+        if conv_data.get("status") != "streaming":
+            return conv_data
+        from graph.runner.stream import _active_sessions
+        if conv_id in _active_sessions or time.time() - conv_data.get("updated_at", time.time()) < 30:
+            return conv_data
+        try:
+            from db.redis_state import is_streaming
+            alive = await asyncio.wait_for(is_streaming(conv_id), timeout=2)
+        except Exception as exc:
+            # Redis being unavailable is not evidence that another worker died.
+            logger.warning("无法确认流存活状态 | conv=%s | %s", conv_id, exc)
+            return conv_data
+        if not alive and await memory_store.recover_interrupted_stream(conv_id, expected_updated_at=conv_data["updated_at"]):
+            return await memory_store.db_get_conversation(conv_id) or conv_data
+        return conv_data
 
     # ── 工具历史 ──────────────────────────────────────────────────────────────
 

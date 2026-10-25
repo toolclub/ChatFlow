@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
+from quant.execution import run_compute
+
 from quant import cache as quant_cache
 from quant.config import QUANT_DEFAULT_TOP_N, QUANT_FIRST_PASS_KEEP
 from quant.data_adapter import CachedDataAdapter, get_adapter
@@ -97,7 +99,7 @@ class QuantScreeningService:
 
         # 6. 因子计算与 7. 组装结果 (转移到线程池执行，防止 Pandas 计算阻塞主循环)
         t5 = time.perf_counter()
-        
+
         def _sync_compute():
             tech_df = compute_technical_factors(
                 narrowed, bars,
@@ -142,7 +144,7 @@ class QuantScreeningService:
             return _rows
 
         import asyncio
-        rows = await asyncio.to_thread(_sync_compute)
+        rows = await run_compute(_sync_compute)
         logger.info("    ✅ 阶段 6 & 7: 因子与打分计算并组装结果完成 | 耗时: %.0fms", (time.perf_counter() - t5) * 1000)
 
         elapsed_ms = (time.perf_counter() - t_total_start) * 1000

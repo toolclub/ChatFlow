@@ -1,6 +1,5 @@
-"""
-SQLAlchemy 异步数据库连接配置
-"""
+"""SQLAlchemy async pools sized per API worker, not per deployment."""
+import os
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 
@@ -15,9 +14,11 @@ def create_engine_from_url(database_url: str):
     return create_async_engine(
         url,
         echo=False,
-        pool_size=20,        # 每个进程保持的长连接数（gunicorn 多 worker 时各自独立）
-        max_overflow=40,     # 高并发时可额外创建的连接数
-        pool_timeout=30,     # 等待连接超时（秒）
+        # Four workers previously allowed 240 connections against PostgreSQL's
+        # default 100, starving chat/recovery while prediction work was active.
+        pool_size=max(1, int(os.getenv("DB_POOL_SIZE", "5"))),
+        max_overflow=max(0, int(os.getenv("DB_MAX_OVERFLOW", "5"))),
+        pool_timeout=max(1, float(os.getenv("DB_POOL_TIMEOUT", "10"))),
         pool_recycle=1800,   # 30 分钟回收连接，防止 Postgres 空闲超时断开
         pool_pre_ping=True,
     )

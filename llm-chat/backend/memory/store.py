@@ -45,6 +45,16 @@ from db.models import ConversationModel, MessageModel, ToolExecutionModel
 
 # ... (imports unchanged)
 
+async def db_get_conversation_meta(conv_id: str) -> Optional[dict]:
+    """Read ownership and lifecycle without loading a potentially long transcript."""
+    async with AsyncSessionLocal() as session:
+        row = (await session.execute(select(
+            ConversationModel.id, ConversationModel.title, ConversationModel.user_id,
+            ConversationModel.client_id, ConversationModel.status, ConversationModel.updated_at,
+        ).where(ConversationModel.id == conv_id))).mappings().first()
+        return dict(row) if row else None
+
+
 async def db_get_conversation(conv_id: str) -> Optional[dict]:
     """从 DB 直接读取对话（跨 worker 一致性）。返回 dict 或 None。"""
     async with AsyncSessionLocal() as session:
@@ -107,6 +117,7 @@ async def db_get_conversation(conv_id: str) -> Optional[dict]:
         return {
             "id": row.id,
             "title": row.title,
+            "updated_at": row.updated_at,
             "system_prompt": row.system_prompt,
             "core_memory": dict(getattr(row, "core_memory", {}) or {}),
             "messages": [
@@ -132,6 +143,7 @@ async def db_get_conversation(conv_id: str) -> Optional[dict]:
             ],
             "mid_term_summary": row.mid_term_summary,
             "user_id": getattr(row, "user_id", "") or "",
+            "client_id": row.client_id or "",
             "status": getattr(row, "status", "active") or "active",
         }
 
@@ -564,3 +576,71 @@ async def update_message_content(msg_id: int, new_content: str) -> None:
             .values(content=new_content)
         )
         await session.commit()
+
+
+async def try_start_stream(conv_id: str) -> bool:
+    """Serialize new turns across workers using the conversation row lock."""
+    from fsm.conversation import ConversationSM
+    async with AsyncSessionLocal() as session:
+        row = await session.scalar(select(ConversationModel).where(ConversationModel.id == conv_id).with_for_update())
+        if not row or row.status == "streaming":
+            return False
+        sm = ConversationSM.from_db_status(row.status, conv_id=conv_id)
+        sm.send_event("streaming")
+        row.status = sm.current_value
+        row.updated_at = time.time()
+        await session.commit()
+    return True
+
+
+async def get_message_stream_state(conv_id: str, message_id: str) -> Optional[dict]:
+    """Lightweight replay polling; do not rebuild or overwrite the graph cache."""
+    async with AsyncSessionLocal() as session:
+        row = (await session.execute(
+            select(MessageModel.stream_completed, ConversationModel.status, ConversationModel.updated_at)
+            .join(ConversationModel, ConversationModel.id == MessageModel.conv_id)
+            .where(MessageModel.conv_id == conv_id, MessageModel.message_id == message_id)
+        )).first()
+        return dict(row._mapping) if row else None
+
+
+async def recover_interrupted_stream(conv_id: str, expected_updated_at: float) -> bool:
+    """Preserve partial results and close orphaned state after liveness is checked."""
+    from fsm.conversation import ConversationSM
+    from fsm.tool_execution import ToolExecutionSM
+    from fsm.sse_events import SSEEventType
+    from db.models import EventLogModel
+    import json
+
+    async with AsyncSessionLocal() as session:
+        conv = await session.scalar(select(ConversationModel).where(ConversationModel.id == conv_id).with_for_update())
+        if not conv or conv.status != "streaming" or conv.updated_at != expected_updated_at:
+            return False
+        sm = ConversationSM.from_db_status(conv.status, conv_id=conv_id)
+        sm.send_event("error")
+        conv.status = sm.current_value
+        conv.updated_at = time.time()
+        messages = (await session.scalars(select(MessageModel).where(
+            MessageModel.conv_id == conv_id, MessageModel.role == "assistant",
+            MessageModel.stream_completed.is_(False),
+        ))).all()
+        for message in messages:
+            message.content = message.content or message.stream_buffer or ""
+            message.stream_buffer = ""
+            message.stream_completed = True
+            payload = {SSEEventType.ERROR.value: "执行进程已中断，已保留部分结果，可发送消息继续。", "can_continue": True}
+            session.add(EventLogModel(conv_id=conv_id, message_id=message.message_id,
+                                      event_type=SSEEventType.ERROR.value, event_data=payload,
+                                      sse_string="data: " + json.dumps(payload, ensure_ascii=False) + "\n\n",
+                                      created_at=time.time()))
+        tools = (await session.scalars(select(ToolExecutionModel).where(
+            ToolExecutionModel.conv_id == conv_id, ToolExecutionModel.status == "running",
+        ))).all()
+        for tool in tools:
+            tool_sm = ToolExecutionSM()
+            tool_sm.send_event("error")
+            tool.status = tool_sm.current_value
+        await session.commit()
+    logger.info("已恢复中断对话 | conv=%s | messages=%d", conv_id, len(messages))
+    await _notify_cache_invalidation(conv_id)
+    return True

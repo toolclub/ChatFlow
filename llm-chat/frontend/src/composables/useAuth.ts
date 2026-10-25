@@ -1,7 +1,6 @@
 import { ref, computed, readonly } from 'vue'
 import type { User, UserSettings } from '../types'
 import * as authApi from '../api/auth'
-import { get } from '../api/index'
 
 const user = ref<User | null>(null)
 const settings = ref<UserSettings | null>(null)

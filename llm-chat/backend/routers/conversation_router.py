@@ -39,9 +39,13 @@ async def create_conversation(req: CreateConversationRequest, user: CurrentUser)
     )
 
 
-async def _check_conv_access(conv_id: str, user: dict):
+async def _check_conv_access(conv_id: str, user: dict, include_messages: bool = False):
     """验证用户是否有权访问该对话"""
-    data = await conversation_service.get_conversation(conv_id)
+    if include_messages:
+        data = await conversation_service.get_conversation(conv_id)
+    else:
+        from memory.store import db_get_conversation_meta
+        data = await db_get_conversation_meta(conv_id)
     if not data:
         raise HTTPException(status_code=404, detail="对话不存在")
     
@@ -60,7 +64,7 @@ async def _check_conv_access(conv_id: str, user: dict):
 
 @router.get("/conversations/{conv_id}")
 async def get_conversation(conv_id: str, user: CurrentUser):
-    return await _check_conv_access(conv_id, user)
+    return await _check_conv_access(conv_id, user, include_messages=True)
 
 
 @router.patch("/conversations/{conv_id}")

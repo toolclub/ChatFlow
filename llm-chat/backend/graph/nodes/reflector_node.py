@@ -273,23 +273,8 @@ class ReflectorNode(BaseNode):
         return [HumanMessage(content=instruction)]
 
     async def _last_tool_failed(self, state: GraphState) -> bool:
-        """检查最近的一次工具执行是否失败。"""
-        messages = list(state.get("messages") or [])
-        # 逆序查找最近的 ToolMessage
-        for i in range(len(messages) - 1, -1, -1):
-            msg = messages[i]
-            if type(msg).__name__ == "ToolMessage":
-                # 简单的失败启发式：内容包含 Error, Exception, Failed 等关键词且较短
-                content = str(msg.content).lower()
-                if any(k in content for k in ("error", "exception", "failed", "not found", "invalid")):
-                    # 排除掉虽然有关键词但内容很长（可能是正常的搜索结果）
-                    if len(content) < 500:
-                        return True
-                break
-            # 如果先遇到了 HumanMessage/SystemMessage 还没找到 ToolMessage，说明这轮没调工具
-            if type(msg).__name__ in ("HumanMessage", "SystemMessage"):
-                break
-        return False
+        """Use persisted execution states, including timeouts and parallel failures."""
+        return await self._latest_tool_batch_failed(state)
 
     def _build_fallback_response(self, state: GraphState) -> str:
         """

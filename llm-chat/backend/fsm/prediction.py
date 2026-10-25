@@ -67,7 +67,7 @@ class PredictionStatus(str, Enum):
 # 一个目标可能有多个来源事件（如 news_searching 既可来自 queued 的 start_news，
 # 也可来自 paused 的 resume_news），所以是元组而不是单个字符串。
 _TRANSITIONS: dict[str, tuple[str, ...]] = {
-    "queued": ("resume",),
+    "queued": ("resume", "recover"),
     "news_searching": ("start_news", "resume_news"),
     "inferring": ("start_infer", "resume_infer"),
     "paused": ("pause",),
@@ -99,6 +99,9 @@ class PredictionSM(StateMachine):
     resume = paused.to(queued)
     resume_news = paused.to(news_searching)
     resume_infer = paused.to(inferring)
+    # Only the worker that acquired an expired/missing ownership lease may
+    # restart an interrupted graph. Completed dimensions remain in the DB.
+    recover = news_searching.to(queued) | inferring.to(queued)
     # 任一运行态（含 paused）→ failed（python-statemachine 多源到单目标的 | 写法）
     fail = (
         queued.to(failed) | news_searching.to(failed) | inferring.to(failed)

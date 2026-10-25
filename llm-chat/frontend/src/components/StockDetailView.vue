@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, nextTick, computed } from 'vue'
-import { ArrowLeft, TrendCharts, TopRight, Warning, InfoFilled, PieChart, DataAnalysis, List, Connection, Compass } from '@element-plus/icons-vue'
+import { ArrowLeft, TrendCharts, TopRight, Warning, PieChart, DataAnalysis, Compass } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
+
+function openExternal(url: string, target = '_blank') { window.open(url, target, 'noopener,noreferrer') }
 
 const props = defineProps<{
   stock: any
@@ -343,7 +345,7 @@ const scoreColor = computed(() => {
       </div>
 
       <div class="header-right">
-        <el-button type="primary" class="xq-link-btn" @click="window.open(getXueqiuUrl(), '_blank')">
+        <el-button type="primary" class="xq-link-btn" @click="openExternal(getXueqiuUrl(), '_blank')">
           <el-icon style="margin-right: 4px;"><TopRight /></el-icon> 实时行情
         </el-button>
       </div>

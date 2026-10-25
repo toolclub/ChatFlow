@@ -16,6 +16,8 @@ import os
 import httpx
 import pandas as pd
 
+from quant.execution import run_io
+
 from quant.domain import (
     ProviderCapability,
     ProviderHealth,
@@ -69,7 +71,7 @@ class TiingoUSProvider:
         for sym in symbols:
             ticker = sym.split(".")[0]
             async with self._sem:
-                df = await asyncio.to_thread(
+                df = await run_io(
                     self._fetch_one, ticker, start, end, key,
                 )
             if df is not None and not df.empty:

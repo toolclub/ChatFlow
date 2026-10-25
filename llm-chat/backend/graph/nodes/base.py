@@ -86,6 +86,39 @@ class BaseNode(ABC):
         """
         ...
 
+    @staticmethod
+    async def _latest_tool_batch_failed(state: GraphState) -> bool:
+        """Read execution status, never infer a failed tool from its output text."""
+        messages = list(state.get("messages") or [])
+        # Graph execution can finish a tool before the SSE consumer persists
+        # its terminal state. Never let a lagging DB snapshot (running, or a
+        # previous batch's done rows) hide the current structured error.
+        for message in reversed(messages):
+            if type(message).__name__ == "ToolMessage":
+                if getattr(message, "status", "success") == "error":
+                    return True
+            elif getattr(message, "tool_calls", None) or type(message).__name__ == "HumanMessage":
+                break
+        batch_size = 1
+        for message in reversed(messages):
+            calls = getattr(message, "tool_calls", None)
+            if calls:
+                batch_size = len(calls)
+                break
+        try:
+            from db.tool_store import get_tool_executions_for_conv, get_tool_executions_for_message
+            message_id = state.get("assistant_message_id")
+            conv_id = state.get("conv_id")
+            executions = (
+                await get_tool_executions_for_message(message_id) if message_id else
+                await get_tool_executions_for_conv(conv_id) if conv_id else []
+            )
+            if executions:
+                return any(item.get("status") in {"error", "timeout"} for item in executions[-batch_size:])
+        except Exception:
+            logger.warning("Failed to read tool status | conv=%s", state.get("conv_id"), exc_info=True)
+        return False
+
     # ══════════════════════════════════════════════════════════════════════════
     # 消息格式转换工具（供 call_model 系节点使用）
     # ══════════════════════════════════════════════════════════════════════════
@@ -334,9 +367,8 @@ class BaseNode(ABC):
         节点返回时 full_response 包含完整内容，CallModelEndHandler 因
         ctx.*_streamed=True 而跳过重复发送。
 
-        异常安全：流式中途抛异常（如 MiniMax 审核 1027）时，
-        已累积的 content_parts 不会丢失 —— 作为 partial full_response 返回，
-        供 stream.py 的 _streaming[0] + _partial[0] 捕获并保存到 DB。
+        异常安全：流式中途异常向 runner 传播；已推送 token 由 runner
+        保存为部分响应，保留错误状态供用户恢复，不能当作成功答案提交。
 
         支持推理模型（GLM/DeepSeek-R1 等）的 thinking token：
           - "\\x00THINK\\x00" 前缀的 delta 作为 thinking 事件分发
@@ -365,24 +397,14 @@ class BaseNode(ABC):
                     content_parts.append(delta)
                     # content 通过 llm_token 走常规 content SSE（llm_handlers.py 内部剥离 <think> 后转发）
                     await adispatch_custom_event("llm_token", {"content": delta, "node": node, "step_index": step_index})
-        except Exception as exc:
-            # ── 流式中途异常（审核 1027 / 网络断开等）────────────────────────
-            # 已累积的 token 不能丢！将 partial content 作为 full_response 返回，
-            # 上层节点和 stream.py 可根据此内容做断点续传保存。
-            partial = "".join(content_parts)
-            if partial:
-                logger.warning(
-                    "_stream_tokens 中途异常，保留部分内容 | conv=%s | node=%s | "
-                    "tokens=%d | partial_len=%d | error=%s",
-                    conv_id, node, token_count, len(partial), exc,
-                )
-                return {
-                    "messages":      [AIMessage(content=partial)],
-                    "full_response": partial,
-                    "_was_streamed": True,
-                    "_stream_error": exc,  # 供上层节点判断是否需要特殊处理
-                }
-            # 没有任何内容时直接抛出，让上层处理
+        except Exception:
+            # Token events have already reached the runner, whose exception path
+            # persists the partial response. Returning it here would let the graph
+            # save an incomplete answer as successful and disable resume/retry.
+            logger.warning(
+                "_stream_tokens interrupted | conv=%s | node=%s | tokens=%d | partial_len=%d",
+                conv_id, node, token_count, sum(map(len, content_parts)), exc_info=True,
+            )
             raise
 
         full_content  = "".join(content_parts)

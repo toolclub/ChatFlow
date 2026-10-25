@@ -11,9 +11,9 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --prefer-offline
 
-# 复制源码并构建（跳过 tsc 类型检查，直接用 vite build）
+# 类型检查与回归通过后才构建发布产物。
 COPY . .
-RUN npx vite build
+RUN npm test && npm run build
 
 # ── Stage 2: Serve with Nginx ─────────────────────────────────────────────────
 FROM ${NGINX_IMAGE}

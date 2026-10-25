@@ -5,11 +5,14 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 import time
 from datetime import datetime, timedelta
 
 import pandas as pd
+
+from quant.execution import run_io
 
 from quant.domain import (
     ProviderCapability,
@@ -36,9 +39,9 @@ class YFinanceUSProvider:
 
     async def health_check(self) -> ProviderHealth:
         try:
-            import yfinance as yf
+            yf = await run_io(importlib.import_module, "yfinance")
 
-            df = await asyncio.to_thread(
+            df = await run_io(
                 lambda: yf.download("AAPL", period="1d", auto_adjust=False)
             )
             if df is not None and not df.empty:
@@ -56,7 +59,7 @@ class YFinanceUSProvider:
     # ── realtime_snapshot ─────────────────────────────────────────────────
 
     async def realtime_snapshot(self, market: str = "us_stock") -> pd.DataFrame:
-        import yfinance as yf
+        yf = await run_io(importlib.import_module, "yfinance")
 
         tickers = self._get_universe_tickers()
         if not tickers:
@@ -65,7 +68,7 @@ class YFinanceUSProvider:
 
         logger.info("yfinance_us: 开始拉取美股 spot | ticker 总数 %d", len(tickers))
         t0 = time.perf_counter()
-        df = await asyncio.to_thread(self._download_spot, tickers, yf)
+        df = await run_io(self._download_spot, tickers, yf)
         elapsed = time.perf_counter() - t0
         logger.info(
             "yfinance_us: spot 拉取完成 | 得到 %d 只 | 耗时 %.1fs",
@@ -185,12 +188,12 @@ class YFinanceUSProvider:
         #   所以先走快而可靠的 chart，它拿不到再退回 yf.download。
         #   这不是绕反爬，是换用雅虎正常对外、不需 crumb 的那个公开接口。
         async with self._sem:
-            df = await asyncio.to_thread(self._chart_bars, tickers, start, end)
+            df = await run_io(self._chart_bars, tickers, start, end)
 
         if df is None or df.empty:
-            import yfinance as yf
+            yf = await run_io(importlib.import_module, "yfinance")
             async with self._sem:
-                df = await asyncio.to_thread(
+                df = await run_io(
                     self._download_bars, yf, tickers, start, end,
                 )
             if df is None or df.empty:

@@ -16,6 +16,7 @@ logger = logging.getLogger("sandbox.worker")
 
 # Queue sentinel：两个 reader 都结束后放入，主循环收到即退出
 _SENTINEL = object()
+_MAX_STREAM_OUTPUT_BYTES = 1024 * 1024  # Total stdout+stderr per command, before SSE/DB.
 
 
 @dataclass
@@ -211,7 +212,7 @@ class SSHWorker:
         import asyncssh
 
         start = time.monotonic()
-        queue: asyncio.Queue = asyncio.Queue()
+        queue: asyncio.Queue = asyncio.Queue(maxsize=128)
 
         try:
             # term_type="xterm" 分配 PTY：
@@ -239,7 +240,7 @@ class SSHWorker:
                     try:
                         proc.kill()
                     except Exception:
-                        pass
+                        logger.warning("Sandbox timeout kill failed | worker=%s", self.worker_id, exc_info=True)
                     await queue.put(("stderr", f"\n⚠️ 执行超时（{timeout}秒限制）\n"))
                     # 兜底：即使远端子进程没死、reader 不 EOF，也要让主循环退出，
                     # 否则 generator 永远不返回 → tool 不返回 → LLM 卡死"推理中"
@@ -258,22 +259,47 @@ class SSHWorker:
                     await queue.put(_SENTINEL)
                 waiter_task = asyncio.create_task(_wait_readers())
 
-                # ── 主循环：从 queue 实时 yield ──
-                while True:
-                    item = await queue.get()
-                    if item is _SENTINEL:
-                        break
-                    yield item
-
-                watchdog_task.cancel()
-                waiter_task.cancel()
-
-                # 等进程退出码
+                tasks = (stdout_task, stderr_task, watchdog_task, waiter_task)
+                completed = False
+                output_bytes = 0
+                output_truncated = False
                 try:
-                    await asyncio.wait_for(proc.wait(), timeout=5)
-                except (asyncio.TimeoutError, Exception):
-                    pass
-                exit_code = proc.exit_status if proc.exit_status is not None else -1
+                    # Backpressure bounds buffered output when the consumer is slow.
+                    while True:
+                        item = await queue.get()
+                        if item is _SENTINEL:
+                            break
+                        name, text = item
+                        encoded = text.encode("utf-8")
+                        remaining = max(0, _MAX_STREAM_OUTPUT_BYTES - output_bytes)
+                        if remaining:
+                            visible = encoded[:remaining].decode("utf-8", errors="ignore")
+                            output_bytes += min(len(encoded), remaining)
+                            if visible:
+                                yield name, visible
+                        if len(encoded) > remaining and not output_truncated:
+                            output_truncated = True
+                            logger.info("Sandbox output truncated | worker=%s | limit=%d", self.worker_id, _MAX_STREAM_OUTPUT_BYTES)
+                            yield "stderr", "\n[终端输出已达上限，后续输出省略；文件产物不受影响。需要完整日志时请将命令输出重定向到文件。]\n"
+
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=5)
+                    except asyncio.TimeoutError:
+                        logger.warning("Sandbox process did not exit | worker=%s", self.worker_id)
+                    exit_code = proc.exit_status if proc.exit_status is not None else -1
+                    completed = proc.exit_status is not None
+                finally:
+                    # Cancellation and generator.aclose() must reap every helper,
+                    # including readers blocked on a full queue. Closing the PTY
+                    # then terminates the remote process group as well.
+                    if not completed:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            logger.warning("Sandbox cancellation kill failed | worker=%s", self.worker_id, exc_info=True)
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
 
         except Exception as exc:
             yield ("stderr", f"\n执行异常: {exc}\n")

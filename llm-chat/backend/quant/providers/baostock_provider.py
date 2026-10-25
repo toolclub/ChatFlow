@@ -4,7 +4,7 @@
   - 登录态进程级，使用 asyncio.Lock 串行化所有调用（baostock 非线程安全）
   - 不提供全市场实时快照（baostock 没有这种 API）→ 不声明 REALTIME_SNAPSHOT
   - 优势：日线带 peTTM/pbMRQ/turn 指标，service 层用 bars 兜底缺失的 PE/PB
-  - 同步 SDK 全部用 asyncio.to_thread 包装
+  - 同步 SDK 全部用 量化专用有界线程池包装
   - 关键超时设计（解决长时间 hang）：
     * 模块加载时设置 socket.setdefaulttimeout(15)，确保 bs.login() 之前生效，
       新建 TCP 连接才能继承超时——之前只在 login 后设置等同于无效。
@@ -14,11 +14,14 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 import socket
 from datetime import datetime, timedelta
 
 import pandas as pd
+
+from quant.execution import run_baostock
 
 # 进程级网络超时：必须在任何 baostock 调用（含 bs.login）之前设置
 socket.setdefaulttimeout(15)
@@ -57,7 +60,7 @@ class BaoStockProvider:
 
     async def health_check(self) -> ProviderHealth:
         try:
-            import baostock  # noqa: F401
+            baostock = await run_baostock(importlib.import_module, "baostock")
         except ImportError:
             return ProviderHealth(
                 status=ProviderHealthStatus.DOWN,
@@ -97,12 +100,12 @@ class BaoStockProvider:
     ) -> pd.DataFrame:
         if not symbols:
             return pd.DataFrame()
-        
+
         # 快速过滤掉不支持的代码（如 .US），避免无效加锁
         cn_symbols = [s for s in symbols if s.endswith((".SH", ".SZ", ".BJ"))]
         if not cn_symbols:
             return pd.DataFrame()
-            
+
         adjust_flag = {"qfq": "2", "hfq": "1"}.get(adjust, "3")
 
         # 核心修复：分批锁定，防止长耗时预热任务饿死其他请求
@@ -170,7 +173,7 @@ class BaoStockProvider:
                 if not self._login_if_needed():
                     raise RuntimeError("BaoStock 登录失败")
                 return fn(*args, **kwargs)
-            return await asyncio.to_thread(_run)
+            return await run_baostock(_run)
 
     def _login_if_needed(self) -> bool:
         if self._logged_in:

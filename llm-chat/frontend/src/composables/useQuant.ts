@@ -1,4 +1,4 @@
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onScopeDispose } from 'vue'
 import * as api from '../api'
 import type { QuantProviderInfo, QuantScreenCriteria, QuantScreenResult } from '../types'
 import type { QuantCacheStatus } from '../api'
@@ -7,7 +7,7 @@ import type { QuantCacheStatus } from '../api'
  * 量化工作台 composable。注意：非单例 — 每次 useQuant() 都是独立 state，
  * 子组件不要再 useQuant 一次（会和父级断开）。
  */
-export function useQuant(initialMarket?: string) {
+export function useQuant(initialMarket?: 'cn_a' | 'us_stock') {
   const providers = ref<QuantProviderInfo[]>([])
   const loadingProviders = ref(false)
 
@@ -26,6 +26,9 @@ export function useQuant(initialMarket?: string) {
   const cacheStatus = ref<QuantCacheStatus | null>(null)
 
   let _analyzeAbort: AbortController | null = null
+  let _disposed = false
+  let _pollVersion = 0
+  let _pollTimer: ReturnType<typeof setTimeout> | null = null
   let _stageTimer: number | null = null
 
   const cacheAgeText = computed<string>(() => {
@@ -38,7 +41,7 @@ export function useQuant(initialMarket?: string) {
     return `${Math.floor(sec / 86400)}天前`
   })
 
-  const criteria = ref<QuantScreenCriteria>({
+  const criteria = ref<QuantScreenCriteria & { pe_range: [number, number]; weights: NonNullable<QuantScreenCriteria['weights']> }>({
     market: initialMarket || 'cn_a',
     universe: initialMarket === 'us_stock' ? 'nasdaq' : 'hs300',
     top_n: 50,
@@ -119,6 +122,7 @@ export function useQuant(initialMarket?: string) {
   }
 
   async function runScreen() {
+    if (_disposed || isScreening.value) return
     if (_analyzeAbort) {
       _analyzeAbort.abort()
       _analyzeAbort = null
@@ -132,6 +136,8 @@ export function useQuant(initialMarket?: string) {
     try {
       // 1. 发起选股（后端立即返回 ID）
       const initRes = await api.runQuantScreen(criteria.value)
+      if (_disposed) return
+      if (!initRes.snapshot_id) throw new Error('服务未返回任务编号，请重试')
       if (initRes.snapshot_id) {
         // 2. 进入轮询等待结果
         await _pollResult(initRes.snapshot_id)
@@ -144,50 +150,51 @@ export function useQuant(initialMarket?: string) {
   }
 
   async function _pollResult(snapshotId: string) {
-    const MAX_POLLS = 100 // 约 200 秒
+    if (_disposed) return
+    const version = ++_pollVersion
+    if (_pollTimer) clearTimeout(_pollTimer)
     let count = 0
-    
-    const timer = setInterval(async () => {
-      count++
-      if (count > MAX_POLLS) {
-        clearInterval(timer)
-        errorMsg.value = '筛选任务超时，请稍后刷新页面查看'
+    const poll = async () => {
+      if (version !== _pollVersion) return
+      if (++count > 100) {
+        errorMsg.value = '筛选任务仍未完成，可重新进入量化工作台查看进度'
         isScreening.value = false
         _clearStageHint()
         return
       }
-
       try {
         const snap = await api.fetchQuantSnapshot(snapshotId)
+        if (version !== _pollVersion) return
         if (snap.status === 'DONE') {
-          clearInterval(timer)
           screenResult.value = snap
           isScreening.value = false
           _clearStageHint()
-          
-          if (snap.rows?.length > 0) {
-            void startAnalyze(snapshotId)
-          }
+          if (snap.rows?.length && !snap.analysis) void startAnalyze(snapshotId)
           void loadCacheStatus()
-        } else if (snap.status === 'FAILED') {
-          clearInterval(timer)
-          errorMsg.value = '选股逻辑执行失败，请检查参数或查看后端日志'
+          return
+        }
+        if (snap.status === 'FAILED') {
+          errorMsg.value = '选股执行失败，请检查参数或查看后端日志'
           isScreening.value = false
           _clearStageHint()
+          return
         }
-        // COMPUTING 状态则继续等待
-      } catch (e) {
-        console.error('Polling error', e)
+      } catch (error) {
+        console.warn('获取选股进度失败，将重试', error)
       }
-    }, 2000)
+      // Schedule only after the previous request completes: never stack slow polls.
+      if (version === _pollVersion) _pollTimer = setTimeout(poll, 2000)
+    }
+    void poll()
   }
 
   async function checkActiveSession() {
     try {
       const res = await api.fetchActiveQuantSession(criteria.value.market)
+      if (_disposed) return
       if (res.active && res.snapshot_id) {
         if (res.criteria) {
-          criteria.value = { ...criteria.value, ...res.criteria }
+          criteria.value = { ...criteria.value, ...res.criteria, pe_range: res.criteria.pe_range ?? [0, 100], weights: res.criteria.weights ?? criteria.value.weights }
         }
 
         // 如果已经完成，直接拉取快照展示
@@ -256,6 +263,14 @@ async function loadStockChart(symbol: string) {
     return null
   }
 }
+
+onScopeDispose(() => {
+  _disposed = true
+  ++_pollVersion
+  if (_pollTimer) clearTimeout(_pollTimer)
+  _clearStageHint()
+  _analyzeAbort?.abort()
+})
 
 return {
   providers,

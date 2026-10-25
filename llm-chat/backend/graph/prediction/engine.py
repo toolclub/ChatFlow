@@ -14,7 +14,7 @@ v2 相对 v1 的四处修复（设计文档 §5.1~§5.6）：
 
 铁律遵守：
   - #3 SSE 事件类型取 SSEEventType.*.value（本模块只产 payload，不做 dispatch/DB）
-  - #5 阻塞计算一律 asyncio.to_thread
+  - #5 阻塞计算一律进入量化专用有界线程池
   - #9 不吞异常：except 必须至少 logger.warning + 降级
 
 依赖 statsmodels / arch（Docker 容器内可用）；两者缺失时自动降级 naive drift / 历史 std。
@@ -30,6 +30,8 @@ from typing import Any, Awaitable, Callable
 
 import numpy as np
 import pandas as pd
+
+from quant.execution import run_compute
 
 from factors.prediction_indicators import calibrate_shadows, compute_all
 from fsm.sse_events import SSEEventType
@@ -727,8 +729,8 @@ async def forecast(
 
     # ── Step 1: 技术指标 + 影线标定（纯 pandas/numpy → to_thread）──────────────
     technical, shadow = await asyncio.gather(
-        asyncio.to_thread(compute_all, work),
-        asyncio.to_thread(calibrate_shadows, work, PREDICTION_SHADOW_LOOKBACK_BARS),
+        run_compute(compute_all, work),
+        run_compute(calibrate_shadows, work, PREDICTION_SHADOW_LOOKBACK_BARS),
     )
     macd_d = technical.get("macd") or {}
     boll_d = technical.get("boll") or {}
@@ -764,8 +766,8 @@ async def forecast(
 
     # ── Step 2 & 3: ARIMA + GARCH（重计算 → to_thread 并行）────────────────────
     (arima_path, arima_drift, arima_meta), (garch_sigma, _var_path, garch_meta) = await asyncio.gather(
-        asyncio.to_thread(_arima_forecast, close, horizon),
-        asyncio.to_thread(_garch_vol, close, horizon),
+        run_compute(_arima_forecast, close, horizon),
+        run_compute(_garch_vol, close, horizon),
     )
 
     p_, d_, q_ = arima_meta["order"]
@@ -839,7 +841,7 @@ async def forecast(
     if as_of is None:
         as_of = pd.Timestamp.now().date()
 
-    ev = await asyncio.to_thread(
+    ev = await run_compute(
         compute_event_scores, filing_digest, as_of, PREDICTION_EVENT_DECAY_TAU_DAYS,
     )
     f_score = ev["F"]
@@ -1011,7 +1013,7 @@ async def forecast(
     ))
 
     # ── Step 8: 蒙特卡洛逐日 → OHLC 蜡烛 + 分位数 ─────────────────────────────
-    mats = await asyncio.to_thread(
+    mats = await run_compute(
         _monte_carlo_paths,
         last_close, mu, sigma, horizon, MONTE_CARLO_PATHS, k_up, k_dn,
     )

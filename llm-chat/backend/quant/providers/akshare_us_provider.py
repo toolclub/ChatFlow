@@ -5,10 +5,13 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 from datetime import datetime
 
 import pandas as pd
+
+from quant.execution import run_io
 
 from quant.domain import (
     ProviderCapability,
@@ -71,8 +74,8 @@ class AKShareUSProvider:
 
     async def health_check(self) -> ProviderHealth:
         try:
-            import akshare as ak
-            await asyncio.to_thread(ak.stock_us_spot_em)
+            ak = await run_io(importlib.import_module, "akshare")
+            await run_io(ak.stock_us_spot_em)
             return ProviderHealth(status=ProviderHealthStatus.OK)
         except Exception as exc:
             return ProviderHealth(
@@ -92,8 +95,8 @@ class AKShareUSProvider:
     async def realtime_snapshot(self, market: str = "us_stock") -> pd.DataFrame:
         if market != "us_stock":
             return pd.DataFrame()
-        
-        df = await asyncio.to_thread(self._fetch_spot)
+
+        df = await run_io(self._fetch_spot)
         return df
 
     def _fetch_spot(self) -> pd.DataFrame:
@@ -108,7 +111,7 @@ class AKShareUSProvider:
             return pd.DataFrame()
 
         df = raw.rename(columns={k: v for k, v in _SPOT_RENAME.items() if k in raw.columns})
-        
+
         # 提取 ticker 并构建内部 symbol
         if "em_code" in df.columns:
             def _parse_ticker(em_code: str) -> str:
@@ -117,17 +120,17 @@ class AKShareUSProvider:
                 ticker = parts[-1]
                 self._em_code_map[ticker] = em_code
                 return f"{ticker}.US"
-            
+
             df["symbol"] = df["em_code"].apply(_parse_ticker)
-        
+
         numeric_cols = ["price", "change_pct", "change_amount", "volume", "amount", "high", "low", "open", "prev_close", "turnover_rate", "pe", "market_cap"]
         for col in numeric_cols:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
-        
+
         # 美股市值通常是美元，这里为了统一，后续可能需要汇率转换，目前先按原始值
         # EM 的总市值单位可能是“元”（人民币或美元视接口而定），通常美股接口返回的是美元
-        
+
         df["as_of_date"] = datetime.now().strftime("%Y-%m-%d")
         return df
 
@@ -151,10 +154,10 @@ class AKShareUSProvider:
             if not em_code:
                 # 尝试猜测: 默认 NASDAQ (105)
                 em_code = f"105.{ticker}"
-            
+
             async with self._sem:
                 try:
-                    df = await asyncio.to_thread(self._fetch_hist, em_code, start, end, adjust)
+                    df = await run_io(self._fetch_hist, em_code, start, end, adjust)
                     if not df.empty:
                         df["symbol"] = sym
                     return df
@@ -174,15 +177,15 @@ class AKShareUSProvider:
         # ak.stock_us_hist start_date/end_date format: YYYYMMDD
         s = start.replace("-", "")
         e = end.replace("-", "")
-        
+
         raw = ak.stock_us_hist(symbol=em_code, period="daily", start_date=s, end_date=e, adjust=adjust)
         if raw is None or raw.empty:
             return pd.DataFrame()
-        
+
         df = raw.rename(columns={k: v for k, v in _HIST_RENAME.items() if k in raw.columns})
         if "date" in df.columns:
             df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
-        
+
         numeric_cols = ["open", "close", "high", "low", "volume", "amount", "change_pct", "change_amount", "turnover_rate"]
         for col in numeric_cols:
             if col in df.columns:

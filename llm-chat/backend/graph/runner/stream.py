@@ -11,11 +11,11 @@ StreamSession — DB-first 流式会话管理器
 写入时机：
   用户发消息   → 立即 INSERT messages (role=user)
   助手开始生成 → 立即 INSERT messages (role=assistant, stream_completed=false)
-  thinking 增量 → 每 500ms UPDATE messages.thinking
-  content 增量  → 每 500ms UPDATE messages.stream_buffer
+  thinking 增量 → 每 100ms UPDATE messages.thinking
+  content 增量  → 每 100ms UPDATE messages.stream_buffer
   工具调用开始  → 立即 INSERT tool_executions (status=running)
   工具调用完成  → 立即 UPDATE tool_executions (status=done)
-  每个 SSE 事件 → 批量 INSERT event_log（500ms 一批）
+  每个 SSE 事件 → 批量 INSERT event_log（100ms 一批）
   消息完成     → UPDATE messages (content=最终, stream_completed=true)
 """
 import asyncio
@@ -31,6 +31,7 @@ from graph.runner.context import StreamContext
 from graph.runner.dispatcher import dispatcher
 from graph.runner.utils import sse
 from graph.state import GraphState
+from fsm.sse_events import SSEEventType
 from services import llm_provider_service
 
 logger = logging.getLogger("graph.runner.stream")
@@ -75,7 +76,7 @@ class StreamSession:
         self.images = images or []
         self.agent_mode = agent_mode
         self.force_plan = force_plan or []
-        self.stop_event = stop_event
+        self.stop_event = stop_event or asyncio.Event()
         self.file_ids = file_ids or []
         self.context_refs = context_refs or []
 
@@ -104,12 +105,16 @@ class StreamSession:
         # SSE 事件缓冲（内存，用于当前连接的客户端推送）
         self._sse_events: list[str] = []
         self._sse_done = False
+        self._defer_delivery = False
+        self._deferred_sse: list[str] = []
         self._sse_waiters: list[asyncio.Event] = []
 
         # DB 写入缓冲（批量写入 event_log）
         self._event_batch: list[dict] = []
         self._thinking_buf = ""
         self._content_buf = ""
+        self._stream_version = 0
+        self._flushed_version = 0
         self._last_flush = time.time()
         self._tool_seq = 0
 
@@ -123,9 +128,12 @@ class StreamSession:
         self._tool_exec_map: dict[int, int] = {}   # tool_seq → tool_execution DB id
         self._tool_output_map: dict[int, str] = {}  # tool_seq → 累积的 sandbox 输出
         self._tool_search_map: dict[int, list] = {} # tool_seq → 搜索结果
+        self._tool_run_seq: dict[str, int] = {}
+        self._tool_names: dict[int, str] = {}
         self._current_tool_seq: int = 0              # 当前活跃工具的 seq（最新 tool_call）
 
         # 消息终态化锁（防止 _periodic_flush 和 _finalize_message 竞态）
+        self._flush_lock = asyncio.Lock()
         self._finalize_lock = asyncio.Lock()
         self._finalized = False  # 终态标记，防止重复 finalize
 
@@ -179,28 +187,35 @@ class StreamSession:
             )
         except Exception as exc:
             logger.error("消息预写失败，中止流 | conv=%s | %s", self.conv_id, exc)
-            yield sse({"error": "消息创建失败，请重试", "can_continue": False})
-            yield sse({"done": True, "compressed": False})
-            await memory_store.update_status(self.conv_id, "error")
+            yield sse({SSEEventType.ERROR.value: "消息创建失败，请重试", "can_continue": False})
+            yield sse({SSEEventType.DONE.value: True, "compressed": False})
+            self._conv_sm.send_event("error")
+            await memory_store.update_status(self.conv_id, self._conv_sm.current_value)
             return
 
         # 写入 resume_context 事件（第一个事件，刷新时恢复用户消息）
-        resume_sse = sse({"resume_context": {
+        resume_sse = sse({SSEEventType.RESUME_CONTEXT.value: {
+            "message_id": self.assistant_message_id,
             "user_message": self.user_message,
             "images": self.images,
         }})
-        self._emit_sse(resume_sse, "resume_context")
+        self._emit_sse(resume_sse, SSEEventType.RESUME_CONTEXT.value)
 
         # 注册活跃会话（本 worker 内存 + Redis 跨 worker）
         _active_sessions[self.conv_id] = self
         try:
-            from db.redis_state import register_streaming
-            await register_streaming(self.conv_id)
-        except Exception:
-            pass  # Redis 不可用时降级到进程内 dict
+            from db.redis_state import clear_stop, register_streaming
+            await clear_stop(self.conv_id)
+            await register_streaming(self.conv_id, ttl_seconds=30)
+        except Exception as exc:
+            logger.warning("Redis 流注册失败，使用本地会话 | conv=%s | %s", self.conv_id, exc)
 
         # 启动后台任务
         self._graph_task = asyncio.create_task(self._run_graph())
+        # Cancellation before the coroutine first runs bypasses its try/except.
+        self._graph_task.add_done_callback(
+            lambda task: self.queue.put_nowait(("cancelled", None)) if task.cancelled() else None
+        )
         self._hb_task = asyncio.create_task(self._heartbeat())
         self._consumer_task = asyncio.create_task(self._consume_events())
         self._flush_task = asyncio.create_task(self._periodic_flush())
@@ -224,11 +239,11 @@ class StreamSession:
         # 同一 dict 共享数据（见 sandbox/context.py 注释关于 Task 隔离的说明）。
         current_clarification.set({})
 
-        graph = get_graph(self.model) if self.agent_mode else get_simple_graph(self.model)
-        state = self._build_initial_state()
         event_count = 0
 
         try:
+            graph = get_graph(self.model) if self.agent_mode else get_simple_graph(self.model)
+            state = self._build_initial_state()
             async for event in graph.astream_events(
                 state, version="v2",
                 config={"recursion_limit": 120, "configurable": {"conv_id": self.conv_id}},
@@ -263,7 +278,7 @@ class StreamSession:
             if isinstance(output, dict) and output.get("full_response"):
                 self._partial = output["full_response"]
                 self._streaming = ""
-        if etype == "on_chain_start" and enode == "save_response":
+        if etype == "on_chain_end" and enode == "save_response":
             self._save_done = True
         if etype == "on_chain_end" and enode == "planner":
             p = event.get("data", {}).get("output", {})
@@ -294,16 +309,16 @@ class StreamSession:
 
                 if kind == "event":
                     async for chunk in dispatcher.dispatch(payload, self.ctx):
-                        self._emit_sse(chunk)
                         await self._track_sse_for_db(chunk)
+                        self._emit_sse(chunk)
 
                 elif kind == "ping":
-                    self._emit_sse(sse({"ping": True}), "ping")
+                    self._emit_sse(sse({SSEEventType.PING.value: True}), SSEEventType.PING.value)
 
                 elif kind == "done":
                     await self._flush_to_db()
                     await self._finalize_message()
-                    self._emit_sse(sse({"done": True, "compressed": self.ctx.compressed}), "done")
+                    self._emit_sse(sse({SSEEventType.DONE.value: True, "compressed": self.ctx.compressed}), SSEEventType.DONE.value)
                     await self._set_done("completed")
                     break
 
@@ -311,13 +326,13 @@ class StreamSession:
                     await self._flush_to_db()
                     await self._save_partial()
                     await self._mark_stream_completed()  # 确保 stream_completed=True
-                    self._emit_sse(sse({"stopped": True}), "stopped")
+                    self._emit_sse(sse({SSEEventType.STOPPED.value: True}), SSEEventType.STOPPED.value)
                     # 发送 stop_confirmed（握手机制核心）
                     self._emit_sse(sse({
-                        "type": "stop_confirmed",
+                        SSEEventType.STOP_CONFIRMED.value: True,
                         "can_continue": bool(self.best_partial),
                         "reason": "stopped",
-                    }), "stop_confirmed")
+                    }), SSEEventType.STOP_CONFIRMED.value)
                     await self._set_done("active")
                     break
 
@@ -325,13 +340,13 @@ class StreamSession:
                     await self._flush_to_db()
                     await self._save_partial()  # 保存部分内容（关键！）
                     await self._mark_stream_completed()  # 确保 stream_completed=True
-                    self._emit_sse(sse({"stopped": True}), "stopped")
+                    self._emit_sse(sse({SSEEventType.STOPPED.value: True}), SSEEventType.STOPPED.value)
                     # 发送 stop_confirmed（握手机制核心）
                     self._emit_sse(sse({
-                        "type": "stop_confirmed",
+                        SSEEventType.STOP_CONFIRMED.value: True,
                         "can_continue": bool(self.best_partial),
                         "reason": "cancelled",
-                    }), "stop_confirmed")
+                    }), SSEEventType.STOP_CONFIRMED.value)
                     await self._set_done("active")
                     break
 
@@ -339,10 +354,10 @@ class StreamSession:
                     await self._flush_to_db()
                     err = payload if isinstance(payload, dict) else {"exc": payload, "can_continue": False}
                     can_cont = err.get("can_continue", False)
-                    if can_cont:
-                        await self._save_partial()
-                    self._emit_sse(sse({"error": str(err.get("exc", "")), "can_continue": can_cont}), "error")
-                    self._emit_sse(sse({"done": True, "compressed": False}), "done")
+                    await self._save_partial()
+                    await self._mark_stream_completed()
+                    self._emit_sse(sse({SSEEventType.ERROR.value: str(err.get("exc", "")), "can_continue": can_cont}), SSEEventType.ERROR.value)
+                    self._emit_sse(sse({SSEEventType.DONE.value: True, "compressed": False}), SSEEventType.DONE.value)
                     await self._set_done("error")
                     break
 
@@ -352,10 +367,13 @@ class StreamSession:
             logger.error("消费者异常 | conv=%s | %s", self.conv_id, exc, exc_info=True)
             # 消费者崩溃时也要通知前端，避免 SSE 流永远挂起
             try:
-                self._emit_sse(sse({"error": f"内部错误: {exc}", "can_continue": bool(self.best_partial)}), "error")
-                self._emit_sse(sse({"done": True, "compressed": False}), "done")
-            except Exception:
-                pass
+                self._emit_sse(sse({SSEEventType.ERROR.value: f"内部错误: {exc}", "can_continue": bool(self.best_partial)}), SSEEventType.ERROR.value)
+                self._emit_sse(sse({SSEEventType.DONE.value: True, "compressed": False}), SSEEventType.DONE.value)
+                await self._save_partial()
+                await self._mark_stream_completed()
+                await self._set_done("error")
+            except Exception as cleanup_exc:
+                logger.error("消费者异常清理失败 | conv=%s | %s", self.conv_id, cleanup_exc)
         finally:
             # 确保 _sse_done 被设置（即使异常路径也能让 _feed_client 退出）
             if not self._sse_done:
@@ -378,19 +396,22 @@ class StreamSession:
 
     def _emit_sse(self, sse_str: str, event_type: str = "") -> None:
         """推送 SSE 事件到内存缓冲 + 加入 DB 写入批次。"""
-        self._sse_events.append(sse_str)
-        for w in self._sse_waiters:
-            w.set()
-
-        # 加入 DB 写入批次（ping 不写 DB）
-        from db.state_machine import SSEEventType
-        if event_type != SSEEventType.PING.value and sse_str:
+        kind = event_type or self._detect_event_type(sse_str)
+        if kind == SSEEventType.PING.value:
+            self._publish_sse(sse_str)
+        elif sse_str:
             self._event_batch.append({
                 "conv_id": self.conv_id,
                 "message_id": self.assistant_message_id,
-                "event_type": event_type or self._detect_event_type(sse_str),
+                "event_type": kind,
                 "sse_string": sse_str,
             })
+
+    def _publish_sse(self, sse_str: str) -> None:
+        """Only durable events (and ephemeral heartbeats) reach clients."""
+        self._sse_events.append(sse_str)
+        for waiter in self._sse_waiters:
+            waiter.set()
 
     def _append_thinking_delta(
         self, node: str, step_index: int | None, phase: str, delta: str,
@@ -410,6 +431,7 @@ class StreamSession:
             })
         self._thinking_buf += delta  # 向后兼容：拼接纯文本
         self._thinking_dirty = True
+        self._stream_version += 1
 
     async def _track_sse_for_db(self, sse_str: str) -> None:
         """
@@ -443,6 +465,7 @@ class StreamSession:
             self._append_thinking_delta("", None, "reasoning", thinking_payload)
         if data.get("content"):
             self._content_buf += data["content"]
+            self._stream_version += 1
 
         # ── 工具调用开始 → 创建 tool_execution 记录（支持多工具并行） ──
         if data.get("tool_call"):
@@ -450,6 +473,10 @@ class StreamSession:
             self._tool_seq += 1
             seq = self._tool_seq
             self._current_tool_seq = seq
+            self._tool_names[seq] = tc.get("name", "")
+            run_id = tc.get("tool_run_id") or tc.get("tool_call_id")
+            if run_id:
+                self._tool_run_seq[str(run_id)] = seq
             self._tool_output_map[seq] = ""
             self._tool_search_map[seq] = []
             try:
@@ -469,19 +496,19 @@ class StreamSession:
         # ── sandbox 终端输出 → 累积到当前活跃工具 ──
         if data.get("sandbox_output"):
             so = data["sandbox_output"]
-            seq = self._current_tool_seq
+            seq = self._tool_sequence(so)
             if seq in self._tool_output_map:
                 self._tool_output_map[seq] += so.get("text", "")
 
         # ── 搜索结果 → 累积到当前活跃工具 ──
         if data.get("search_item"):
             si = data["search_item"]
-            seq = self._current_tool_seq
+            seq = self._tool_sequence(si)
             if seq in self._tool_search_map:
                 self._tool_search_map[seq].append({
                     "url": si.get("url", ""),
                     "title": si.get("title", ""),
-                    "status": si.get("status", "done"),
+                    "status": si.get("status", SSEEventType.DONE.value),
                 })
 
         # ── 文件产物 → 立即保存到 artifacts 表（兜底，工具内可能已保存） ──
@@ -505,14 +532,14 @@ class StreamSession:
         # ── 工具调用结束 → 按 seq 匹配对应工具，写入 DB ──
         if data.get("tool_result"):
             tr = data["tool_result"]
-            seq = self._current_tool_seq
+            seq = self._tool_sequence(tr)
             exec_id = self._tool_exec_map.get(seq, 0)
             if exec_id:
                 output = self._tool_output_map.get(seq, "") or tr.get("output", "")
                 search_items = self._tool_search_map.get(seq) or None
                 # 状态机驱动：running → done/error/timeout
                 from fsm.tool_execution import ToolExecutionSM
-                raw_status = tr.get("status", "done")
+                raw_status = tr.get("status", SSEEventType.DONE.value)
                 tool_sm = ToolExecutionSM()
                 tool_sm.send_event(raw_status)
                 status = tool_sm.current_value
@@ -530,6 +557,33 @@ class StreamSession:
                 self._tool_exec_map.pop(seq, None)
                 self._tool_output_map.pop(seq, None)
                 self._tool_search_map.pop(seq, None)
+                self._tool_names.pop(seq, None)
+
+    def _tool_sequence(self, payload: dict) -> int:
+        run_id = payload.get("tool_run_id") or payload.get("tool_call_id")
+        if run_id:
+            return self._tool_run_seq.get(str(run_id), 0)
+        # COMPAT: legacy events have no run ID. Match an unambiguous tool
+        # name first; never attribute concurrent output to an arbitrary tool.
+        name = payload.get("tool_name") or payload.get("name")
+        candidates = [seq for seq in self._tool_exec_map
+                      if not name or self._tool_names.get(seq) == name]
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            logger.warning("工具事件缺少关联 ID，跳过歧义输出 | conv=%s | tool=%s", self.conv_id, name)
+        return 0
+
+    async def _finish_pending_tools(self) -> None:
+        from db.tool_store import complete_tool_execution
+        from fsm.tool_execution import ToolExecutionSM
+        for seq, exec_id in list(self._tool_exec_map.items()):
+            sm = ToolExecutionSM()
+            sm.send_event("error")
+            await complete_tool_execution(exec_id, output=self._tool_output_map.get(seq, "")[:20000],
+                                          status=sm.current_value,
+                                          search_items=self._tool_search_map.get(seq) or None)
+            self._tool_exec_map.pop(seq, None)
 
     @staticmethod
     def _detect_event_type(sse_str: str) -> str:
@@ -549,41 +603,68 @@ class StreamSession:
         return detect_sse_event_type(data).value
 
     async def _periodic_flush(self) -> None:
-        """每 500ms 刷新累积数据到 DB。"""
+        """Commit batches every 100 ms; retry transient outages without data loss."""
+        failures = 0
         try:
             while True:
-                await asyncio.sleep(0.5)
-                await self._flush_to_db()
+                await asyncio.sleep(min(0.1 * (2 ** failures), 1.0))
+                try:
+                    await self._flush_to_db()
+                    failures = 0
+                except Exception as exc:
+                    failures += 1
+                    if failures < 3:
+                        continue
+                    logger.error("流持久化连续失败 | conv=%s", self.conv_id)
+                    await self.queue.put(("error", {"exc": exc, "can_continue": True}))
+                    if self._graph_task and not self._graph_task.done():
+                        self._graph_task.cancel()
+                    return
         except asyncio.CancelledError:
-            await self._flush_to_db()
+            return
 
     async def _flush_to_db(self) -> None:
         """将累积的事件批量写入 event_log，并更新 messages 的 thinking/buffer。"""
-        # event_log 始终写入（包括终态化后的 done/stopped 事件），不受 _finalized 限制
+        async with self._flush_lock:
+            await self._flush_pending()
+
+    async def _flush_pending(self) -> None:
+        # Serialize batch commits so event IDs match emission order. On failure
+        # retain the batch for retry rather than silently dropping recovery data.
         if self._event_batch:
             batch = self._event_batch[:]
-            self._event_batch.clear()
             try:
                 from db.event_store import append_events_batch
-                await append_events_batch(batch)
-            except Exception as exc:
-                logger.warning("event_log 批量写入失败: %s", exc)
+                ids = await append_events_batch(batch)
+            except Exception:
+                logger.exception("event_log 批量写入失败 | conv=%s", self.conv_id)
+                raise
+            del self._event_batch[:len(batch)]
+            for entry, event_id in zip(batch, ids):
+                chunk = _with_event_id(entry["sse_string"], event_id, self.assistant_message_id)
+                if self._defer_delivery:
+                    self._deferred_sse.append(chunk)
+                else:
+                    self._publish_sse(chunk)
 
         # messages 表更新：终态化后跳过（防止覆盖最终内容）
         async with self._finalize_lock:
             if self._finalized:
                 return
 
-            if (self._thinking_buf or self._content_buf or self._thinking_dirty) and self.assistant_db_id:
+            if self._stream_version != self._flushed_version and self.assistant_db_id:
+                version = self._stream_version
                 try:
                     from memory import store as memory_store
                     await memory_store.update_message_streaming(
                         self.assistant_db_id,
                         thinking=self._thinking_buf if self._thinking_buf else None,
                         stream_buffer=self._content_buf if self._content_buf else None,
-                        thinking_segments=list(self._thinking_segments) if self._thinking_dirty else None,
+                        thinking_segments=[dict(segment) for segment in self._thinking_segments] if self._thinking_dirty else None,
                     )
-                    self._thinking_dirty = False
+                    self._flushed_version = version
+                    if self._stream_version == version:
+                        self._thinking_dirty = False
                 except Exception as exc:
                     logger.warning("消息流式更新失败: %s", exc)
 
@@ -594,12 +675,16 @@ class StreamSession:
         async with self._finalize_lock:
             if self._finalized:
                 return  # 幂等：已终态化则跳过
-            self._finalized = True
-
-            # save_response_node 已经通过 add_message 保存了最终内容到 messages 表
-            # 这里确保 stream_completed=True、thinking 字段、清空 stream_buffer
+            # Normal graph saves the response itself; interrupted/short graphs
+            # must not clear the only persisted copy of their streamed content.
             try:
                 from memory import store as memory_store
+                if not self._save_done and (self.best_partial or self._content_buf):
+                    await memory_store.finalize_message(
+                        self.assistant_db_id, self.best_partial or self._content_buf,
+                        thinking=self._thinking_buf,
+                        thinking_segments=list(self._thinking_segments),
+                    )
                 await memory_store.update_message_streaming(
                     self.assistant_db_id,
                     thinking=self._thinking_buf or None,
@@ -607,12 +692,14 @@ class StreamSession:
                     stream_buffer="",  # 显式清空
                     stream_completed=True,
                 )
+                self._finalized = True
             except Exception as exc:
-                logger.warning("_finalize_message 写 DB 失败: %s", exc)
+                logger.error("_finalize_message 写 DB 失败: %s", exc)
+                raise
 
     async def _save_partial(self) -> None:
         """保存部分响应（用户停止或异常时）。"""
-        content = self.best_partial
+        content = self.best_partial or (self._content_buf if not self._save_done else "")
         # COMPAT: legacy think block parsing — 保存部分响应时移除 <think> 标签。
         # 待模型 API 统一支持 reasoning_content 结构化字段后可移除。
         stripped = re.sub(r"<think>[\s\S]*?</think>", "", content) if content else ""
@@ -629,25 +716,29 @@ class StreamSession:
                 thinking_segments=list(self._thinking_segments) if self._thinking_segments else None,
             )
         except Exception as exc:
-            logger.warning("保存部分响应失败: %s", exc)
+            logger.error("保存部分响应失败: %s", exc)
+            raise
 
     async def _mark_stream_completed(self) -> None:
         """强制标记 assistant 消息 stream_completed=True（stopped/cancelled 时调用）。"""
         if not self.assistant_db_id:
             return
-        try:
+        async with self._finalize_lock:
             from memory import store as memory_store
             await memory_store.update_message_streaming(
                 self.assistant_db_id, stream_buffer="", stream_completed=True,
+                thinking=self._thinking_buf or None,
+                thinking_segments=list(self._thinking_segments) if self._thinking_segments else None,
             )
-        except Exception as exc:
-            logger.warning("_mark_stream_completed 失败: %s", exc)
+            self._finalized = True
 
     async def _set_done(self, status: str) -> None:
         """通过状态机驱动会话结束：streaming → completed/error/active。"""
-        self._sse_done = True
-        for w in self._sse_waiters:
-            w.set()
+        # Keep the terminal SSE invisible to the initial client until both DB
+        # state and lease cleanup are complete; the next turn can then start.
+        self._defer_delivery = True
+        await self._finish_pending_tools()
+        await self._flush_to_db()
         try:
             self._conv_sm.send_event(status)
             from memory import store as memory_store
@@ -658,8 +749,15 @@ class StreamSession:
         try:
             from db.redis_state import unregister_streaming
             await unregister_streaming(self.conv_id)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("注销流租约失败 | conv=%s | %s", self.conv_id, exc)
+        for chunk in self._deferred_sse:
+            self._publish_sse(chunk)
+        self._deferred_sse.clear()
+        self._defer_delivery = False
+        self._sse_done = True
+        for waiter in self._sse_waiters:
+            waiter.set()
 
     # ══════════════════════════════════════════════════════════════════════════
     # 心跳 + 客户端推送
@@ -673,10 +771,11 @@ class StreamSession:
                 # Redis 活跃会话续期 + 停止信号检测（带 2 秒超时，防止 Redis 慢时阻塞心跳）
                 try:
                     from db.redis_state import heartbeat_streaming, check_stop
-                    await asyncio.wait_for(heartbeat_streaming(self.conv_id), timeout=2)
+                    await asyncio.wait_for(heartbeat_streaming(self.conv_id, ttl_seconds=30), timeout=2)
                     if await asyncio.wait_for(check_stop(self.conv_id), timeout=2):
-                        if self.stop_event:
-                            self.stop_event.set()
+                        self.stop_event.set()
+                        if self._graph_task and not self._graph_task.done():
+                            self._graph_task.cancel()
                 except Exception:
                     pass
         except asyncio.CancelledError:
@@ -742,6 +841,57 @@ class StreamSession:
 # 公共接口
 # ═══════════════════════════════════════════════════════════════════════════════
 
+async def shutdown_chat_sessions(timeout: float = 10.0) -> None:
+    """Cancel local producers, letting consumers persist before dependencies close.
+
+    A hard deadline protects shutdown from unavailable storage or a provider
+    that ignores cancellation. Timed-out work retains its durable state for
+    expired-lease recovery; no remote worker is signalled.
+    """
+    sessions = tuple(_active_sessions.values())
+    if not sessions:
+        return
+    deadline = time.monotonic() + max(0.0, timeout)
+    execution_tasks: set[asyncio.Task] = set()
+    for session in sessions:
+        session.stop_event.set()
+        if session._graph_task and not session._graph_task.done():
+            session._graph_task.cancel()
+        for task in (session._graph_task, session._consumer_task):
+            if task is not None:
+                execution_tasks.add(task)
+
+    pending: set[asyncio.Task] = set()
+    if execution_tasks:
+        done, pending = await asyncio.wait(
+            execution_tasks, timeout=max(0.0, deadline - time.monotonic()),
+        )
+        for task in done:
+            if not task.cancelled() and task.exception() is not None:
+                logger.error("关闭聊天任务失败 | error=%s", task.exception())
+    if pending:
+        logger.error("聊天任务关闭超时，保留持久状态供租约恢复 | tasks=%d", len(pending))
+        for task in pending:
+            task.cancel()
+
+    cleanup_tasks = set(pending)
+    for session in sessions:
+        for task in (session._hb_task, session._flush_task):
+            if task is not None:
+                if not task.done():
+                    task.cancel()
+                cleanup_tasks.add(task)
+    if cleanup_tasks:
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining:
+            await asyncio.wait(cleanup_tasks, timeout=remaining)
+        else:
+            # Run cancellation/finally handlers without waiting indefinitely
+            # for tasks that suppress cancellation.
+            await asyncio.sleep(0)
+    logger.info("本 worker 聊天任务已关闭 | sessions=%d | timed_out=%d", len(sessions), len(pending))
+
+
 async def stream_response(
     conv_id: str, user_message: str, model: str | None = None,
     temperature: float = 0.7, client_id: str = "", user_id: str = "",
@@ -761,67 +911,71 @@ async def stream_response(
         yield chunk
 
 
-async def resume_stream(conv_id: str, after_event_id: int = 0, message_id: str = "") -> AsyncGenerator[str, None]:
-    """
-    恢复流式输出（DB-first 版）：从 event_log 读取历史事件 + 实时事件。
-
-    1. 从 event_log WHERE id > after_event_id 读取遗漏事件
-    2. 如果当前 worker 正在处理该对话，切换到实时推送
-    3. 如果不是当前 worker，只能返回 DB 中已有的事件
-
-    message_id: 限定只回放指定 assistant message 的事件（多轮对话时避免混入旧轮）。
-    """
-    from db.event_store import get_events_since
-
-    # 从 DB 读取遗漏的事件（按 message_id 过滤，避免多轮事件混淆）
-    events = await get_events_since(conv_id, after_event_id, message_id=message_id)
-    for evt in events:
-        if evt["sse_string"]:
-            yield evt["sse_string"]
-
-    # 检查是否还有终止事件
-    has_terminal = any(e["event_type"] in ("done", "stopped", "error") for e in events)
-    if has_terminal:
-        return
-
-    # 如果当前 worker 正在处理，切换到实时推送
-    session = _active_sessions.get(conv_id)
-    if session:
-        # 从 session 的内存缓冲继续（跳过已从 DB 发过的）
-        idx = len(session._sse_events)  # 从当前位置开始
-        waiter = asyncio.Event()
-        session._sse_waiters.append(waiter)
-        try:
-            while True:
-                if idx < len(session._sse_events):
-                    for evt in session._sse_events[idx:]:
-                        yield evt
-                    idx = len(session._sse_events)
-                if session._sse_done:
-                    for evt in session._sse_events[idx:]:
-                        yield evt
-                    break
-                waiter.clear()
-                try:
-                    await asyncio.wait_for(waiter.wait(), timeout=5.0)
-                except asyncio.TimeoutError:
-                    pass
-        except asyncio.CancelledError:
-            pass
-        finally:
+def _with_event_id(sse_string: str, event_id: int, message_id: str = "") -> str:
+    """Expose the durable cursor to fetch clients and standard EventSource."""
+    lines = []
+    for line in sse_string.splitlines():
+        if line.startswith("id:"):
+            continue
+        if line.startswith("data:"):
             try:
-                session._sse_waiters.remove(waiter)
-            except ValueError:
+                data = json.loads(line[5:].strip())
+                data["id"] = event_id
+                if message_id:
+                    data["message_id"] = message_id
+                line = "data: " + json.dumps(data, ensure_ascii=False)
+            except (ValueError, TypeError):
                 pass
-    else:
-        # 不在当前 worker — 轮询 DB（不理想但能用）
-        last_id = events[-1]["id"] if events else after_event_id
-        for _ in range(600):  # 最多 5 分钟
-            await asyncio.sleep(0.5)
-            new_events = await get_events_since(conv_id, last_id)
-            for evt in new_events:
-                if evt["sse_string"]:
-                    yield evt["sse_string"]
-                last_id = evt["id"]
-            if any(e["event_type"] in ("done", "stopped", "error") for e in new_events):
-                break
+        if line:
+            lines.append(line)
+    return "\n".join([f"id: {event_id}", *lines]) + "\n\n"
+
+
+async def resume_stream(conv_id: str, after_event_id: int = 0, message_id: str = "") -> AsyncGenerator[str, None]:
+    """Replay and tail one durable event log on every worker, without handoff gaps."""
+    from db.event_store import get_events_since
+    from memory import store as memory_store
+
+    # Never mix terminal events from previous turns into a current recovery.
+    if not message_id:
+        conv = await memory_store.db_get_conversation(conv_id)
+        assistants = [m for m in (conv or {}).get("messages", []) if m.get("role") == "assistant"]
+        message_id = assistants[-1].get("message_id", "") if assistants else ""
+        if not message_id:
+            yield sse({SSEEventType.DONE.value: True, "compressed": False})
+            return
+
+    cursor = max(0, after_event_id)
+    last_ping = time.monotonic()
+    terminal = {SSEEventType.DONE.value, SSEEventType.STOPPED.value, SSEEventType.ERROR.value}
+    while True:
+        events = await get_events_since(conv_id, cursor, message_id=message_id)
+        for evt in events:
+            cursor = evt["id"]
+            if evt["sse_string"]:
+                yield _with_event_id(evt["sse_string"], cursor, message_id)
+            if evt["event_type"] in terminal:
+                return
+        if events:
+            # Drain committed pages before sleeping or checking completion.
+            continue
+        if not events:
+            # DB completion is authoritative when a client reconnects after the
+            # terminal cursor, or a worker died before writing a terminal event.
+            message = await memory_store.get_message_stream_state(conv_id, message_id)
+            if message and not message.get("stream_completed", True) and time.monotonic() - last_ping >= 3:
+                from services.conversation_service import conversation_service
+                await conversation_service.reconcile_stream_state(conv_id)
+                message = await memory_store.get_message_stream_state(conv_id, message_id)
+            if not message or (message.get("stream_completed", True) and message.get("status") != "streaming"):
+                # Close the race: a final batch may have committed while reading
+                # the message. Drain it on the next iteration before synthesizing done.
+                tail = await get_events_since(conv_id, cursor, message_id=message_id)
+                if tail:
+                    continue
+                yield sse({SSEEventType.DONE.value: True, "compressed": False})
+                return
+        if time.monotonic() - last_ping >= 3:
+            yield sse({SSEEventType.PING.value: True})
+            last_ping = time.monotonic()
+        await asyncio.sleep(0.5)

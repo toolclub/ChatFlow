@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import hashlib
 import logging
 import re
@@ -41,6 +42,8 @@ import time
 from datetime import date, timedelta
 
 import pandas as pd
+
+from quant.execution import run_io
 
 logger = logging.getLogger("quant.data.announcement")
 
@@ -272,7 +275,7 @@ async def _ak_frame(
                     **绝不降级成空表** —— 把「数据源挂了」说成「这只票很干净」是最危险的谎。
     """
     try:
-        import akshare as ak
+        ak = await run_io(importlib.import_module, "akshare")
     except ImportError as exc:
         logger.warning("akshare 不可用: %s", exc)
         raise AnnouncementDataError(source, f"akshare 未安装：{exc}") from exc
@@ -293,7 +296,7 @@ async def _ak_frame(
             await asyncio.sleep(delay)
         try:
             df = await asyncio.wait_for(
-                asyncio.to_thread(func, *args, **kwargs), timeout=timeout,
+                run_io(func, *args, **kwargs), timeout=timeout,
             )
         except KeyError as exc:
             # ★ 头号坑：0 条结果 / 非法枚举入参都走这里。不是错误，是「没有数据」。

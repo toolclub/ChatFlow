@@ -15,6 +15,13 @@ import graph.prediction_agent as pa
 from fsm.prediction import PredictionStatus, PredictionSM
 
 
+@pytest.fixture(autouse=True)
+def _no_remote_owner(monkeypatch):
+    async def _request_cancel(*args):
+        return False
+    monkeypatch.setattr(pa.prediction_runtime, "request_cancel", _request_cancel)
+
+
 class _FakeSession:
     """替代 PredictionSession，记录 stop() 是否被调用（即 graph_task 是否被取消）。"""
 

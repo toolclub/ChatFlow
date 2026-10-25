@@ -14,6 +14,7 @@ export interface SearchItem {
 export type ToolDisplayMode = 'terminal' | 'file_write' | 'file_read' | 'default'
 
 export interface ToolCallRecord {
+  toolRunId?: string
   name: string
   input: Record<string, unknown>
   output?: string
@@ -133,7 +134,7 @@ export interface SendPayload {
 }
 
 export interface AgentStatus {
-  state: 'idle' | 'vision_analyze' | 'routing' | 'planning' | 'thinking' | 'tool' | 'reflecting' | 'saving' | 'done'
+  state: 'idle' | 'reconnecting' | 'vision_analyze' | 'routing' | 'planning' | 'thinking' | 'tool' | 'reflecting' | 'saving' | 'done'
   model: string
   tool?: string
   intent?: string
@@ -284,6 +285,7 @@ export interface QuantProviderTrace {
 }
 
 export interface QuantScreenResult {
+  status?: 'COMPUTING' | 'DONE' | 'FAILED'
   snapshot_id: string
   criteria: QuantScreenCriteria
   rows: QuantFactorScore[]

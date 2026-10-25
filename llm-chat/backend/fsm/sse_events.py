@@ -20,6 +20,7 @@ class SSEEventType(str, Enum):
     # ── 会话控制（最高优先级） ──
     DONE = "done"
     STOPPED = "stopped"
+    STOP_CONFIRMED = "stop_confirmed"
     PAUSED = "paused"                        # 暂停确认（与 STOPPED 平级；但 paused 非终态，可 resume）
     ERROR = "error"
 
@@ -74,6 +75,7 @@ class SSEEventType(str, Enum):
 _PRIORITY_ORDER: list[SSEEventType] = [
     SSEEventType.DONE,
     SSEEventType.STOPPED,
+    SSEEventType.STOP_CONFIRMED,
     SSEEventType.PAUSED,
     SSEEventType.ERROR,
     SSEEventType.CLARIFICATION,

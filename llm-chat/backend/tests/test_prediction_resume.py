@@ -74,6 +74,7 @@ def test_terminal_replay_yields_events_no_graph(monkeypatch):
         return SimpleNamespace(status="done")  # 终态快照（即便被读也应判终态）
 
     monkeypatch.setattr(pa, "get_prediction_snapshot", _fake_get_snap)
+    monkeypatch.setattr(pa, "get_prediction_runtime_snapshot", _fake_get_snap)
 
     start_calls = {"n": 0}
 
@@ -144,6 +145,7 @@ def test_after_event_id_replays_only_onward(monkeypatch):
         return SimpleNamespace(status="done")
 
     monkeypatch.setattr(pa, "get_prediction_snapshot", _fake_get_snap)
+    monkeypatch.setattr(pa, "get_prediction_runtime_snapshot", _fake_get_snap)
     monkeypatch.setattr(pa, "start_prediction_graph",
                         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("不应启图")))
     monkeypatch.setattr(pa, "_SESSIONS", {})
@@ -242,6 +244,7 @@ def test_start_prediction_graph_background(monkeypatch):
         return SimpleNamespace(status="inferring")
 
     monkeypatch.setattr(pa, "get_prediction_snapshot", _fake_get_snap)
+    monkeypatch.setattr(pa, "get_prediction_runtime_snapshot", _fake_get_snap)
 
     async def _fake_update_status(_sid, _status, error_message=None):
         return None
@@ -254,6 +257,10 @@ def test_start_prediction_graph_background(monkeypatch):
 
     monkeypatch.setattr("db.redis_state.register_streaming", _noop)
     monkeypatch.setattr("db.redis_state.unregister_streaming", _noop)
+    async def _acquire(_sid):
+        return "test-owner"
+    monkeypatch.setattr(pa.prediction_runtime, "acquire", _acquire)
+    monkeypatch.setattr(pa.prediction_runtime, "release", _noop)
 
     state = pa.build_initial_state(
         snapshot_id="pred_bg",

@@ -1,16 +1,16 @@
 <script setup lang="ts">
-import { onMounted, computed, ref, watch } from 'vue'
+import { onMounted, computed, ref, watch, defineAsyncComponent } from 'vue'
 import { useChat } from './composables/useChat'
 import { useAuth } from './composables/useAuth'
 import type { FileArtifact } from './types'
 import Sidebar from './components/Sidebar.vue'
 import ChatView from './components/ChatView.vue'
 import CognitivePanel from './components/CognitivePanel.vue'
-import QuantView from './components/QuantView.vue'
-import PredictionView from './components/PredictionView.vue'
-import StockDetailView from './components/StockDetailView.vue'
+const QuantView = defineAsyncComponent(() => import('./components/QuantView.vue'))
+const PredictionView = defineAsyncComponent(() => import('./components/PredictionView.vue'))
+const StockDetailView = defineAsyncComponent(() => import('./components/StockDetailView.vue'))
 import LoginView from './components/LoginView.vue'
-import SysDashboard from './components/SysDashboard.vue'
+const SysDashboard = defineAsyncComponent(() => import('./components/SysDashboard.vue'))
 import { useAdmin } from './composables/useAdmin'
 
 const chat = useChat()

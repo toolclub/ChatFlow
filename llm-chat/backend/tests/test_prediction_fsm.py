@@ -273,115 +273,78 @@ class TestPredictionStatusEnum:
 # ═══════════════════════════════════════════════════════════════
 # T-PRED-06: cleanup_stale_prediction_sessions（mock AsyncSessionLocal）
 # ═══════════════════════════════════════════════════════════════
-class _FakeUpdateStmt:
-    """假 update() 语句：链式 .where().values()，捕获 values 落库内容。"""
+@pytest.fixture
+def stale_store(monkeypatch):
+    import time
+    from types import SimpleNamespace
+    import db.prediction_store as ps
+    from graph.prediction import runtime
 
-    def __init__(self, model=None):
-        self.model = model
-        self.where_calls: list = []
-        self.values_map: dict = {}
-
-    def where(self, *conds):
-        self.where_calls.append(conds)
-        return self
-
-    def values(self, **kw):
-        self.values_map.update(kw)
-        return self
-
-
-class _FakeResult:
-    def __init__(self, rowcount: int):
-        self.rowcount = rowcount
-
-
-class _FakeSession:
-    """假异步会话：记录 execute/commit，返回可配置 rowcount。"""
-
-    def __init__(self, rowcount: int = 3):
-        self._rowcount = rowcount
-        self.executed: list = []
-        self.committed = False
-
-    async def execute(self, stmt):
-        self.executed.append(stmt)
-        return _FakeResult(self._rowcount)
-
-    async def commit(self):
-        self.committed = True
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
-
-
-class _FakeSessionLocal:
-    """替代 db.database.AsyncSessionLocal：返回共享的 _FakeSession。"""
-
-    def __init__(self, session: _FakeSession):
-        self._session = session
-
-    def __call__(self):
-        return self._session
+    state = {"rows": {}, "reads": 0, "commits": 0, "locked": False,
+             "busy": set(), "released": [], "refresh": set(), "redis_down": False}
+    class Session:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
+        async def execute(self, stmt):
+            state["reads"] += 1
+            if state["reads"] == 1:
+                assert "updated_at" in str(stmt)
+                return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: list(state["rows"])))
+            state["locked"] = stmt._for_update_arg is not None
+            sid = stmt.compile().params["id_1"]
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: state["rows"].get(sid)))
+        async def commit(self): state["commits"] += 1
+    async def acquire(sid):
+        if state["redis_down"]:
+            raise ConnectionError("offline")
+        if sid in state["refresh"]:
+            state["rows"][sid].updated_at = time.time()
+        return None if sid in state["busy"] else "cleanup-owner"
+    async def release(sid, token): state["released"].append(sid)
+    monkeypatch.setattr(ps, "AsyncSessionLocal", Session)
+    monkeypatch.setattr(runtime, "acquire", acquire)
+    monkeypatch.setattr(runtime, "release", release)
+    state["add"] = lambda sid, status="inferring": state["rows"].setdefault(
+        sid, SimpleNamespace(id=sid, status=status, updated_at=time.time()-600, error_message=""),
+    )
+    return state
 
 
 @pytest.mark.unit
-def test_cleanup_marks_running_statuses_to_failed(monkeypatch):
-    """无 timeout 调用：把卡在 queued/news_searching/inferring 的行置 failed，
-    返回受影响行数，commit 已执行，error_message 为「服务重启」原因。"""
+def test_cleanup_pauses_only_abandoned_jobs(stale_store):
     import db.prediction_store as ps
-
-    session = _FakeSession(rowcount=7)
-    monkeypatch.setattr(ps, "AsyncSessionLocal", _FakeSessionLocal(session))
-    monkeypatch.setattr(ps, "update", lambda model: _FakeUpdateStmt(model))
-
-    count = asyncio.run(ps.cleanup_stale_prediction_sessions())
-
-    # 返回受影响行数
-    assert count == 7
-    # session.execute 被调用且 commit 被执行（持久化铁律 #4）
-    assert len(session.executed) == 1
-    assert session.committed is True
-    # 落库 status=failed + 非空 error_message（铁律 #2：结构化字段独立）
-    stmt = session.executed[0]
-    assert stmt.values_map.get("status") == "failed"
-    assert stmt.values_map.get("error_message")  # 非空
-    assert "中断" in stmt.values_map["error_message"]
+    orphan = stale_store["add"]("orphan")
+    live = stale_store["add"]("live")
+    stale_store["busy"].add("live")
+    assert asyncio.run(ps.cleanup_stale_prediction_sessions()) == 1
+    assert orphan.status == "paused" and "中断" in orphan.error_message
+    assert live.status == "inferring"
+    assert stale_store["locked"] and stale_store["commits"] == 1
+    assert stale_store["released"] == ["orphan"]
 
 
 @pytest.mark.unit
-def test_cleanup_with_timeout_sets_timeout_reason(monkeypatch):
-    """带 timeout_minutes：error_message 含超时分钟数，新增 created_at where 条件。"""
+def test_cleanup_rechecks_fresh_activity_under_row_lock(stale_store):
     import db.prediction_store as ps
-
-    session = _FakeSession(rowcount=2)
-    monkeypatch.setattr(ps, "AsyncSessionLocal", _FakeSessionLocal(session))
-    monkeypatch.setattr(ps, "update", lambda model: _FakeUpdateStmt(model))
-
-    count = asyncio.run(ps.cleanup_stale_prediction_sessions(timeout_minutes=5))
-
-    assert count == 2
-    stmt = session.executed[0]
-    assert stmt.values_map.get("status") == "failed"
-    assert "5" in stmt.values_map["error_message"]
-    # timeout 路径多一条 where（created_at < cutoff）
-    assert len(stmt.where_calls) >= 2
+    fresh = stale_store["add"]("fresh")
+    stale_store["refresh"].add("fresh")
+    assert asyncio.run(ps.cleanup_stale_prediction_sessions(timeout_minutes=5)) == 0
+    assert fresh.status == "inferring" and stale_store["commits"] == 0
+    assert stale_store["locked"]
+    assert stale_store["released"] == ["fresh"]
 
 
 @pytest.mark.unit
-def test_cleanup_zero_rows_returns_zero(monkeypatch):
-    """没有卡住的任务：rowcount=0，仍正常 commit。"""
+def test_cleanup_unavailable_lease_store_does_not_guess(stale_store):
     import db.prediction_store as ps
+    live = stale_store["add"]("live")
+    stale_store["redis_down"] = True
+    assert asyncio.run(ps.cleanup_stale_prediction_sessions()) == 0
+    assert live.status == "inferring" and stale_store["commits"] == 0
 
-    session = _FakeSession(rowcount=0)
-    monkeypatch.setattr(ps, "AsyncSessionLocal", _FakeSessionLocal(session))
-    monkeypatch.setattr(ps, "update", lambda model: _FakeUpdateStmt(model))
 
-    count = asyncio.run(ps.cleanup_stale_prediction_sessions())
-
-    assert count == 0
-    assert session.committed is True
-    # 即便 0 行，仍把 status=failed 写入语句
-    assert session.executed[0].values_map.get("status") == "failed"
+@pytest.mark.unit
+def test_cleanup_zero_rows_returns_zero(stale_store):
+    import db.prediction_store as ps
+    assert asyncio.run(ps.cleanup_stale_prediction_sessions()) == 0
+    assert stale_store["commits"] == 0

@@ -2,7 +2,7 @@
 import { ref, computed, nextTick, onMounted, watch } from 'vue'
 import type { ConversationInfo } from '../types'
 import {
-  Plus, Search, ChatDotRound, Delete, Check, Close, Select, Monitor, User, TrendCharts,
+  Search, ChatDotRound, Delete, Close, Monitor, User, TrendCharts,
 } from '@element-plus/icons-vue'
 
 const props = defineProps<{
@@ -20,6 +20,7 @@ const emit = defineEmits<{
   batchDelete: [ids: string[]]
   switchWorkspace: [workspace: 'chat' | 'quant' | 'prediction' | 'admin']
   openAdmin: []
+  showLogin: []
 }>()
 
 const searchQuery = ref('')

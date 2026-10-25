@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import type { QuantScreenCriteria } from '../types'
 import { useQuant } from '../composables/useQuant'
 import { ChatLineRound, Filter, DataAnalysis, Warning, TrendCharts, Money, Suitcase, Collection, Finished, Aim, Check, Search } from '@element-plus/icons-vue'
 
@@ -165,7 +166,7 @@ watch(activeMarket, (newMarket) => {
                 :key="opt.value"
                 class="universe-opt-card"
                 :class="{ active: quant.criteria.value.universe === opt.value }"
-                @click="quant.criteria.value.universe = opt.value"
+                @click="quant.criteria.value.universe = opt.value as QuantScreenCriteria['universe']"
               >
                 <div class="opt-main">
                   <el-icon class="opt-icon"><component :is="opt.icon" /></el-icon>

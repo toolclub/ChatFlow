@@ -117,6 +117,8 @@ const modelParams = computed<ModelParams | null>(
 )
 
 let _predictAbort: AbortController | null = null
+let _snapshotVersion = 0
+let _chartAbort: AbortController | null = null
 /** pause/resume/delete 在途标记，避免用户狂点导致并发请求 */
 const isPausing = ref(false)
 const isResuming = ref(false)
@@ -326,9 +328,12 @@ export function usePrediction() {
    *   重建出来 —— 不依赖 SSE 事件重放。事件重放到达时会按 key 覆盖，不会画重。
    */
   async function loadSnapshot(id: string): Promise<PredictionSnapshot | null> {
+    const version = ++_snapshotVersion
+    _chartAbort?.abort()
     try {
       const key = admin.verifiedAdminKey.value
       const snap = await api.fetchPredictionSnapshot(id, key)
+      if (version !== _snapshotVersion || viewingId.value !== id) return null
 
       // K 线历史。已完成记录后端已把当时的 bars 落库到 historical_bars（图表契约结构），
       // 有内容就直接用、**跳过现拉**（这就是用户要的：美股链路会被雅虎限流卡死甚至超时）。
@@ -343,27 +348,22 @@ export function usePrediction() {
           volumes: snap.historical_bars.volumes as unknown as [string, number, number][] | undefined,
         }
       } else if (snap.symbol && snap.market) {
-        // 回退现拉。可选：失败不阻塞，图表仍能画预测段。
-        // 给现拉包一个 15s 超时上限：即便 provider 被限流也不让详情页无限转圈，
-        // 超时/失败一律 console.warn + 图表走空态（不设置 historical_data）。
-        try {
-          const chart = await Promise.race([
-            api.fetchStockChart(snap.symbol, 240, key),
-            new Promise((_, reject) =>
-              setTimeout(() => reject(new Error('fetch historical K-line timeout (15s)')), 15000),
-            ),
-          ]) as Awaited<ReturnType<typeof api.fetchStockChart>>
-          snap.historical_data = {
-            dates: chart.dates || [],
-            values: chart.values || [],
-            ma5: chart.ma5,
-            ma10: chart.ma10,
-            ma20: chart.ma20,
-            volumes: chart.volumes,
+        // Chart loading must not delay snapshot rendering or SSE attachment.
+        const controller = new AbortController()
+        _chartAbort = controller
+        const timer = setTimeout(() => controller.abort(), 15_000)
+        void api.fetchStockChart(snap.symbol, 240, key, controller.signal).then(chart => {
+          if (version !== _snapshotVersion || viewingId.value !== id || !currentSnapshot.value) return
+          currentSnapshot.value.historical_data = {
+            dates: chart.dates || [], values: chart.values || [],
+            ma5: chart.ma5, ma10: chart.ma10, ma20: chart.ma20, volumes: chart.volumes,
           }
-        } catch (e) {
-          console.warn('fetch historical K-line failed', e)
-        }
+        }).catch(error => {
+          if (!controller.signal.aborted) console.warn('fetch historical K-line failed', error)
+        }).finally(() => {
+          clearTimeout(timer)
+          if (_chartAbort === controller) _chartAbort = null
+        })
       }
 
       currentSnapshot.value = snap
@@ -395,7 +395,7 @@ export function usePrediction() {
       }
       return snap
     } catch (e: any) {
-      errorMsg.value = e?.message || '获取预测快照失败'
+      if (version === _snapshotVersion && viewingId.value === id) errorMsg.value = e?.message || '获取预测快照失败'
       return null
     }
   }
@@ -539,7 +539,7 @@ export function usePrediction() {
 
     // 这条流是不是仍然是"当前流"。被 _abortStream / 新的 streamPredict 顶掉之后，
     // 迟到的回调必须全部作废 —— 否则被切走的旧流会继续改列表、甚至把自己标成已停止。
-    const isThisStream = () => streamingId.value === predictionId
+    const isThisStream = () => streamingId.value === predictionId && _predictAbort?.signal === signal
 
     // 重放不立刻清空 thinking（会闪白），等第一条 thinking 事件到达再清（见 appendThinking）
     _resetThinkingBuffers()
@@ -573,7 +573,7 @@ export function usePrediction() {
             if (!isThisStream()) return
             // 状态机转换：列表行永远更新；详情面板只在看着这条时更新
             patchRecord(predictionId, { status: status as PredictionRecord['status'] })
-            if (!isLiveFor(predictionId)) return
+            if (!isThisStream() || !isLiveFor(predictionId)) return
             predictionStage.value = predictionStatusLabel(status)
             if (currentSnapshot.value) {
               currentSnapshot.value.status = status as PredictionSnapshot['status']
@@ -588,7 +588,7 @@ export function usePrediction() {
           onPhaseProgress: (p) => {
             if (!isThisStream()) return
             patchRecord(predictionId, { progress: p })
-            if (!isLiveFor(predictionId)) return
+            if (!isThisStream() || !isLiveFor(predictionId)) return
             progress.value = p
             if (connectionMsg.value) {
               connectionMsg.value = ''
@@ -597,17 +597,17 @@ export function usePrediction() {
           },
 
           onThinking: (text) => {
-            if (!isLiveFor(predictionId)) return
+            if (!isThisStream() || !isLiveFor(predictionId)) return
             appendThinking(text)
           },
 
           onContent: (text) => {
-            if (!isLiveFor(predictionId)) return
+            if (!isThisStream() || !isLiveFor(predictionId)) return
             appendThinking(text)
           },
 
           onNews: (item) => {
-            if (!isLiveFor(predictionId)) return
+            if (!isThisStream() || !isLiveFor(predictionId)) return
             const dim = item as Partial<NewsDimension>
             const rawItem = item as Partial<NewsItem>
             if (dim && dim.dimension) {
@@ -630,7 +630,7 @@ export function usePrediction() {
           },
 
           onForecast: (fc) => {
-            if (!isLiveFor(predictionId)) return
+            if (!isThisStream() || !isLiveFor(predictionId)) return
             forecast.value = fc
             if (currentSnapshot.value) currentSnapshot.value.forecast = fc
             // 终态 FORECAST 里若带了蜡烛/公式（后端一次性补齐），按 key 归并（不覆盖已流式到达的）
@@ -639,7 +639,7 @@ export function usePrediction() {
           },
 
           onInflection: (points) => {
-            if (!isLiveFor(predictionId)) return
+            if (!isThisStream() || !isLiveFor(predictionId)) return
             if (currentSnapshot.value) {
               currentSnapshot.value.inflection_points = points as PredictionSnapshot['inflection_points']
             }
@@ -650,27 +650,27 @@ export function usePrediction() {
 
           // ── v2 事件：全部幂等归并（重放不重复渲染）──────────────────────────
           onToolTrace: (t) => {
-            if (!isLiveFor(predictionId)) return
+            if (!isThisStream() || !isLiveFor(predictionId)) return
             mergeToolTrace(t)
           },
 
           onDataItem: (d) => {
-            if (!isLiveFor(predictionId)) return
+            if (!isThisStream() || !isLiveFor(predictionId)) return
             mergeFilingDimension(d)
           },
 
           onFormulaStep: (s) => {
-            if (!isLiveFor(predictionId)) return
+            if (!isThisStream() || !isLiveFor(predictionId)) return
             mergeFormulaStep(s)
           },
 
           onForecastDay: (c) => {
-            if (!isLiveFor(predictionId)) return
+            if (!isThisStream() || !isLiveFor(predictionId)) return
             mergeForecastCandle(c)
           },
 
           onEventMarker: (m) => {
-            if (!isLiveFor(predictionId)) return
+            if (!isThisStream() || !isLiveFor(predictionId)) return
             mergeEventMarker(m)
           },
 
@@ -782,14 +782,14 @@ export function usePrediction() {
       // 永远钉在 predicting 且不给任何提示。
       if (!signal.aborted) {
         console.warn('[prediction] stream terminated unexpectedly', e)
-        if (streamingId.value === predictionId) {
+        if (isThisStream()) {
           connectionMsg.value = '与服务器的连接意外中断（网络异常）。预测仍在后台运行，可点击重连继续。'
           canManualReconnect.value = true
           isReconnecting.value = false
         }
       }
     } finally {
-      _flushThinking()
+      if (isThisStream()) _flushThinking()
       if (_predictAbort?.signal === signal) _predictAbort = null
     }
   }
@@ -806,6 +806,7 @@ export function usePrediction() {
   /** 停止预测：停的是「正在跑的那条」，不是「正在看的那条」 */
   async function stopPredict() {
     const pid = streamingId.value
+    const connection = _predictAbort
     const key = admin.verifiedAdminKey.value
     if (pid && key) {
       try {
@@ -813,8 +814,12 @@ export function usePrediction() {
         await api.stopPrediction(pid, key)
       } catch (e) {
         console.warn('stop prediction backend failed', e)
+        if (_predictAbort === connection) connectionMsg.value = '尚未确认停止，请重试'
+        return
       }
     }
+    if (pid) patchRecord(pid, { status: 'stopped', progress: {} })
+    if (_predictAbort !== connection) return
     _abortStream()
     _flushThinking()
     isPredicting.value = false
@@ -839,6 +844,10 @@ export function usePrediction() {
    * 暂停的语义就是「保留已完成维度」，擦掉就等于骗人。
    */
   function _applyPaused(pid: string) {
+    if (streamingId.value && streamingId.value !== pid) {
+      patchRecord(pid, { status: 'paused' })
+      return
+    }
     _flushThinking()
     _abortStream()
     isPredicting.value = false
@@ -887,18 +896,21 @@ export function usePrediction() {
     isResuming.value = true
     try {
       const res = await api.resumePrediction(pid, key)
+      patchRecord(pid, { status: (res.status || 'queued') as PredictionRecord['status'] })
+      if (viewingId.value !== pid) return
       resetTransient()
       predictionStage.value = predictionStatusLabel(res.status || 'queued')
       patchRecord(pid, { status: (res.status || 'queued') as PredictionRecord['status'] })
       // 已完成的维度/公式/蜡烛在 DB 里，游标续传不会重发 → 先拉回来再连流
-      await loadSnapshot(pid)
+      const snap = await loadSnapshot(pid)
+      if (!snap || viewingId.value !== pid) return
       if (currentSnapshot.value) {
         currentSnapshot.value.status = (res.status || 'queued') as PredictionSnapshot['status']
       }
       void streamPredict(pid, _cursorFor(pid), { replay: true })
       void loadRecords()
     } catch (e: any) {
-      errorMsg.value = e?.message || '继续预测失败'
+      if (viewingId.value === pid) errorMsg.value = e?.message || '继续预测失败'
     } finally {
       isResuming.value = false
     }

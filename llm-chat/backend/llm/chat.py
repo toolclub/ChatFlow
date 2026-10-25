@@ -2,7 +2,7 @@
 LLM 工厂：AsyncOpenAI 客户端实例管理
 
 替代 langchain_openai.ChatOpenAI，使用原生 openai SDK。
-使用模块级缓存（HTTP 客户端按 base_url 缓存，LLMClient 按 model+temperature 缓存），
+使用模块级缓存（HTTP 客户端按 base_url 缓存，LLMClient 按 endpoint+credentials+model+temperature 缓存），
 避免每次请求都新建 HTTP 连接。
 
 供应商管理（cc-switch 模式）：工厂经 services/llm_provider_service 解析
@@ -17,6 +17,8 @@ LLM 工厂：AsyncOpenAI 客户端实例管理
     get_vision_llm(model, temperature) → LLMClient    ── 视觉 LLM
     get_vision_async_client()          → AsyncOpenAI  ── 视觉原始客户端（流式打点用）
 """
+import json
+
 from openai import AsyncOpenAI
 
 from llm.client import LLMClient
@@ -27,8 +29,8 @@ from services import llm_provider_service
 # ── 底层 HTTP 客户端缓存（按 base_url+api_key 复用） ──────────────────────────
 _http_cache: dict[str, AsyncOpenAI] = {}
 
-# ── LLMClient 封装缓存（按 base_url+model+temperature 缓存） ─────────────────
-_client_cache: dict[str, LLMClient] = {}
+# ── LLMClient 封装缓存（按 base_url+api_key+model+temperature 缓存） ─────────────────
+_client_cache: dict[tuple, LLMClient] = {}
 
 
 def _get_http_client(base_url: str, api_key: str) -> AsyncOpenAI:
@@ -44,27 +46,31 @@ def _make_client(
     api_key: str,
     model: str,
     temperature: float,
+    role: str = "chat",
 ) -> LLMClient:
-    """通用工厂：按（base_url, model, temperature）缓存并返回 LLMClient。"""
-    cache_key = f"{base_url}:{model}:{temperature}"
+    """通用工厂：按（base_url, api_key, model, temperature）缓存并返回 LLMClient。"""
+    from config import settings
+    options = settings.llm_role_options.get(role, {})
+    cache_key = (base_url, api_key, model, temperature, role, json.dumps(options, sort_keys=True))
     if cache_key not in _client_cache:
         http_client = _get_http_client(base_url, api_key)
 
         # ── 适配提供商抽象（DI 注入） ─────────────────────────────────────────
-        provider = get_provider_for_model(model)
+        provider = get_provider_for_model(model, role=role)
 
         _client_cache[cache_key] = LLMClient(
             client=http_client,
             model=model,
             temperature=temperature,
             provider=provider,
+            request_options=options,
         )
     return _client_cache[cache_key]
 
 
 def get_chat_llm(model: str | None = None, temperature: float = 0.7) -> LLMClient:
     """
-    返回主 LLM 实例（按 base_url+model+temperature 缓存）。
+    返回主 LLM 实例（按 base_url+api_key+model+temperature 缓存）。
 
     model 允许 None（= 默认对话模型）。供应商快照存在时用快照的 base_url/api_key，
     并把 env 角色模型名（CHAT/SUMMARY/ROUTER/SEARCH/MAP）映射到快照对应角色；
@@ -87,7 +93,7 @@ def get_summary_llm() -> LLMClient:
     无法区分角色（会退化到 chat_model），角色感知直接取快照.summary_model。
     """
     base_url, api_key, effective_model = llm_provider_service.resolve_summary()
-    return _make_client(base_url, api_key, effective_model, temperature=0.2)
+    return _make_client(base_url, api_key, effective_model, temperature=0.2, role="summary")
 
 
 def get_router_llm(temperature: float = 0.0) -> LLMClient:
@@ -99,7 +105,7 @@ def get_router_llm(temperature: float = 0.0) -> LLMClient:
     同名碰撞的影响，快照存在时直接取快照.router_model。
     """
     base_url, api_key, effective_model = llm_provider_service.resolve_router()
-    return _make_client(base_url, api_key, effective_model, temperature)
+    return _make_client(base_url, api_key, effective_model, temperature, role="router")
 
 
 def get_vision_llm(
@@ -120,7 +126,7 @@ def get_vision_llm(
     if not (snapshot and snapshot.vision_model):
         # 无快照视觉覆盖：保留旧回退链（显式 model 优先）
         effective_model = model or effective_model
-    return _make_client(base_url, api_key, effective_model, temperature)
+    return _make_client(base_url, api_key, effective_model, temperature, role="vision")
 
 
 def get_vision_async_client() -> AsyncOpenAI:

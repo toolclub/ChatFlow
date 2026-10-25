@@ -13,12 +13,14 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 import pandas as pd
+
+from quant.execution import run_compute, run_io
 
 from quant.domain import (
     ProviderCapability,
@@ -87,7 +89,7 @@ class TushareProvider:
         ProviderRegistry 后续不会再把这类请求路由到 tushare。
         """
         try:
-            import tushare  # noqa: F401
+            tushare = await run_io(importlib.import_module, "tushare")
         except ImportError:
             return ProviderHealth(
                 status=ProviderHealthStatus.DOWN,
@@ -95,7 +97,7 @@ class TushareProvider:
             )
 
         try:
-            await asyncio.to_thread(self._ping)
+            await run_io(self._ping)
         except Exception as exc:
             return ProviderHealth(
                 status=ProviderHealthStatus.DEGRADED,
@@ -116,9 +118,9 @@ class TushareProvider:
                     pass
 
         # 并行探活提升速度，但内部 _try 捕获异常
-        await asyncio.to_thread(_try, "daily_basic", self._probe_daily_basic)
-        await asyncio.to_thread(_try, "pro_bar", self._probe_pro_bar)
-        await asyncio.to_thread(_try, "index_weight", self._probe_index_weight)
+        await run_io(_try, "daily_basic", self._probe_daily_basic)
+        await run_io(_try, "pro_bar", self._probe_pro_bar)
+        await run_io(_try, "index_weight", self._probe_index_weight)
 
         if "daily_basic" in revoked:
             self.capabilities.discard(ProviderCapability.REALTIME_SNAPSHOT)
@@ -179,7 +181,7 @@ class TushareProvider:
     # ── 公开 API ───────────────────────────────────────────────────────────
 
     async def list_stocks(self, market: str = "cn_a") -> list[Stock]:
-        df = await asyncio.to_thread(self._fetch_stock_basic)
+        df = await run_io(self._fetch_stock_basic)
         if df.empty:
             return []
         return [
@@ -205,7 +207,7 @@ class TushareProvider:
     async def realtime_snapshot(self, market: str = "cn_a") -> pd.DataFrame:
         if market != "cn_a":
             raise ValueError(f"Tushare 仅支持 cn_a，收到：{market}")
-        return await asyncio.to_thread(self._fetch_daily_basic_latest)
+        return await run_io(self._fetch_daily_basic_latest)
 
     def _fetch_daily_basic_latest(self) -> pd.DataFrame:
         pro = self._get_pro()
@@ -320,7 +322,7 @@ class TushareProvider:
         if not trade_dates:
             return pd.DataFrame()
 
-        pro = self._get_pro()
+        pro = await run_io(self._get_pro)
 
         def _fetch_one_day(d: str) -> pd.DataFrame:
             for attempt in range(3):
@@ -352,12 +354,17 @@ class TushareProvider:
                         time.sleep(0.5 * (2 ** attempt))
             return pd.DataFrame()
 
-        loop = asyncio.get_running_loop()
-        with ThreadPoolExecutor(max_workers=max(1, max_workers)) as ex:
-            futures = [
-                loop.run_in_executor(ex, _fetch_one_day, d) for d in trade_dates
-            ]
-            results = await asyncio.gather(*futures, return_exceptions=True)
+        # Shared bounded workers survive cancellation without joining threads
+        # on the event loop or releasing capacity while an SDK call still runs.
+        batch_limit = asyncio.Semaphore(max(1, min(max_workers, 32)))
+
+        async def _fetch_day(d):
+            async with batch_limit:
+                return await run_io(_fetch_one_day, d)
+
+        results = await asyncio.gather(
+            *(_fetch_day(d) for d in trade_dates), return_exceptions=True,
+        )
 
         dfs: list[pd.DataFrame] = []
         for r in results:
@@ -369,43 +376,46 @@ class TushareProvider:
         if not dfs:
             return pd.DataFrame()
 
-        df = pd.concat(dfs, ignore_index=True)
+        def _combine():
+            df = pd.concat(dfs, ignore_index=True)
 
-        if adjust == "qfq" and "adj_factor" in df.columns:
-            # qfq = price * adj_factor / max(adj_factor in window) per symbol
-            df["adj_factor"] = pd.to_numeric(df["adj_factor"], errors="coerce").fillna(1.0)
-            base = df.groupby("ts_code")["adj_factor"].transform("max")
-            ratio = (df["adj_factor"] / base).where(base > 0, 1.0)
-            for col in ("open", "high", "low", "close", "pre_close"):
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors="coerce") * ratio
-        elif adjust == "hfq" and "adj_factor" in df.columns:
-            df["adj_factor"] = pd.to_numeric(df["adj_factor"], errors="coerce").fillna(1.0)
-            base = df.groupby("ts_code")["adj_factor"].transform("min")
-            ratio = (df["adj_factor"] / base).where(base > 0, 1.0)
-            for col in ("open", "high", "low", "close", "pre_close"):
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors="coerce") * ratio
+            if adjust == "qfq" and "adj_factor" in df.columns:
+                # qfq = price * adj_factor / max(adj_factor in window) per symbol
+                df["adj_factor"] = pd.to_numeric(df["adj_factor"], errors="coerce").fillna(1.0)
+                base = df.groupby("ts_code")["adj_factor"].transform("max")
+                ratio = (df["adj_factor"] / base).where(base > 0, 1.0)
+                for col in ("open", "high", "low", "close", "pre_close"):
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors="coerce") * ratio
+            elif adjust == "hfq" and "adj_factor" in df.columns:
+                df["adj_factor"] = pd.to_numeric(df["adj_factor"], errors="coerce").fillna(1.0)
+                base = df.groupby("ts_code")["adj_factor"].transform("min")
+                ratio = (df["adj_factor"] / base).where(base > 0, 1.0)
+                for col in ("open", "high", "low", "close", "pre_close"):
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors="coerce") * ratio
 
-        df = df.rename(columns={
-            "ts_code": "symbol",
-            "trade_date": "date",
-            "vol": "volume",
-            "pct_chg": "change_pct",
-        })
-        if "date" in df.columns:
-            df["date"] = pd.to_datetime(
-                df["date"], format="%Y%m%d", errors="coerce",
-            ).dt.strftime("%Y-%m-%d")
-        for col in ("open", "high", "low", "close", "pre_close",
-                    "volume", "amount", "change_pct"):
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-        if "amount" in df.columns:
-            df["amount"] = df["amount"] / 1e5  # tushare daily.amount 单位千元 → 亿元
-        if "adj_factor" in df.columns:
-            df = df.drop(columns=["adj_factor"])
-        return df.sort_values(["symbol", "date"]).reset_index(drop=True)
+            df = df.rename(columns={
+                "ts_code": "symbol",
+                "trade_date": "date",
+                "vol": "volume",
+                "pct_chg": "change_pct",
+            })
+            if "date" in df.columns:
+                df["date"] = pd.to_datetime(
+                    df["date"], format="%Y%m%d", errors="coerce",
+                ).dt.strftime("%Y-%m-%d")
+            for col in ("open", "high", "low", "close", "pre_close",
+                        "volume", "amount", "change_pct"):
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+            if "amount" in df.columns:
+                df["amount"] = df["amount"] / 1e5  # tushare daily.amount 单位千元 → 亿元
+            if "adj_factor" in df.columns:
+                df = df.drop(columns=["adj_factor"])
+            return df.sort_values(["symbol", "date"]).reset_index(drop=True)
+
+        return await run_compute(_combine)
 
     async def daily_bars(
         self,
@@ -422,7 +432,7 @@ class TushareProvider:
         async def _one(sym: str) -> pd.DataFrame:
             async with self._sem:
                 try:
-                    df = await asyncio.to_thread(
+                    df = await run_io(
                         self._fetch_daily, sym, start, end, adjust,
                     )
                     if df.empty:
@@ -488,7 +498,7 @@ class TushareProvider:
         code = code_map.get(index_code, index_code)
         if "." not in code:
             code = f"{code}.SH"
-        return await asyncio.to_thread(self._fetch_index_weight, code)
+        return await run_io(self._fetch_index_weight, code)
 
     def _fetch_index_weight(self, index_code: str) -> list[str]:
         pro = self._get_pro()

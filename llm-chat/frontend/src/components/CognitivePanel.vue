@@ -3,7 +3,8 @@ import { ref, computed, watch, nextTick } from 'vue'
 import type { CognitiveState, PlanStep, ToolHistoryEvent, FileArtifact } from '../types'
 import { isPreviewable } from '../types'
 import { Delete } from '@element-plus/icons-vue'
-import PlanFlowCanvas from './PlanFlowCanvas.vue'
+import { defineAsyncComponent } from 'vue'
+const PlanFlowCanvas = defineAsyncComponent(() => import('./PlanFlowCanvas.vue'))
 import hljs from 'highlight.js/lib/common'
 import { buildIframeSrcdoc } from '../utils/codePreviewBuilders'
 
@@ -235,7 +236,6 @@ const isArchiveFile = computed(() => props.selectedFile?.language === 'archive')
 const pptSlideIndex = ref(0)
 const pptSlides = computed(() => props.selectedFile?.slides_html || [])
 const pptSlideCount = computed(() => pptSlides.value.length)
-const pptCurrentSlideHtml = computed(() => pptSlides.value[pptSlideIndex.value] || '')
 
 watch(() => props.selectedFile, (f) => {
   pptSlideIndex.value = 0
@@ -253,8 +253,6 @@ watch(() => props.selectedFile, (f) => {
   }
 })
 
-function pptPrev() { if (pptSlideIndex.value > 0) pptSlideIndex.value-- }
-function pptNext() { if (pptSlideIndex.value < pptSlideCount.value - 1) pptSlideIndex.value++ }
 
 const fileSizeKb = computed(() => {
   if (!props.selectedFile) return '0'

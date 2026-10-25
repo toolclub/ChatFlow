@@ -399,18 +399,19 @@ def test_predict_state_declares_error_kind_and_preflight():
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# T-PRED-GRAPH-07: _transition_status —— 终态不可协商（状态卡死回归）
+# T-PRED-GRAPH-07: _transition_status —— 合法补齐遗漏中间态（状态卡死回归）
 # ════════════════════════════════════════════════════════════════════════════
 
 @pytest.mark.unit
-def test_transition_status_forces_terminal_when_sm_rejects(monkeypatch):
+def test_transition_status_reconciles_missing_intermediate_states(monkeypatch):
     """★ 回归：中间态转换丢失（DB 里还停在 queued）时，SM 会拒绝 queued→done。
 
     PredictionSM.send_event 对非法转换是「logger.warning + 返回当前值」而不是抛异常，
     所以不能直接写 send_event 的返回值 —— 那会把 queued 原样写回，任务永远卡在 queued：
       · /active 一直把它当成进行中
       · stream_predict 把它当"worker 重启遗留"，整单重跑一遍
-    终态是不可协商的（图已经跑完、事件也已落 event_log），必须强制写入。
+    图已完成时沿合法 FSM 路径补齐中间态；禁止绕过状态机直接强写终态，
+    否则旧图的晚到结果也会覆盖用户刚写入的 paused/stopped。
     """
     written: list[tuple[str, str, str | None]] = []
 
@@ -425,9 +426,8 @@ def test_transition_status_forces_terminal_when_sm_rejects(monkeypatch):
 
     asyncio.run(pa._transition_status("pred_x", "done"))
 
-    assert written == [("pred_x", "done", None)], (
-        f"SM 拒绝 queued→done 时必须强制写终态 done，实际写入 {written}"
-    )
+    assert written == [("pred_x", status, None) for status in
+                       ("news_searching", "inferring", "done")]
 
 
 @pytest.mark.unit

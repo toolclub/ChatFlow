@@ -25,7 +25,12 @@ class OpenAIProvider(LLMProvider):
 class DeepSeekProvider(LLMProvider):
     """DeepSeek 提供商，支持 thinking 和 reasoning_effort。"""
 
+    def __init__(self, role: str = "chat") -> None:
+        self.role = role
+
     def get_extra_body(self, temperature: float) -> dict[str, Any]:
+        if self.role == "router":
+            return {"thinking": {"type": "disabled"}}
         return {
             "thinking": {"type": "enabled"},
             "reasoning_effort": "high",
@@ -40,11 +45,11 @@ class MiniMaxProvider(LLMProvider):
         return {}
 
 
-def get_provider_for_model(model: str) -> LLMProvider:
+def get_provider_for_model(model: str, role: str = "chat") -> LLMProvider:
     """根据模型名称路由到对应的提供商实例。"""
     m = model.lower()
     if "deepseek" in m:
-        return DeepSeekProvider()
+        return DeepSeekProvider(role=role)
     if "minimax" in m:
         return MiniMaxProvider()
     return OpenAIProvider()

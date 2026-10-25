@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive } from 'vue'
+import { reactive } from 'vue'
 import type { PlanStep } from '../types'
 import { Plus, Delete, Top, Bottom, Close } from '@element-plus/icons-vue'
 

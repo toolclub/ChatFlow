@@ -13,7 +13,11 @@ EventDispatcher：事件派发器
   1. 实现新的 EventHandler 子类
   2. 在下方 _HANDLERS 列表中按优先级插入
 """
+import json
 from typing import AsyncGenerator
+
+from fsm.sse_events import SSEEventType
+from graph.runner.utils import sse
 
 from graph.runner.context import StreamContext
 from graph.runner.handlers import (
@@ -98,6 +102,20 @@ class EventDispatcher:
         for handler in self._handlers:
             if handler.matches(event_type, node_name, event_name):
                 async for chunk in handler.handle(event, ctx):
+                    run_id = event.get("run_id")
+                    if run_id and chunk.startswith("data: "):
+                        data = json.loads(chunk[6:].strip())
+                        for kind in (SSEEventType.TOOL_CALL, SSEEventType.TOOL_RESULT,
+                                     SSEEventType.SANDBOX_OUTPUT, SSEEventType.SEARCH_ITEM):
+                            payload = data.get(kind.value)
+                            if isinstance(payload, dict):
+                                payload["tool_run_id"] = str(run_id)
+                                # ToolMessage.status is authoritative for ToolNode
+                                # failures; formatters must not turn errors into done.
+                                output = event.get("data", {}).get("output")
+                                if kind == SSEEventType.TOOL_RESULT and getattr(output, "status", None) == "error":
+                                    payload["status"] = "error"
+                        chunk = sse(data)
                     yield chunk
                 return
 

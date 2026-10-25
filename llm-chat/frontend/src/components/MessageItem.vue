@@ -1,18 +1,16 @@
 <script setup lang="ts">
-import { computed, ref, watch, onMounted, onUnmounted, nextTick, type Directive } from 'vue'
-import katex from 'katex'
+import { computed, ref, watch, onMounted, onUnmounted, type Directive } from 'vue'
 import 'katex/dist/katex.min.css'
 import { Marked } from 'marked'
 import hljs from 'highlight.js/lib/common'
 import type { Message, ToolCallRecord, StepRecord, AgentStatus, CognitiveState, ThinkingSegment } from '../types'
 import { makeEmptyCognitiveState } from '../types'
-import { CopyDocument, Check, Search, Clock, Cpu, Document, ArrowDown, Loading, Close } from '@element-plus/icons-vue'
+import { CopyDocument, Check, Search, Clock, Cpu, Document, Loading, Close } from '@element-plus/icons-vue'
 import CodePreview from './CodePreview.vue'
 import AgentStatusBubble from './AgentStatusBubble.vue'
 import FileArtifactCard from './FileArtifactCard.vue'
 import UploadedFilePreview from './UploadedFilePreview.vue'
 import type { FileArtifact } from '../types'
-import { detectLanguage } from '../types'
 
 const PREVIEWABLE = new Set(['html','svg','css','javascript','js','typescript','ts','vue','jsx','tsx','react'])
 

@@ -27,6 +27,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from quant.execution import run_disk
+
 from quant.config import (
     QUANT_BARS_LOOKBACK_DAYS,
     QUANT_CACHE_DIR,
@@ -79,7 +81,7 @@ def _parse_file_date(p: Path) -> date | None:
         return None
 
 
-# ── 同步 IO（被 asyncio.to_thread 包装） ─────────────────────────────────────
+# ── 同步 IO（被 量化专用有界线程池包装） ─────────────────────────────────────
 
 def _sync_write_df(path: Path, df: pd.DataFrame) -> int:
     """原子写：先写 .tmp，再 rename。返回字节数。"""
@@ -115,14 +117,14 @@ async def write_spot(market: str, df: pd.DataFrame, day: date | None = None) -> 
     if df is None or df.empty:
         return 0
     path = spot_path(market, day)
-    size = await asyncio.to_thread(_sync_write_df, path, df)
+    size = await run_disk(_sync_write_df, path, df)
     logger.info("spot 写盘 market=%s day=%s rows=%d size=%dKB",
                 market, (day or date.today()), len(df), size // 1024)
     return size
 
 
 async def read_spot(market: str, day: date | None = None) -> pd.DataFrame | None:
-    return await asyncio.to_thread(_sync_read_df, spot_path(market, day))
+    return await run_disk(_sync_read_df, spot_path(market, day))
 
 
 async def spot_age_seconds(market: str, day: date | None = None) -> float | None:
@@ -173,7 +175,7 @@ async def write_bars(market: str, df: pd.DataFrame) -> int:
             total += _sync_write_df(bars_path(market, d), sub.reset_index(drop=True))
         return total
 
-    size = await asyncio.to_thread(_split_and_merge)
+    size = await run_disk(_split_and_merge)
     logger.info("bars 写盘 market=%s days=%d rows=%d size=%dKB",
                 market, df["date"].nunique(), len(df), size // 1024)
     return size
@@ -235,7 +237,7 @@ async def read_bars_for_symbol(
         if not frames:
             return None
         return pd.concat(frames, ignore_index=True)
-    return await asyncio.to_thread(_read)
+    return await run_disk(_read)
 
 
 async def read_bars_range(
@@ -273,14 +275,14 @@ async def read_bars_range(
             return None, missing
         return pd.concat(frames, ignore_index=True), missing
 
-    return await asyncio.to_thread(_scan)
+    return await run_disk(_scan)
 
 
 async def write_index(index_code: str, symbols: list[str]) -> int:
     if not symbols:
         return 0
     df = pd.DataFrame({"symbol": list(symbols)})
-    size = await asyncio.to_thread(_sync_write_df, index_path(index_code), df)
+    size = await run_disk(_sync_write_df, index_path(index_code), df)
     logger.info("index 写盘 %s count=%d", index_code, len(symbols))
     return size
 
@@ -293,7 +295,7 @@ async def read_index(index_code: str, max_age_seconds: int = 86400) -> list[str]
     age = time.time() - p.stat().st_mtime
     if age > max_age_seconds:
         return None
-    df = await asyncio.to_thread(_sync_read_df, p)
+    df = await run_disk(_sync_read_df, p)
     if df is None or "symbol" not in df.columns:
         return None
     return df["symbol"].astype(str).tolist()
@@ -310,7 +312,7 @@ async def read_meta() -> dict:
             return json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             return {}
-    return await asyncio.to_thread(_read)
+    return await run_disk(_read)
 
 
 async def update_meta(patch: dict) -> None:
@@ -324,7 +326,7 @@ async def update_meta(patch: dict) -> None:
         tmp = p.with_suffix(".tmp")
         tmp.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, p)
-    await asyncio.to_thread(_update)
+    await run_disk(_update)
 
 
 # ── 滚窗清理 ────────────────────────────────────────────────────────────────
@@ -380,7 +382,7 @@ async def prune(retention_days: int | None = None, max_total_mb: int | None = No
             "max_total_mb": mm,
         }
 
-    stats = await asyncio.to_thread(_prune)
+    stats = await run_disk(_prune)
     logger.info("缓存清理 deleted=%d total=%.1fMB", len(stats["deleted"]), stats["total_mb"])
     return stats
 
@@ -426,7 +428,7 @@ async def cache_status() -> dict:
             "total_mb": round(total_kb / 1024, 2),
         }
 
-    base = await asyncio.to_thread(_status)
+    base = await run_disk(_status)
     base["meta"] = await read_meta()
     return base
 

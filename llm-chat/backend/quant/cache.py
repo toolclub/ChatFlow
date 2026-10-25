@@ -15,6 +15,8 @@ from datetime import datetime
 
 import pandas as pd
 
+from quant.execution import run_disk
+
 logger = logging.getLogger("quant.cache")
 
 _SPOT_KEY_PREFIX = "chatflow:quant:spot:"
@@ -42,7 +44,7 @@ async def get_spot_cached(market: str) -> pd.DataFrame | None:
         raw = await r.get(_spot_key(market))
         if not raw:
             return None
-        df = _deserialize(raw)
+        df = await run_disk(_deserialize, raw)
         if not isinstance(df, pd.DataFrame) or df.empty:
             return None
         return df
@@ -59,7 +61,7 @@ async def set_spot_cached(market: str, df: pd.DataFrame) -> None:
         from db.redis_state import _get_redis  # type: ignore
         r = _get_redis()
         key = _spot_key(market)
-        payload = _serialize(df)
+        payload = await run_disk(_serialize, df)
         await r.set(key, payload, ex=_SPOT_TTL_SECONDS)
         logger.info(
             "spot 缓存已写入 key=%s rows=%d ttl=%ds",

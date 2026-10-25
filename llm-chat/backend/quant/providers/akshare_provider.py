@@ -1,6 +1,6 @@
 """AKShare provider — 免 token，作为 v1 默认数据源
 
-注意：所有 AKShare 调用都是同步的，必须通过 asyncio.to_thread 包装。
+注意：所有 AKShare 调用都是同步的，必须通过 量化专用有界线程池包装。
 
 实战观察：东方财富 `stock_zh_a_spot_em` 内部用 `requests` 库，被服务端
 持续 RST（`RemoteDisconnected`）。但同样的 URL 用 `httpx` / `urllib` /
@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 import math
 import random
@@ -18,6 +19,8 @@ import time
 from datetime import datetime
 
 import pandas as pd
+
+from quant.execution import run_io
 
 from quant.domain import (
     ProviderCapability,
@@ -89,14 +92,14 @@ class AKShareProvider:
 
     async def health_check(self) -> ProviderHealth:
         try:
-            import akshare  # noqa: F401
+            akshare = await run_io(importlib.import_module, "akshare")
         except ImportError:
             return ProviderHealth(
                 status=ProviderHealthStatus.DOWN,
                 message="akshare 未安装（pip install akshare）",
             )
         try:
-            await asyncio.to_thread(self._ping)
+            await run_io(self._ping)
             return ProviderHealth(status=ProviderHealthStatus.OK)
         except Exception as exc:
             return ProviderHealth(
@@ -140,7 +143,7 @@ class AKShareProvider:
     async def realtime_snapshot(self, market: str = "cn_a") -> pd.DataFrame:
         if market != "cn_a":
             raise ValueError(f"AKShare provider 暂只支持 cn_a，收到：{market}")
-        return await asyncio.to_thread(self._fetch_spot_em)
+        return await run_io(self._fetch_spot_em)
 
     @staticmethod
     def _fetch_spot_em() -> pd.DataFrame:
@@ -335,7 +338,7 @@ class AKShareProvider:
             nonlocal done, failed
             async with self._sem:
                 try:
-                    df = await asyncio.to_thread(self._fetch_hist, sym, start, end, adjust)
+                    df = await run_io(self._fetch_hist, sym, start, end, adjust)
                     async with lock:
                         done += 1
                     if df.empty:
@@ -401,7 +404,7 @@ class AKShareProvider:
     async def index_constituents(self, index_code: str) -> list[str]:
         code_map = {"hs300": "000300", "zz500": "000905", "zz1000": "000852"}
         code = code_map.get(index_code, index_code)
-        return await asyncio.to_thread(self._fetch_index_cons, code)
+        return await run_io(self._fetch_index_cons, code)
 
     @staticmethod
     def _fetch_index_cons(code: str) -> list[str]:

@@ -361,7 +361,11 @@ async def delete_prediction_endpoint(prediction_id: str, admin: AdminRequired) -
     因 create_all 先建表而永久 no-op），指望级联只会攒下几百行孤儿事件（设计文档 §7.3）。
     announcement_cache 不删：它是按 symbol 的跨预测共享缓存，删了下次还要重新烧一遍 LLM。
     """
-    await discard_session(prediction_id)
+    try:
+        await discard_session(prediction_id)
+    except Exception as exc:
+        logger.exception("删除前停止预测失败 prediction_id=%s", prediction_id)
+        raise HTTPException(status_code=503, detail="预测仍在停止中，请稍后重试删除") from exc
     deleted = await delete_prediction(prediction_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="预测任务不存在")

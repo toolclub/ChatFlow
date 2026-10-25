@@ -43,14 +43,15 @@ async def append_event(
     return eid
 
 
-async def append_events_batch(events: list[dict]) -> None:
+async def append_events_batch(events: list[dict]) -> list[int]:
     """批量写入事件（性能优化，减少 DB round-trips）。"""
     if not events:
-        return
+        return []
     now = time.time()
     async with AsyncSessionLocal() as session:
+        rows = []
         for e in events:
-            session.add(EventLogModel(
+            rows.append(EventLogModel(
                 conv_id=e["conv_id"],
                 message_id=e.get("message_id", ""),
                 event_type=e["event_type"],
@@ -58,10 +59,14 @@ async def append_events_batch(events: list[dict]) -> None:
                 sse_string=e.get("sse_string", ""),
                 created_at=now,
             ))
+        session.add_all(rows)
+        await session.flush()
+        ids = [row.id for row in rows]
         await session.commit()
+    return ids
 
 
-async def get_events_since(conv_id: str, after_id: int = 0, message_id: str = "") -> list[dict]:
+async def get_events_since(conv_id: str, after_id: int = 0, message_id: str = "", limit: int = 500) -> list[dict]:
     """
     获取 event_id > after_id 的事件（SSE 重连用）。
 
@@ -75,7 +80,7 @@ async def get_events_since(conv_id: str, after_id: int = 0, message_id: str = ""
         )
         if message_id:
             query = query.where(EventLogModel.message_id == message_id)
-        query = query.order_by(EventLogModel.id.asc())
+        query = query.order_by(EventLogModel.id.asc()).limit(max(1, min(limit, 1000)))
         result = await session.execute(query)
         rows = result.scalars().all()
     return [

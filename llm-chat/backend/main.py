@@ -37,6 +37,17 @@ from config import (
 logger = logging.getLogger("main")
 
 
+async def _cancel_delayed_quant_init(task: asyncio.Task, timeout: float = 2.0) -> None:
+    """Do not let delayed provider/warmer startup race application shutdown."""
+    if not task.done():
+        task.cancel()
+    done, pending = await asyncio.wait({task}, timeout=timeout)
+    if pending:
+        logger.warning("量化延迟初始化未在停机期限内退出")
+    elif not task.cancelled() and task.exception() is not None:
+        logger.error("量化延迟初始化任务异常: %s", task.exception())
+
+
 # ── 应用生命周期 ──────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -183,7 +194,7 @@ async def lifespan(app: FastAPI):
             logger.error("量化模块延迟初始化失败: %s", exc)
 
     # 抛出后台任务，不阻塞 lifespan yield
-    asyncio.create_task(delayed_quant_init())
+    quant_init_task = asyncio.create_task(delayed_quant_init(), name="quant-delayed-init")
 
     from quant.config import QUANT_SCREENING_ENABLED as _screening_on
     logger.info(
@@ -196,21 +207,34 @@ async def lifespan(app: FastAPI):
         "开启" if _screening_on else "关闭",
     )
 
-    yield
-    # ── 关闭 ──
     try:
-        from services import llm_provider_service
-        await llm_provider_service.stop()
-    except Exception as exc:
-        logger.warning("LLM 供应商服务停止异常（忽略）: %s", exc)
-    try:
-        from quant.cache_warmer import get_warmer
-        await get_warmer().stop(timeout=5.0)
-    except Exception as exc:
-        logger.warning("预热器停止异常（忽略）: %s", exc)
-    if sandbox_ok:
-        from sandbox.manager import sandbox_manager
-        await sandbox_manager.shutdown()
+        yield
+    finally:
+        # Pause producers while DB/Redis/model/sandbox dependencies still work.
+        await _cancel_delayed_quant_init(quant_init_task)
+        try:
+            from graph.prediction_agent import shutdown_prediction_sessions
+            await shutdown_prediction_sessions(timeout=10.0)
+        except Exception:
+            logger.exception("预测任务停机收尾失败")
+        try:
+            from graph.runner.stream import shutdown_chat_sessions
+            await shutdown_chat_sessions(timeout=10.0)
+        except Exception:
+            logger.exception("对话任务停机收尾失败")
+        try:
+            from services import llm_provider_service
+            await llm_provider_service.stop()
+        except Exception as exc:
+            logger.warning("LLM 供应商服务停止异常（忽略）: %s", exc)
+        try:
+            from quant.cache_warmer import get_warmer
+            await get_warmer().stop(timeout=5.0)
+        except Exception as exc:
+            logger.warning("预热器停止异常（忽略）: %s", exc)
+        if sandbox_ok:
+            from sandbox.manager import sandbox_manager
+            await sandbox_manager.shutdown()
 
 
 # ── 创建应用 ──────────────────────────────────────────────────────────────────

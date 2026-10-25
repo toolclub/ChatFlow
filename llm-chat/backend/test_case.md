@@ -339,6 +339,7 @@ pytest tests/ -m smoke         # 冒烟拨测（端到端）
 
 ### T-STREAM-04: 格式化器
 
+
 | 用例 | 操作 | 期望 | 标记 |
 |------|------|------|------|
 | exit_code 提取正常 | `"⏱ 1.5s \| exit=0"` | 0 | unit |
@@ -346,6 +347,24 @@ pytest tests/ -m smoke         # 冒烟拨测（端到端）
 | exit_code 负数 | `"⏱ 0.5s \| exit=-1"` | -1 | unit |
 | exit_code 无匹配 | `"无结果"` | 0（默认） | unit |
 | status 判定 | exit=0 → done, exit≠0 → error | 正确 | unit |
+
+### T-STREAM-05: 持久化流恢复与停止（`tests/test_chat_recovery.py`）
+
+运行：`python tests/run_regression.py -q tests/test_chat_recovery.py`（独立假配置，无外部服务）。
+
+| 用例 | 期望 |
+|------|------|
+| 提交后发布 / 临时 DB 错误重试 | 未提交事件不发给客户端；失败批次保留，成功后按 ID 原序发布；每条带 `id` 和 `message_id`，ping 不落库 |
+| DB 回放过程中有新提交 / 跨 worker | 全程按 `message_id` 和持久游标读分页，无内存尾部切换缺口，不混入旧轮终止事件 |
+| 游标已超过终态 | 根据消息和对话 DB 状态及时关闭，不空等五分钟 |
+| 等待 LLM 时点击停止 | 取消 graph，等待 consumer 保存部分消息及终态后返回 `stop_confirmed` |
+| 终态发送顺序 | DB 状态和流租约清理完成后，才向原连接交付终止事件 |
+| 初始化失败 / 首 token 前失败 | 错误传给 consumer，assistant 行标记完成，会话进入 FSM error |
+| 两个同名工具交错输出、先完成第一个 | 使用 `tool_run_id` 关联，输出及终态不会串写；停止时其余 running 工具转 error |
+| 匿名会话恢复 / 越权访问 | DB 返回 `client_id`；只有匹配的匿名 client 或 user 可以访问 |
+| 进程退出后恢复 | 本 worker 无任务且 Redis 租约确认消失，才保留部分内容并关闭孤儿消息；Redis 不可用不判死亡 |
+| 孤儿检查与新轮并发 | 行锁内校验 `expected_updated_at`，旧观察值不得关闭新轮 |
+| 无新 token / 落库期间又来 token | 空闲不重复写大 buffer；版本号保证并发到达的 token 下一批仍会持久化 |
 
 ---
 
@@ -626,7 +645,7 @@ pytest tests/ -m smoke         # 冒烟拨测（端到端）
 > 覆盖 PredictionSM 生命周期、非法转换兜底、DB 恢复、枚举值、卡住任务清理。
 > 铁律对照：#1 状态从 DB 字段读、#6 状态机校验先于写库、#9 异常不吞。
 > 隔离策略：fsm/prediction 仅依赖 python-statemachine（运行时 import，collection 不触发）；
-> cleanup 测试 monkeypatch `AsyncSessionLocal`（假异步会话）+ `update`（假语句工厂），不碰真实 DB。
+> cleanup 测试 monkeypatch `AsyncSessionLocal`（假异步会话）+ owner lease，不碰真实 DB。
 
 ### T-PRED-FSM: PredictionSM 状态机
 
@@ -646,9 +665,9 @@ pytest tests/ -m smoke         # 冒烟拨测（端到端）
 
 | 用例 | 操作 | 期望 | 标记 |
 |------|------|------|------|
-| T-PRED-CLEAN-01 | `cleanup_stale_prediction_sessions()`（mock 会话 rowcount=7） | 返回 7；executed 1 条；committed=True；values.status="failed"；error_message 含「中断」 | unit |
-| T-PRED-CLEAN-02 | `cleanup_stale_prediction_sessions(timeout_minutes=5)` | error_message 含「5」；where 条件数 ≥2（含 created_at cutoff） | unit |
-| T-PRED-CLEAN-03 | mock rowcount=0 | 返回 0；仍 commit；语句 status="failed" | unit |
+| T-PRED-CLEAN-01 | 无 owner 的旧运行任务 + 有 owner 的旧运行任务 | 只将无 owner 的任务经 FSM 改成 paused，保留续跑能力；默认至少 60 秒 grace | unit |
+| T-PRED-CLEAN-02 | 候选查出后 updated_at 刷新 | 抢 lease 后行锁内复查 updated_at，跳过活跃任务；判断更新时间而非创建时间 | unit |
+| T-PRED-CLEAN-03 | 没有候选 / Redis 不可用 | 返回 0，不猜测 owner 已死、不批量强写 failed | unit |
 
 ---
 
@@ -881,6 +900,16 @@ pytest tests/ -m smoke         # 冒烟拨测（端到端）
 ---
 
 ## 十一、spec 对照检查（改代码后必跑）
+
+### 量化执行隔离与预测恢复回归（2026-10）
+
+| 测试文件 | 关键契约 |
+|---------|-----------|
+| `test_quant_execution.py` | SDK 超时取消后，真实线程结束前不释放执行额度；不占用 asyncio 默认线程池（DNS/聊天）；异常归还额度；关闭不阻塞事件循环 |
+| `test_quant_provider_cancellation.py` | Tushare 批量抓取取消不在事件循环 join；BaoStock 跨实例共用串行 worker，取消不能提前复用 SDK 全局连接 |
+| `test_prediction_shutdown.py` | 停机只暂停本 worker 的运行预测并等待落库/租约收尾；终态竞态不误发 paused；DB 卡住时有界退出；延迟量化初始化在停机时取消 |
+| `test_prediction_ownership.py` | Redis token 租约只允许一个 worker 执行；旧 owner 不能续期/删除新租约；多订阅者独立游标完整回放；历史暂停不终止续跑；脱离页面后队列有界；暂停/终态不被晚到结果覆盖；DB 行锁下仅显式 resume 可离开 paused |
+| `test_prediction_graph.py` T-PRED-GRAPH-07 | 运行完成但中间状态丢失时，按 queued → news_searching → inferring → done 合法补齐；禁止绕 FSM 强写终态 |
 
 | 改了什么 | 跑哪些测试 |
 |---------|-----------|

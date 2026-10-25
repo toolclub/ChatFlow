@@ -33,13 +33,19 @@ class TestReflectorFastPaths:
         pass  # 需要 mock GraphState，标记为 TODO
 
     def test_step_results_truncation(self):
-        """step_results 每条截断到 3000"""
-        from graph.nodes.reflector_node import ReflectorNode
+        """下一步收到有界摘要，同时保留下一步任务指令。"""
+        from graph.nodes.reflector_node import ReflectorNode, _STEP_RESULT_SUMMARY_LEN
         node = ReflectorNode()
-        long_response = "x" * 5000
-        state = {"step_results": []}
-        result = node._accumulate_step_results(state, long_response)
-        assert len(result[-1]) == 3000
+        plan = [
+            {"title": "分析", "description": "收集信息"},
+            {"title": "实现", "description": "实现并验证"},
+        ]
+        result = node._build_next_step_messages({"full_response": "x" * 5000}, plan, 1)
+        assert len(result) == 1
+        content = result[0].content
+        assert "x" * _STEP_RESULT_SUMMARY_LEN + "..." in content
+        assert "x" * (_STEP_RESULT_SUMMARY_LEN + 1) not in content
+        assert "实现并验证" in content
 
     def test_step_result_summary_len(self):
         """步骤摘要长度 = 2000"""

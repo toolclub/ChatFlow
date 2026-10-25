@@ -1,5 +1,6 @@
+import { ElMessage } from 'element-plus'
 import { ref, reactive, computed } from 'vue'
-import type { ClarificationData, Message, StepRecord, ConversationInfo, SendPayload, AgentStatus, CognitiveState, TraceEntry, PlanStep, ThinkingEvent, ThinkingSegment } from '../types'
+import type { ClarificationData, Message, StepRecord, ConversationInfo, SendPayload, AgentStatus, CognitiveState, TraceEntry, PlanStep, ThinkingEvent, ThinkingSegment, ToolCallRecord } from '../types'
 import { makeEmptyCognitiveState } from '../types'
 import * as api from '../api'
 
@@ -69,6 +70,7 @@ function getCurrentAgentMode(): boolean {
 interface ConvState {
   messages: Message[]
   loading: boolean
+  stopping: boolean
   agentStatus: AgentStatus
   abortController: AbortController | null
   cognitive: CognitiveState
@@ -80,6 +82,7 @@ function makeConvState(): ConvState {
   return {
     messages: [],
     loading: false,
+    stopping: false,
     agentStatus: { state: 'idle', model: '' },
     abortController: null,
     cognitive: makeEmptyCognitiveState(),
@@ -108,7 +111,7 @@ export function useChat() {
     currentConvId.value ? convStates[currentConvId.value]?.messages ?? [] : []
   )
   const loading = computed<boolean>(() =>
-    currentConvId.value ? convStates[currentConvId.value]?.loading ?? false : false
+    currentConvId.value ? !!(convStates[currentConvId.value]?.loading || convStates[currentConvId.value]?.stopping) : false
   )
   const agentStatus = computed<AgentStatus>(() =>
     currentConvId.value
@@ -124,7 +127,7 @@ export function useChat() {
     currentConvId.value ? convStates[currentConvId.value]?.canContinue ?? false : false
   )
   const activeConvIds = computed<Set<string>>(
-    () => new Set(Object.keys(convStates).filter(id => convStates[id].loading))
+    () => new Set(Object.keys(convStates).filter(id => convStates[id].loading || convStates[id].stopping))
   )
 
   function getOrCreate(id: string): ConvState {
@@ -143,6 +146,9 @@ export function useChat() {
     const s = convStates[id]
     if (!s) return
 
+    if (s.stopping) return
+    s.stopping = true
+
     // 生成唯一 stop_token（用于握手机制）
     const stopToken = crypto.randomUUID()
 
@@ -156,7 +162,17 @@ export function useChat() {
     let stopResult: { can_continue: boolean; reason: string } | null = null
     try {
       stopResult = await api.stopStreamWithToken(id, stopToken, 30000)
-    } catch {}
+    } catch {} finally {
+      s.stopping = false
+    }
+
+    if (!stopResult) {
+      ElMessage.warning('尚未确认任务停止，正在重新读取后台状态')
+      s.loading = false
+      _selectCache.delete(id)
+      if (currentConvId.value === id) await selectConversation(id)
+      return
+    }
 
     // 3. 收到确认后才清除 loading
     s.loading = false
@@ -198,6 +214,8 @@ export function useChat() {
   async function selectConversation(id: string) {
     currentConvId.value = id
     window.location.hash = id
+    ++_selectVersion
+    initialLoading.value = false
     if (convStates[id]?.loading) return
 
     // ── 防抖策略：同会话去重 + 跨会话 last-wins ──
@@ -310,8 +328,8 @@ export function useChat() {
         if (!seen.has(key)) { seen.add(key); allArtifacts.push(a) }
       }
       s.cognitive.artifacts = allArtifacts
-      if (fullState.plan) {
-        s.cognitive.plan = fullState.plan.steps.map((st: any) => ({
+      for (const historicalPlan of (fullState.plans?.length ? fullState.plans : (fullState.plan ? [fullState.plan] : []))) {
+        s.cognitive.plan = historicalPlan.steps.map((st: any) => ({
           id: st.id, title: st.title, description: st.description ?? '',
           status: st.status ?? 'done', result: st.result ?? '',
         }))
@@ -319,15 +337,14 @@ export function useChat() {
         // ── DB-first：从 plan + tool_executions 精确重建 msg.steps ──
         // plan.steps[i].result 保存了每步的模型输出（最多 3000 字符）
         // tool_executions[].step_index 标记了工具属于哪个步骤
-        const planSteps = fullState.plan.steps || []
-        const planMsgId = fullState.plan.message_id || ''
-        const hasStepResults = planSteps.some((st: any) => st.result)
-        if (hasStepResults && s.messages.length > 0) {
+        const planSteps = historicalPlan.steps || []
+        const planMsgId = historicalPlan.message_id || ''
+        if (planSteps.length > 0 && s.messages.length > 0) {
           // 通过 plan.message_id 精确匹配 assistant 消息（无 message_id 时降级到最后一条）
           const targetIdx = planMsgId
             ? s.messages.findLastIndex((m: any) => m.role === 'assistant' && m.message_id === planMsgId)
             : -1
-          const assistantIdx = targetIdx >= 0
+          const assistantIdx = planMsgId
             ? targetIdx
             : s.messages.findLastIndex((m: Message) => m.role === 'assistant')
           if (assistantIdx >= 0) {
@@ -371,7 +388,7 @@ export function useChat() {
           }
         }
       }
-      s.canContinue = false
+      s.canContinue = Boolean(fullState.can_continue)
 
       // ── 如果有未完成的流式消息，自动恢复 SSE 连接（不阻塞，fire-and-forget） ──
       if (fullState.has_streaming) {
@@ -380,14 +397,15 @@ export function useChat() {
         )
         const streamingMsgId = streamingMsg?.message_id || ''
         // 不 await：resume 是长连接，阻塞会导致 initialLoading 遮罩卡住
-        _resumeActiveStream(id, s, fullState.last_event_id || 0, streamingMsgId)
+        _resumeActiveStream(id, s, streamingMsgId)
       }
 
     } catch (err) {
       console.error('[selectConversation] 加载失败:', err)
-      s.messages = []; s.cognitive = makeEmptyCognitiveState(); s.canContinue = false
+      _selectCache.delete(id)
+      ElMessage.error(err instanceof Error ? err.message : '加载对话失败，请重试')
     } finally {
-      if (needsLoading) initialLoading.value = false
+      if (version === _selectVersion) initialLoading.value = false
     }
   }
 
@@ -398,13 +416,14 @@ export function useChat() {
    * 所以 fetchConversation 返回的是不含当前轮的历史。
    * 我们从 buffer index=0 开始重放，前端会收到完整的当前轮事件。
    */
-  async function _resumeActiveStream(convId: string, s: ConvState, lastEventId: number, messageId: string = '') {
+  async function _resumeActiveStream(convId: string, s: ConvState, messageId: string = '') {
     // DB-first：messages 表已有 user + assistant(stream_completed=false) 两条记录。
     // 如果最后一条不是 assistant，补一个空的（兼容旧数据）。
     if (s.messages.length === 0 || s.messages[s.messages.length - 1].role !== 'assistant') {
       s.messages.push({ role: 'assistant', content: '' })
     }
     let assistantIdx = s.messages.length - 1
+    const savedMessage = { ...s.messages[assistantIdx] }
     // 清空 content / thinking（resume 会从事件重放中重建所有 segments）
     s.messages[assistantIdx].content = ''
     s.messages[assistantIdx].thinking = ''
@@ -435,12 +454,12 @@ export function useChat() {
           target.content = (target.content || '') + chunk
         },
         // onToolCall
-        (name, input, displayMode) => {
+        (name, input, displayMode, toolRunId) => {
           const step = activeStep()
           const toolList = step ? step.toolCalls : (msg().toolCalls ??= [])
           const placeholderIdx = toolList.findIndex(t => t.name === name && !t.done && (t.input as any)?._generating)
           const prevMode = placeholderIdx >= 0 ? toolList[placeholderIdx].displayMode : undefined
-          const tc = { name, input, done: false, displayMode: displayMode || prevMode || 'default', ...(name === 'fetch_webpage' ? { fetchStatus: 'loading' as const } : {}) }
+          const tc: ToolCallRecord = { name, input, toolRunId, done: false, displayMode: displayMode || prevMode || 'default', ...(name === 'fetch_webpage' ? { fetchStatus: 'loading' as const } : {}) }
           if (placeholderIdx >= 0) {
             const prev = toolList[placeholderIdx]
             if (prev.output) tc.output = prev.output
@@ -451,7 +470,7 @@ export function useChat() {
         // onToolResult
         (name, data) => {
           const step = activeStep(); const toolList = step ? step.toolCalls : msg().toolCalls
-          const tc = toolList?.findLast(t => t.name === name && !t.done)
+          const tc = toolList?.findLast(t => !t.done && (data.tool_run_id ? t.toolRunId === data.tool_run_id : t.name === name))
           if (tc) {
             if (name === 'fetch_webpage') tc.fetchStatus = (data.status as 'done' | 'fail') || 'done'
             else if (data.results) tc.results = data.results as any
@@ -464,12 +483,14 @@ export function useChat() {
         // onSearchItem
         (item) => {
           const step = activeStep(); const toolList = step ? step.toolCalls : msg().toolCalls
-          const tc = toolList?.findLast(t => t.name === 'web_search' && !t.done)
+          const tc = toolList?.findLast(t => !t.done && (item.tool_run_id ? t.toolRunId === item.tool_run_id : t.name === 'web_search'))
           if (tc) { if (!tc.searchItems) tc.searchItems = []; tc.searchItems.push({ url: item.url, title: item.title, status: item.status as any }) }
         },
         // onStatus
         (status, model) => {
-          if (status === 'routing') s.agentStatus = { state: 'routing', model: s.agentStatus.model }
+          if (status === 'connected' && s.agentStatus.state === 'reconnecting') s.agentStatus = { ...s.agentStatus, state: 'thinking' }
+          else if (status === 'reconnecting') s.agentStatus = { ...s.agentStatus, state: 'reconnecting' }
+          else if (status === 'routing') s.agentStatus = { state: 'routing', model: s.agentStatus.model }
           else if (status === 'planning') s.agentStatus = { ...s.agentStatus, state: 'planning' }
           else if (status === 'thinking' && model) s.agentStatus = { ...s.agentStatus, state: 'thinking', model }
           else if (status === 'saving') s.agentStatus = { ...s.agentStatus, state: 'saving' }
@@ -521,9 +542,9 @@ export function useChat() {
         // onThinking: 结构化事件按 (node, step_index, phase) 分发到 msg/step 的 segments
         (ev) => { applyThinkingEvent(msg(), ev) },
         // onSandboxOutput：按 toolName 精确匹配，兜底最后一个未完成工具
-        (toolName, stream, text) => {
+        (toolName, _stream, text, toolRunId) => {
           const step = activeStep(); const toolList = step ? step.toolCalls : msg().toolCalls
-          const tc = toolList?.findLast(t => t.name === toolName && !t.done) || toolList?.findLast(t => !t.done)
+          const tc = toolList?.findLast(t => !t.done && (toolRunId ? t.toolRunId === toolRunId : t.name === toolName)) || (!toolRunId ? toolList?.findLast(t => !t.done) : undefined)
           if (tc) tc.output = (tc.output || '') + text
         },
         // onFileArtifact（去重：DB 已加载的 + SSE 重放的可能重复）
@@ -535,7 +556,7 @@ export function useChat() {
         },
         // onToolCallStart
         (name, displayMode) => {
-          const placeholder = { name, input: { _generating: true }, done: false, displayMode: displayMode || 'default' }
+          const placeholder: ToolCallRecord = { name, input: { _generating: true }, done: false, displayMode: displayMode || 'default' }
           const step = activeStep()
           if (step) step.toolCalls.push(placeholder)
           else { if (!msg().toolCalls) msg().toolCalls = []; msg().toolCalls!.push(placeholder) }
@@ -552,11 +573,19 @@ export function useChat() {
             || toolList?.findLast(t => !t.done)
           if (tc) tc.output = (tc.output || '') + text
         },
+        (data) => { msg().clarification = data },
+        () => {
+          s.canContinue = true; s.loading = false; s.abortController = null
+          s.agentStatus = { state: 'idle', model: s.agentStatus.model }; s.cognitive.isActive = false
+        },
       )
     } catch (err: any) {
       if (err?.name === 'AbortError') return
       s.loading = false; s.abortController = null
       s.agentStatus = { state: 'idle', model: '' }; s.cognitive.isActive = false
+      if (!msg().content && !msg().thinking && !msg().steps?.length) s.messages[assistantIdx] = savedMessage
+      ElMessage.error(err?.message || '恢复连接失败，请重新打开对话')
+      _selectCache.delete(convId)
     }
   }
 
@@ -623,7 +652,7 @@ export function useChat() {
     }
     const convId = currentConvId.value!
     const s = getOrCreate(convId)
-    if (s.loading) return
+    if (s.loading || s.stopping) return
 
     // Push user message (with optional workflowPlan for special rendering)
     const userMsg: Message = {
@@ -689,7 +718,7 @@ export function useChat() {
           }
         },
         // onToolCall
-        (name, input, displayMode) => {
+        (name, input, displayMode, toolRunId) => {
           const step = activeStep()
           const toolList = step ? step.toolCalls : (msg().toolCalls ??= [])
           // 替换 tool_call_start 创建的 placeholder（同名且 _generating 标记）
@@ -697,7 +726,7 @@ export function useChat() {
             t => t.name === name && !t.done && (t.input as any)?._generating
           )
           const prevMode = placeholderIdx >= 0 ? toolList[placeholderIdx].displayMode : undefined
-          const tc = { name, input, done: false, displayMode: displayMode || prevMode || 'default', ...(name === 'fetch_webpage' ? { fetchStatus: 'loading' as const } : {}) }
+          const tc: ToolCallRecord = { name, input, toolRunId, done: false, displayMode: displayMode || prevMode || 'default', ...(name === 'fetch_webpage' ? { fetchStatus: 'loading' as const } : {}) }
           if (placeholderIdx >= 0) {
             // 保留 _generating 阶段 tool_call_args 积累的流式输出（全流程透明）
             const prev = toolList[placeholderIdx]
@@ -713,7 +742,7 @@ export function useChat() {
         (name, data) => {
           const step = activeStep()
           const toolList = step ? step.toolCalls : msg().toolCalls
-          const tc = toolList?.findLast(t => t.name === name && !t.done)
+          const tc = toolList?.findLast(t => !t.done && (data.tool_run_id ? t.toolRunId === data.tool_run_id : t.name === name))
           if (tc) {
             if (name === 'fetch_webpage') tc.fetchStatus = (data.status as 'done' | 'fail') || 'done'
             else if (data.results) tc.results = data.results as any
@@ -732,7 +761,7 @@ export function useChat() {
         (item) => {
           const step = activeStep()
           const toolList = step ? step.toolCalls : msg().toolCalls
-          const tc = toolList?.findLast(t => t.name === 'web_search' && !t.done)
+          const tc = toolList?.findLast(t => !t.done && (item.tool_run_id ? t.toolRunId === item.tool_run_id : t.name === 'web_search'))
           if (tc) {
             if (!tc.searchItems) tc.searchItems = []
             tc.searchItems.push({ url: item.url, title: item.title, status: item.status as any })
@@ -742,6 +771,8 @@ export function useChat() {
         // onStatus
         (status, model) => {
           if (status === 'vision_analyze') s.agentStatus = { state: 'vision_analyze', model: '' }
+          else if (status === 'connected' && s.agentStatus.state === 'reconnecting') s.agentStatus = { ...s.agentStatus, state: 'thinking' }
+          else if (status === 'reconnecting') s.agentStatus = { ...s.agentStatus, state: 'reconnecting' }
           else if (status === 'routing')   s.agentStatus = { state: 'routing', model: s.agentStatus.model }
           else if (status === 'planning')  s.agentStatus = { ...s.agentStatus, state: 'planning' }
           else if (status === 'thinking' && model) s.agentStatus = { ...s.agentStatus, state: 'thinking', model }
@@ -853,10 +884,10 @@ export function useChat() {
           s.cognitive.isActive = false
         },
         // onSandboxOutput：按 toolName 精确匹配，兜底最后一个未完成工具
-        (toolName: string, stream: string, text: string) => {
+        (toolName: string, _stream: string, text: string, toolRunId?: string) => {
           const step = activeStep()
           const toolList = step ? step.toolCalls : msg().toolCalls
-          const tc = toolList?.findLast(t => t.name === toolName && !t.done) || toolList?.findLast(t => !t.done)
+          const tc = toolList?.findLast(t => !t.done && (toolRunId ? t.toolRunId === toolRunId : t.name === toolName)) || (!toolRunId ? toolList?.findLast(t => !t.done) : undefined)
           if (!tc) return
           tc.output = (tc.output || '') + text
         },
@@ -871,7 +902,7 @@ export function useChat() {
         // onToolCallStart：工具参数开始生成（LLM 刚开始输出 tool_call arguments）
         // 立即创建一个 placeholder tool call，让前端终端 loading 状态提前展示
         (name, displayMode) => {
-          const placeholder = { name, input: { _generating: true }, done: false, displayMode: displayMode || 'default' }
+          const placeholder: ToolCallRecord = { name, input: { _generating: true }, done: false, displayMode: displayMode || 'default' }
           const step = activeStep()
           if (step) {
             const last = step.toolCalls[step.toolCalls.length - 1]
@@ -901,7 +932,12 @@ export function useChat() {
       )
     } catch (err: any) {
       if (err?.name === 'AbortError') return
-      s.messages[assistantIdx].content = '⚠️ 网络连接失败，请检查后端服务是否正常运行。'
+      const partial = s.messages[assistantIdx]
+      const notice = err?.message || '网络连接失败，请稍后重新打开对话恢复'
+      if (!partial.content && !partial.steps?.length && !partial.thinking && !partial.toolCalls?.length) {
+        partial.content = `⚠️ ${notice}`
+      }
+      ElMessage.warning(notice)
       s.loading = false
       s.abortController = null
       s.agentStatus = { state: 'idle', model: '' }
@@ -941,7 +977,9 @@ export function useChat() {
     if (!currentConvId.value) return
     const s = convStates[currentConvId.value]
     if (!s) return
+    if (s.stopping) return
     if (s.loading) await stopConversation()
+    if (s.loading || s.stopping) return
 
     // 找到原始用户目标（不是"请按以下修改后的计划执行任务"这种合成文本）
     let originalGoal = ''
@@ -988,30 +1026,32 @@ export function useChat() {
         convId, originalGoal || '执行修改后的计划', '', [], true,
         modifiedPlan as any,  // force_plan
         (chunk) => { const step = activeStep(); const target = step || msg(); target.content = (target.content || '') + chunk },
-        (name, input, displayMode) => {
+        (name, input, displayMode, toolRunId) => {
           const step = activeStep()
           const toolList = step ? step.toolCalls : (msg().toolCalls ??= [])
           const placeholderIdx = toolList.findIndex(t => t.name === name && !t.done && (t.input as any)?._generating)
           const prevMode = placeholderIdx >= 0 ? toolList[placeholderIdx].displayMode : undefined
-          const tc = { name, input, done: false, displayMode: displayMode || prevMode || 'default', ...(name === 'fetch_webpage' ? { fetchStatus: 'loading' as const } : {}) }
+          const tc: ToolCallRecord = { name, input, toolRunId, done: false, displayMode: displayMode || prevMode || 'default', ...(name === 'fetch_webpage' ? { fetchStatus: 'loading' as const } : {}) }
           if (placeholderIdx >= 0) { const prev = toolList[placeholderIdx]; if (prev.output) tc.output = prev.output; toolList[placeholderIdx] = tc } else toolList.push(tc)
           s.agentStatus = { ...s.agentStatus, state: 'tool', tool: name }
           addTrace(s.cognitive, { type: 'tool_call', content: `调用 ${name}: ${JSON.stringify(input).slice(0, 180)}`, toolName: name })
         },
         (name, data) => {
           const step = activeStep(); const toolList = step ? step.toolCalls : msg().toolCalls
-          const tc = toolList?.findLast(t => t.name === name && !t.done)
+          const tc = toolList?.findLast(t => !t.done && (data.tool_run_id ? t.toolRunId === data.tool_run_id : t.name === name))
           if (tc) { if (name === 'fetch_webpage') tc.fetchStatus = (data.status as any) || 'done'; else if (data.output) tc.output = data.output as string; tc.done = true }
           s.agentStatus = { ...s.agentStatus, state: 'thinking', tool: undefined }
           addTrace(s.cognitive, { type: 'tool_result', content: `${name} 执行完成`, toolName: name })
         },
         (item) => {
           const step = activeStep(); const toolList = step ? step.toolCalls : msg().toolCalls
-          const tc = toolList?.findLast(t => t.name === 'web_search' && !t.done)
+          const tc = toolList?.findLast(t => !t.done && (item.tool_run_id ? t.toolRunId === item.tool_run_id : t.name === 'web_search'))
           if (tc) { if (!tc.searchItems) tc.searchItems = []; tc.searchItems.push({ url: item.url, title: item.title, status: item.status as any }) }
         },
         (status, model) => {
-          if (status === 'routing') s.agentStatus = { state: 'routing', model: s.agentStatus.model }
+          if (status === 'connected' && s.agentStatus.state === 'reconnecting') s.agentStatus = { ...s.agentStatus, state: 'thinking' }
+          else if (status === 'reconnecting') s.agentStatus = { ...s.agentStatus, state: 'reconnecting' }
+          else if (status === 'routing') s.agentStatus = { state: 'routing', model: s.agentStatus.model }
           else if (status === 'planning') s.agentStatus = { ...s.agentStatus, state: 'planning' }
           else if (status === 'thinking' && model) s.agentStatus = { ...s.agentStatus, state: 'thinking', model }
           else if (status === 'saving') s.agentStatus = { ...s.agentStatus, state: 'saving' }
@@ -1058,9 +1098,9 @@ export function useChat() {
         (() => {
           const bufMap = new Map<any, string>(); let rafScheduled = false
           function flush() { bufMap.forEach((buf, tc) => { tc.output = (tc.output || '') + buf }); bufMap.clear(); rafScheduled = false }
-          return (toolName: string, stream: string, text: string) => {
+          return (toolName: string, _stream: string, text: string, toolRunId?: string) => {
             const step = activeStep(); const toolList = step ? step.toolCalls : msg().toolCalls
-            const tc = toolList?.findLast(t => t.name === toolName && !t.done) || toolList?.findLast(t => !t.done)
+            const tc = toolList?.findLast(t => !t.done && (toolRunId ? t.toolRunId === toolRunId : t.name === toolName)) || (!toolRunId ? toolList?.findLast(t => !t.done) : undefined)
             if (!tc) return; bufMap.set(tc, (bufMap.get(tc) || '') + text)
             if (!rafScheduled) { rafScheduled = true; requestAnimationFrame(flush) }
           }
@@ -1073,7 +1113,7 @@ export function useChat() {
           }
         },
         (name, displayMode) => {
-          const placeholder = { name, input: { _generating: true }, done: false, displayMode: displayMode || 'default' }
+          const placeholder: ToolCallRecord = { name, input: { _generating: true }, done: false, displayMode: displayMode || 'default' }
           const step = activeStep()
           if (step) { const last = step.toolCalls[step.toolCalls.length - 1]; if (last && last.name === name && !last.done && (last.input as any)._generating) return; step.toolCalls.push(placeholder) }
           else { if (!msg().toolCalls) msg().toolCalls = []; const last = msg().toolCalls![msg().toolCalls!.length - 1]; if (last && last.name === name && !last.done && (last.input as any)._generating) return; msg().toolCalls!.push(placeholder) }
@@ -1098,7 +1138,7 @@ export function useChat() {
   async function continueLast() {
     if (!currentConvId.value) return
     const s = convStates[currentConvId.value]
-    if (!s || s.loading) return
+    if (!s || s.loading || s.stopping) return
     s.canContinue = false
     await send({ text: '继续', images: [], agentMode: getCurrentAgentMode() })
   }
@@ -1109,7 +1149,7 @@ export function useChat() {
   async function regenerate() {
     if (!currentConvId.value) return
     const s = convStates[currentConvId.value]
-    if (!s || s.loading) return
+    if (!s || s.loading || s.stopping) return
     // Find last user message
     let lastUserIdx = -1
     for (let i = s.messages.length - 1; i >= 0; i--) {
@@ -1133,7 +1173,7 @@ export function useChat() {
   async function editMessage(msgIndex: number, newContent: string) {
     if (!currentConvId.value) return
     const s = convStates[currentConvId.value]
-    if (!s || s.loading) return
+    if (!s || s.loading || s.stopping) return
     const msg = s.messages[msgIndex]
     if (!msg || msg.role !== 'user') return
     // Truncate messages from this point

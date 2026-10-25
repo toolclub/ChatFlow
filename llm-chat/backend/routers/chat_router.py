@@ -7,11 +7,12 @@
   - GET  /api/conversations/:id/resume — 恢复流式输出
 """
 import asyncio
-import json
 import logging
 import time
 
-from fastapi import APIRouter, Header, Request, Depends, HTTPException
+from fastapi import APIRouter, Header, Request, HTTPException
+from fsm.sse_events import SSEEventType
+from graph.runner.utils import sse
 from fastapi.responses import StreamingResponse
 
 from models import ChatRequest
@@ -48,7 +49,6 @@ async def chat(req: ChatRequest, user: CurrentUser, request: Request):
     # 不传时用当前生效默认（管理页激活供应商 ? 快照.chat_model : .env CHAT_MODEL）
     effective_model = req.model or llm_provider_service.resolve_default_request_model()
 
-    img_bytes = sum(len(img) for img in req.images)
     logger.info(
         "POST /api/chat | conv=%s | user=%s | client=%s | model=%s | msg_len=%d",
         req.conversation_id,
@@ -58,25 +58,29 @@ async def chat(req: ChatRequest, user: CurrentUser, request: Request):
         len(req.message),
     )
 
-    conv = memory_store.get(req.conversation_id)
-    if not conv:
-        await memory_store.db_get_conversation(req.conversation_id)
-        conv = memory_store.get(req.conversation_id)
-    if not conv:
-        conv = await memory_store.create(
-            req.conversation_id,
-            client_id=client_id,
-            user_id=user_id
-        )
+    conv_data = await memory_store.db_get_conversation(req.conversation_id)
+    if conv_data:
+        _assert_access(conv_data, user)
+    else:
+        await memory_store.create(req.conversation_id, client_id=client_id, user_id=user_id)
 
-    # 如果该会话已有正在进行的流，先停止
-    old_event = _stop_events.get(req.conversation_id)
-    if old_event:
-        old_event.set()
+    # A second request must not cancel and race an already running turn.
     from graph.runner.stream import _active_sessions
-    old_session = _active_sessions.get(req.conversation_id)
-    if old_session and old_session._graph_task and not old_session._graph_task.done():
-        old_session._graph_task.cancel()
+    if req.conversation_id in _stop_events or req.conversation_id in _active_sessions:
+        raise HTTPException(status_code=409, detail="该对话仍在生成，请恢复连接或先停止当前回复")
+    try:
+        from db.redis_state import is_streaming
+        remote_active = await asyncio.wait_for(is_streaming(req.conversation_id), timeout=2)
+    except Exception as exc:
+        logger.warning("读取共享流状态失败 | conv=%s | %s", req.conversation_id, exc)
+        remote_active = bool(conv_data and conv_data.get("status") == "streaming")
+    if remote_active:
+        raise HTTPException(status_code=409, detail="该对话仍在生成，请恢复连接或先停止当前回复")
+
+    from services.conversation_service import conversation_service
+    await conversation_service.reconcile_stream_state(req.conversation_id, conv_data)
+    if not await memory_store.try_start_stream(req.conversation_id):
+        raise HTTPException(status_code=409, detail="该对话仍在生成，请恢复连接或先停止当前回复")
 
     stop_event = asyncio.Event()
     _stop_events[req.conversation_id] = stop_event
@@ -119,23 +123,73 @@ async def stop_chat(
     stop_token: str = Header(None),
     timeout_ms: int = Header(30000),
 ):
-    """
-    握手机制：收到停止请求后，等待后端真正停止，
-    ...
-    """
-    # 鉴权
-    conv = await memory_store.db_get_conversation(conv_id)
+    """Signal the owning worker and confirm only after durable finalization."""
+    conv = await memory_store.db_get_conversation_meta(conv_id)
     if not conv:
         raise HTTPException(status_code=404, detail="对话不存在")
-    if user.get("id"):
-        if conv.get("user_id") != user["id"]:
-            raise HTTPException(status_code=403, detail="无权访问该对话")
-    else:
-        if conv.get("user_id") or conv.get("client_id") != user.get("client_id"):
-            raise HTTPException(status_code=403, detail="无权访问该对话")
+    _assert_access(conv, user)
+    from graph.runner.stream import _active_sessions
+    session = _active_sessions.get(conv_id)
+    event = _stop_events.get(conv_id)
+    if event:
+        event.set()
+    if session:
+        session.stop_event.set()
+        if session._graph_task and not session._graph_task.done():
+            session._graph_task.cancel()
+    try:
+        from db.redis_state import publish_stop
+        await asyncio.wait_for(publish_stop(conv_id), timeout=2)
+    except Exception as exc:
+        logger.warning("停止信号广播失败 | conv=%s | %s", conv_id, exc)
+        if not session and conv.get("status") == "streaming":
+            raise HTTPException(status_code=503, detail="无法联系执行进程，请稍后重试停止")
 
-    # 获取或创建 stop event
-...
+    # Both legacy headers and the current JSON client are supported.
+    body = {}
+    if request.headers.get("content-type", "").startswith("application/json"):
+        try:
+            body = await request.json()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="停止请求必须是有效 JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="停止请求必须是 JSON 对象")
+    try:
+        wait_ms = max(100, min(int(body.get("timeout_ms", timeout_ms)), 30000))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="timeout_ms 必须是整数")
+    token = request.headers.get("X-Stop-Token") or body.get("stop_token") or stop_token or ""
+
+    async def confirmation():
+        deadline = time.monotonic() + wait_ms / 1000
+        while True:
+            state = await memory_store.db_get_conversation_meta(conv_id)
+            local_done = session is None or (session._consumer_task is not None and session._consumer_task.done())
+            if local_done and (not state or state.get("status") != "streaming"):
+                saved = await memory_store.db_get_conversation(conv_id)
+                last = next((m for m in reversed((saved or {}).get("messages", [])) if m.get("role") == "assistant"), {})
+                yield sse({SSEEventType.STOP_CONFIRMED.value: True,
+                           "can_continue": bool(last.get("content") or last.get("stream_buffer")),
+                           "reason": "stopped", "stop_token": token})
+                return
+            if time.monotonic() >= deadline:
+                yield sse({SSEEventType.ERROR.value: "停止尚未完成，请稍后重试", "reason": "timeout", "stop_token": token})
+                return
+            await asyncio.sleep(0.1)
+
+    return StreamingResponse(confirmation(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+def _assert_access(conv: dict, user: dict) -> None:
+    if user.get("id"):
+        allowed = conv.get("user_id") == user["id"]
+    else:
+        allowed = not conv.get("user_id") and bool(user.get("client_id")) and conv.get("client_id") == user.get("client_id")
+    if not allowed:
+        raise HTTPException(status_code=403, detail="无权访问该对话")
+
+
 @router.get("/conversations/{conv_id}/resume")
 async def resume_chat(
     conv_id: str,
@@ -149,15 +203,10 @@ async def resume_chat(
     ...
     """
     # 鉴权
-    conv = await memory_store.db_get_conversation(conv_id)
+    conv = await memory_store.db_get_conversation_meta(conv_id)
     if not conv:
         raise HTTPException(status_code=404, detail="对话不存在")
-    if user.get("id"):
-        if conv.get("user_id") != user["id"]:
-            raise HTTPException(status_code=403, detail="无权访问该对话")
-    else:
-        if conv.get("user_id") or conv.get("client_id") != user.get("client_id"):
-            raise HTTPException(status_code=403, detail="无权访问该对话")
+    _assert_access(conv, user)
 
     from graph.runner.stream import resume_stream
 

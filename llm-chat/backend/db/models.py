@@ -236,6 +236,7 @@ class EventLogModel(Base):
     __table_args__ = (
         Index("ix_eventlog_conv", "conv_id"),
         Index("ix_eventlog_conv_id", "conv_id", "id"),
+        Index("ix_eventlog_conv_message_id", "conv_id", "message_id", "id"),
     )
 
 

@@ -28,6 +28,21 @@ _APPEND_COLUMNS = {
 }
 
 
+async def get_prediction_runtime_snapshot(snapshot_id: str):
+    """Lightweight fields for SSE polling/heartbeats, excluding large JSONB.
+
+    Reading filing_digest, tool traces and candle arrays twice per second for
+    every connected tab wastes DB bandwidth and JSON decoding on the API loop.
+    """
+    model = PredictionSnapshotModel
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(
+            model.status, model.client_id, model.user_id, model.criteria,
+            model.error_message,
+        ).where(model.id == snapshot_id))
+        return result.first()
+
+
 async def save_prediction_snapshot(
     snapshot_id: str,
     client_id: str,
@@ -62,20 +77,36 @@ async def update_prediction_status(
     snapshot_id: str,
     status: str,
     error_message: str | None = None,
-) -> None:
+    *,
+    allow_resume: bool = False,
+) -> bool:
     """状态机转换后写库（编排层先 sm.send_event 校验，再调本函数持久化，铁律 #6）。"""
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(PredictionSnapshotModel).where(PredictionSnapshotModel.id == snapshot_id)
+            select(PredictionSnapshotModel)
+            .where(PredictionSnapshotModel.id == snapshot_id).with_for_update()
         )
         snap = result.scalars().first()
         if snap is None:
-            return
+            return False
+        from fsm.prediction import PredictionSM
+        if snap.status == status:
+            return True
+        # Node state can lag behind a pause handled by another API worker.
+        # Only the explicit resume endpoint is allowed to leave paused.
+        if snap.status == "paused" and status != "stopped" and not allow_resume:
+            logger.info("拒绝覆盖已暂停预测 %s → %s", snapshot_id, status)
+            return False
+        sm = PredictionSM.from_db_status(snap.status)
+        if sm.send_event(status) != status:
+            logger.warning("拒绝预测状态写入 %s: %s → %s", snapshot_id, snap.status, status)
+            return False
         snap.status = status
         if error_message is not None:
             snap.error_message = error_message
         snap.updated_at = time.time()
         await session.commit()
+        return True
 
 
 async def update_prediction_progress(snapshot_id: str, progress: dict) -> None:
@@ -613,21 +644,50 @@ async def list_prediction_records(
 
 
 async def cleanup_stale_prediction_sessions(timeout_minutes: int | None = None) -> int:
-    """系统启动时或定时调用：清理卡在 queued/news_searching/inferring 的旧任务（仿 quant cleanup）。"""
+    """Pause abandoned jobs without touching another worker's active prediction.
+
+    A fresh API worker is not evidence that every other worker died. Reuse the
+    execution lease to arbitrate recovery, then lock/recheck DB state and age.
+    Redis failure skips cleanup rather than guessing that a live owner is dead.
+    """
+    from graph.prediction import runtime
+    from fsm.prediction import PredictionSM
+
+    grace = max(60.0, float(timeout_minutes or 1) * 60)
+    cutoff = time.time() - grace
+    model = PredictionSnapshotModel
+    running = ("queued", "news_searching", "inferring")
     async with AsyncSessionLocal() as session:
-        stmt = update(PredictionSnapshotModel).where(
-            PredictionSnapshotModel.status.in_(["queued", "news_searching", "inferring"])
-        )
-
-        if timeout_minutes is not None:
-            cutoff_ts = time.time() - (timeout_minutes * 60)
-            stmt = stmt.where(PredictionSnapshotModel.created_at < cutoff_ts)
-            reason = f"预测任务超时（超过 {timeout_minutes} 分钟未完成）"
-        else:
-            reason = "服务重启，预测任务已中断"
-
-        stmt = stmt.values(status="failed", error_message=reason, updated_at=time.time())
-        result = await session.execute(stmt)
-        count = result.rowcount
-        await session.commit()
-        return count
+        rows = (await session.execute(select(model.id).where(
+            model.status.in_(running), model.updated_at < cutoff,
+        ))).scalars().all()
+    count = 0
+    for snapshot_id in rows:
+        try:
+            token = await runtime.acquire(snapshot_id)
+        except Exception:
+            logger.exception("预测启动清理无法确认owner，跳过 pred=%s", snapshot_id)
+            continue
+        if token is None:
+            continue
+        try:
+            async with AsyncSessionLocal() as session:
+                snap = (await session.execute(select(model).where(
+                    model.id == snapshot_id,
+                ).with_for_update())).scalars().first()
+                if snap is None or snap.status not in running or (snap.updated_at or 0) >= cutoff:
+                    continue
+                sm = PredictionSM.from_db_status(snap.status)
+                if sm.send_event("paused") != "paused":
+                    continue
+                snap.status = "paused"
+                snap.error_message = "执行进程已中断，已保留完成结果，可点击继续"
+                snap.updated_at = time.time()
+                await session.commit()
+                count += 1
+        finally:
+            try:
+                await runtime.release(snapshot_id, token)
+            except Exception:
+                logger.exception("预测启动清理释放租约失败 pred=%s", snapshot_id)
+    return count
